@@ -12,13 +12,12 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiGet, ApiError } from '@/lib/api';
+import { ALL_CATEGORY_VALUE } from '@/lib/constants';
 import type { Category, Item } from '@/lib/types';
 
 function num(value: number) {
   return Number(value || 0).toLocaleString('ko-KR');
 }
-
-const ALL_CATEGORY_VALUE = '__all__';
 
 export default function AlertsPage() {
   const router = useRouter();

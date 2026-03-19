@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
+import { ALL_CATEGORY_VALUE, INVENTORY_REFRESH_EVENT } from '@/lib/constants';
 import { formatDateTime } from '@/lib/format';
 import { Category, Item, StockTransaction } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -53,8 +54,6 @@ type ItemFormState = {
   memo: string;
 };
 
-const ALL_CATEGORY_VALUE = '__all__';
-const INVENTORY_REFRESH_EVENT = 'inventory:state-updated';
 
 function notifyInventoryStateUpdated() {
   if (typeof window === 'undefined') return;
