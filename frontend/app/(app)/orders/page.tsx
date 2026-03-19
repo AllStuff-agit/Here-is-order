@@ -41,6 +41,12 @@ type PrefillInfo = {
   qty: number;
 };
 
+type PrefillItem = {
+  item_id: number;
+  quantity: number;
+  unit_price: number;
+};
+
 export default function OrdersPage() {
   const router = useRouter();
   const [prefillInfo, setPrefillInfo] = React.useState<PrefillInfo>({ itemId: null, qty: 1 });
@@ -180,18 +186,29 @@ export default function OrdersPage() {
     }
   };
 
-  const createDraftOrderAndOpen = async (title: string, note: string | null) => {
+  const createDraftOrderAndOpen = async (title: string, note: string | null, prefillItems?: PrefillItem[]) => {
     if (creatingOrder) return;
     try {
       setCreatingOrder(true);
       setNewDraftError('');
-      const created = await apiPost<PurchaseOrder>('/api/purchase-orders', {
-        title,
-        note,
-        status: 'draft',
-      });
+      let createdId: number;
+      if (prefillItems && prefillItems.length > 0) {
+        const created = await apiPost<PurchaseOrder>('/api/purchase-orders/with-items', {
+          order_date: new Date().toISOString().slice(0, 10),
+          notes: note ?? '',
+          items: prefillItems,
+        });
+        createdId = created.id;
+      } else {
+        const created = await apiPost<PurchaseOrder>('/api/purchase-orders', {
+          title,
+          note,
+          status: 'draft',
+        });
+        createdId = created.id;
+      }
       setCreateDraftOpen(false);
-      router.push(`/orders/${created.id}`);
+      router.push(`/orders/${createdId}`);
     } catch (e) {
       setNewDraftError(e instanceof Error ? e.message : '새 발주서 생성에 실패했습니다.');
     } finally {
