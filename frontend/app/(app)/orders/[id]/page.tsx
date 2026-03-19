@@ -447,7 +447,14 @@ export default function OrderDetailPage() {
       </div>
 
       {error ? (
-        <Card className="border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</Card>
+        <Card className="border-destructive/40 bg-destructive/10 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm text-destructive">{error}</p>
+            <Button variant="outline" size="sm" onClick={() => void loadOrderDetail()}>
+              다시 시도
+            </Button>
+          </div>
+        </Card>
       ) : null}
       {message ? <p className="rounded-md bg-muted px-3 py-2 text-sm">{message}</p> : null}
 

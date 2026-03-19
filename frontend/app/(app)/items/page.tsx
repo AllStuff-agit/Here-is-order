@@ -467,9 +467,12 @@ export default function ItemsPage() {
               <div className="h-12 animate-pulse rounded bg-muted" />
             </div>
           ) : error ? (
-            <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </p>
+            <div className="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2">
+              <p className="text-sm text-destructive">{error}</p>
+              <Button variant="outline" size="sm" className="w-fit" onClick={() => void loadSeed()}>
+                다시 시도
+              </Button>
+            </div>
           ) : (
             <>
               <div className="space-y-2 md:hidden">
