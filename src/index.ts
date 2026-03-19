@@ -297,6 +297,8 @@ app.post('/api/auth/login', async (c) => {
   const [header, value] = authSetCookie(sid, new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
 
+  void c.env.DB.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now')`).run().catch(() => {});
+
   await writeAudit(c.env.DB, user.id, 'login', 'user', user.id, undefined, { username: user.username });
 
   return c.json(apiOk({ user: { id: user.id, username: user.username, name: user.name } }));
@@ -315,6 +317,8 @@ app.post('/api/auth/logout', async (c) => {
 
   const [header, value] = authClearCookie(new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
+
+  void c.env.DB.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now')`).run().catch(() => {});
 
   await writeAudit(c.env.DB, user.id, 'logout', 'user', user.id);
   return c.json(apiOk({ loggedOut: true }));
