@@ -144,10 +144,14 @@ async function verifyPassword(value: string, storedHash: string) {
 
     try {
       const actualHash = await derivePasswordHash(value, hexToBytes(saltHex), iterations);
-      return {
-        valid: constantTimeEqual(actualHash, expectedHash),
-        upgradedHash: null,
-      };
+      if (!constantTimeEqual(actualHash, expectedHash)) {
+        return { valid: false, upgradedHash: null };
+      }
+      // 반복횟수가 현재 기준보다 낮으면 업그레이드
+      const upgradedHash = iterations < PASSWORD_HASH_ITERATIONS
+        ? await hashPassword(value)
+        : null;
+      return { valid: true, upgradedHash };
     } catch {
       return { valid: false, upgradedHash: null };
     }
@@ -769,8 +773,9 @@ app.get('/api/purchase-orders', async (c) => {
   }
 
   if (q) {
-    where.push('(po.title LIKE ? OR po.note LIKE ?)');
-    const like = `%${q}%`;
+    where.push('(po.title LIKE ? ESCAPE \'\\\\\' OR po.note LIKE ? ESCAPE \'\\\\\')');
+    const escaped = q.replace(/[%_\\]/g, '\\$&');
+    const like = `%${escaped}%`;
     params.push(like, like);
   }
 
