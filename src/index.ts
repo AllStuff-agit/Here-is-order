@@ -843,6 +843,91 @@ app.post('/api/purchase-orders', async (c) => {
   return c.json(apiOk(row));
 });
 
+app.post('/api/purchase-orders/with-items', async (c) => {
+  const user = c.get('user') as SessionUser;
+  const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const title = String(payload.title || '').trim();
+  const note = payload.note == null ? null : String(payload.note);
+
+  if (!title) return c.json(apiErr('INVALID_INPUT', '발주명은 필수입니다.'), 400);
+
+  const rawItems = Array.isArray(payload.items) ? (payload.items as Array<{ item_id?: unknown; ordered_qty?: unknown; memo?: unknown }>) : [];
+  if (!rawItems.length) return c.json(apiErr('INVALID_INPUT', '품목 목록은 비어있을 수 없습니다.'), 400);
+
+  const parsedItems = rawItems
+    .map((row) => {
+      const itemId = parseIntValue(row.item_id == null ? undefined : String(row.item_id), null);
+      const orderedQty = parseIntValue(row.ordered_qty == null ? undefined : String(row.ordered_qty), null);
+      const memo = row.memo == null ? null : String(row.memo);
+      if (itemId === null || orderedQty === null || orderedQty <= 0) return null;
+      return { itemId, orderedQty, memo };
+    })
+    .filter((v): v is { itemId: number; orderedQty: number; memo: string | null } => v !== null);
+
+  if (!parsedItems.length) return c.json(apiErr('INVALID_INPUT', '항목과 수량을 확인해주세요.'), 400);
+
+  // 발주서 생성
+  const r = await c.env.DB.prepare(
+    `INSERT INTO purchase_orders (title, status, note) VALUES (?, ?, ?)`
+  ).bind(title, 'draft', note).run();
+
+  const orderId = Number(r.meta.last_row_id);
+
+  // 품목 추가 (실패 시 보상 트랜잭션으로 발주서 삭제)
+  try {
+    for (const row of parsedItems) {
+      const item = await c.env.DB.prepare('SELECT id FROM items WHERE id = ? AND is_deleted = 0').bind(row.itemId).first();
+      if (!item) {
+        throw new Error(`존재하지 않는 품목입니다. (id=${row.itemId})`);
+      }
+    }
+
+    for (const row of parsedItems) {
+      const existing = await c.env.DB.prepare(
+        `SELECT id, ordered_qty, received_qty, memo FROM order_items WHERE order_id = ? AND item_id = ? AND is_deleted = 0`
+      ).bind(orderId, row.itemId).first<{ id: number; ordered_qty: number; received_qty: number; memo: string | null }>();
+
+      let orderItemId: number;
+      let action: 'create' | 'update';
+      let before: unknown = null;
+
+      if (existing) {
+        before = { id: existing.id, order_id: orderId, item_id: row.itemId, ordered_qty: existing.ordered_qty, received_qty: existing.received_qty, memo: existing.memo };
+        const nextQty = existing.ordered_qty + row.orderedQty;
+        await c.env.DB.prepare('UPDATE order_items SET ordered_qty = ?, memo = ?, updated_at = datetime("now") WHERE id = ?')
+          .bind(nextQty, row.memo, existing.id).run();
+        orderItemId = existing.id;
+        action = 'update';
+      } else {
+        const inserted = await c.env.DB.prepare(
+          `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo) VALUES (?, ?, ?, 0, ?)`
+        ).bind(orderId, row.itemId, row.orderedQty, row.memo).run();
+        orderItemId = Number(inserted.meta.last_row_id);
+        action = 'create';
+      }
+
+      const after = await c.env.DB.prepare(
+        `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo FROM order_items oi WHERE oi.id = ?`
+      ).bind(orderItemId).first();
+
+      if (after) {
+        await writeAudit(c.env.DB, user.id, action, 'order_item', Number(after.id), before ?? undefined, after);
+      }
+    }
+
+    await c.env.DB.prepare('UPDATE purchase_orders SET updated_at = datetime("now") WHERE id = ?').bind(orderId).run();
+  } catch (err) {
+    // 보상 트랜잭션: 생성된 발주서 삭제
+    await c.env.DB.prepare('UPDATE purchase_orders SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?').bind(orderId).run();
+    const message = err instanceof Error ? err.message : '품목 추가 중 오류가 발생했습니다.';
+    return c.json(apiErr('INVALID_INPUT', message), 400);
+  }
+
+  const orderRow = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0').bind(orderId).first();
+  await writeAudit(c.env.DB, user.id, 'create', 'purchase_order', orderId, undefined, orderRow);
+  return c.json(apiOk({ id: orderId, title }), 201);
+});
+
 app.get('/api/purchase-orders/:id', async (c) => {
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
