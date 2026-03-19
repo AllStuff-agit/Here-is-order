@@ -465,7 +465,15 @@ app.get('/api/items', async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT i.id, i.category_id, c.name AS category_name, i.name, i.spec, i.unit, i.safety_stock,
             i.min_stock, i.current_stock, i.unit_price, i.memo, i.created_at, i.updated_at,
-            MAX(0, i.safety_stock - i.current_stock) AS suggested_qty
+            MAX(0, i.safety_stock - i.current_stock - (
+              SELECT COALESCE(SUM(oi.ordered_qty - oi.received_qty), 0)
+              FROM order_items oi
+              JOIN purchase_orders po ON po.id = oi.order_id
+              WHERE oi.item_id = i.id
+                AND oi.is_deleted = 0
+                AND po.is_deleted = 0
+                AND po.status NOT IN ('canceled', 'fully_received')
+            )) AS suggested_qty
        FROM items i
        LEFT JOIN item_categories c ON c.id = i.category_id
        ${where}
@@ -661,18 +669,25 @@ app.post('/api/stock/adjust', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '재고가 음수가 됩니다. 현재고를 확인해주세요.'), 400);
   }
 
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE items
-          SET current_stock = current_stock + ?,
-              updated_at = datetime('now')
-        WHERE id = ?`
-    ).bind(delta, itemId),
+  const updateStmt = c.env.DB.prepare(
+    `UPDATE items
+        SET current_stock = current_stock + ?,
+            updated_at = datetime('now')
+      WHERE id = ?
+        AND (current_stock + ? >= 0 OR ? > 0)`
+  ).bind(delta, itemId, delta, delta);
+
+  const batchResult = await c.env.DB.batch([
+    updateStmt,
     c.env.DB.prepare(
       `INSERT INTO stock_transactions (item_id, movement_type, quantity, reason, order_item_id, created_by)
        VALUES (?, ?, ?, ?, ?, ?)`
     ).bind(itemId, movementType, delta, reason, orderItemId, user.id),
   ]);
+
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '재고가 음수가 되어 조정할 수 없습니다. 현재 재고를 확인해주세요.'), 409);
+  }
 
   const after = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(itemId).first();
   await writeAudit(c.env.DB, user.id, 'stock_adjust', 'item', itemId, { current_stock: item.current_stock }, after);
@@ -689,7 +704,15 @@ app.get('/api/dashboard', async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT i.id, i.name, i.current_stock, i.safety_stock,
             i.min_stock,
-            MAX(0, i.safety_stock - i.current_stock) AS suggested_qty
+            MAX(0, i.safety_stock - i.current_stock - (
+              SELECT COALESCE(SUM(oi.ordered_qty - oi.received_qty), 0)
+              FROM order_items oi
+              JOIN purchase_orders po ON po.id = oi.order_id
+              WHERE oi.item_id = i.id
+                AND oi.is_deleted = 0
+                AND po.is_deleted = 0
+                AND po.status NOT IN ('canceled', 'fully_received')
+            )) AS suggested_qty
        FROM items i
       WHERE i.is_deleted = 0
         AND i.safety_stock > 0
