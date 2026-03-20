@@ -3,13 +3,17 @@
 import * as React from 'react';
 import { ChevronDown, Minus, PackageSearch, ReceiptText, TrendingDown, TrendingUp, Warehouse } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { apiGet, ApiError } from '@/lib/api';
+import { apiGet, apiPost, ApiError } from '@/lib/api';
 import type { DashboardData } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { ShoppingCart } from 'lucide-react';
 
 type MetricTone = 'default' | 'secondary' | 'destructive';
 
@@ -58,6 +62,180 @@ function MetricCard({
   );
 }
 
+type RowState = { selected: boolean; qty: string };
+
+function QuickOrderDialog({
+  items,
+  open,
+  onOpenChange,
+  onSuccess,
+}: {
+  items: DashboardData['low_stock_items'];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSuccess: (orderId: number) => void;
+}) {
+  const [rows, setRows] = React.useState<Record<number, RowState>>({});
+  const [title, setTitle] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  React.useEffect(() => {
+    if (!open) return;
+    const initial: Record<number, RowState> = {};
+    for (const item of items) {
+      initial[item.id] = { selected: true, qty: String(Math.max(1, Number(item.suggested_qty || 1))) };
+    }
+    setRows(initial);
+    setTitle(`긴급 발주 ${new Date().toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })}`);
+    setError('');
+  }, [open, items]);
+
+  const selectedCount = items.filter((item) => rows[item.id]?.selected).length;
+  const allSelected = selectedCount === items.length && items.length > 0;
+  const someSelected = selectedCount > 0 && !allSelected;
+
+  function toggleAll(checked: boolean | 'indeterminate') {
+    const next = checked === true;
+    setRows((prev) => {
+      const updated = { ...prev };
+      for (const item of items) updated[item.id] = { ...updated[item.id], selected: next };
+      return updated;
+    });
+  }
+
+  function toggleRow(id: number) {
+    setRows((prev) => ({ ...prev, [id]: { ...prev[id], selected: !prev[id]?.selected } }));
+  }
+
+  function setQty(id: number, value: string) {
+    setRows((prev) => ({ ...prev, [id]: { ...prev[id], qty: value } }));
+  }
+
+  async function handleSubmit() {
+    const selectedItems = items
+      .filter((item) => rows[item.id]?.selected)
+      .map((item) => ({
+        item_id: item.id,
+        ordered_qty: Math.max(1, parseInt(rows[item.id]?.qty || '1', 10) || 1),
+        memo: null,
+      }));
+
+    if (!selectedItems.length) { setError('품목을 1개 이상 선택해주세요.'); return; }
+    if (!title.trim()) { setError('발주명을 입력해주세요.'); return; }
+
+    setSubmitting(true);
+    setError('');
+    try {
+      const order = await apiPost<{ id: number; title: string }>('/api/purchase-orders/with-items', {
+        title: title.trim(),
+        items: selectedItems,
+      });
+      onSuccess(order.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '발주 생성에 실패했습니다.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>바로 발주</DialogTitle>
+          <DialogDescription>선택한 품목으로 발주서를 즉시 생성합니다.</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <Label htmlFor="quick-order-title">발주명</Label>
+            <Input
+              id="quick-order-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              disabled={submitting}
+              autoFocus
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="quick-order-all"
+              checked={allSelected ? true : someSelected ? 'indeterminate' : false}
+              onCheckedChange={toggleAll}
+              disabled={submitting}
+            />
+            <Label htmlFor="quick-order-all" className="cursor-pointer font-normal">
+              전체 선택 ({selectedCount}/{items.length})
+            </Label>
+          </div>
+
+          <div className="max-h-[40vh] overflow-y-auto rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10" />
+                  <TableHead>품목명</TableHead>
+                  <TableHead className="text-right">현재고</TableHead>
+                  <TableHead className="w-24 text-right">발주수량</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map((item) => {
+                  const row = rows[item.id];
+                  const selected = row?.selected ?? true;
+                  return (
+                    <TableRow key={item.id} className={selected ? '' : 'opacity-40'}>
+                      <TableCell>
+                        <Checkbox
+                          checked={selected}
+                          onCheckedChange={() => toggleRow(item.id)}
+                          disabled={submitting}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <div className="font-medium">{item.name}</div>
+                        {item.category_name ? (
+                          <div className="text-xs text-muted-foreground">{item.category_name}</div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell className="text-right text-sm tabular-nums">
+                        {Number(item.current_stock || 0).toLocaleString('ko-KR')}개
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Input
+                          type="number"
+                          min="1"
+                          value={row?.qty ?? '1'}
+                          onChange={(e) => setQty(item.id, e.target.value)}
+                          disabled={!selected || submitting}
+                          className="h-8 w-20 text-right"
+                        />
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+
+          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
+            취소
+          </Button>
+          <Button onClick={() => void handleSubmit()} disabled={submitting || selectedCount === 0}>
+            {submitting ? '생성 중...' : `발주서 생성 (${selectedCount}개 품목)`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function getDefaultFrom() {
   const date = new Date();
   date.setDate(date.getDate() - 29);
@@ -75,6 +253,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = React.useState(true);
   const [data, setData] = React.useState<DashboardData | null>(null);
   const [error, setError] = React.useState('');
+  const [quickOrderOpen, setQuickOrderOpen] = React.useState(false);
 
   const loadDashboard = React.useCallback(async () => {
     setLoading(true);
@@ -181,9 +360,17 @@ export default function DashboardPage() {
                   <CardTitle>발주 필요 품목</CardTitle>
                   <CardDescription>현재고가 안전재고보다 낮은 항목입니다.</CardDescription>
                 </div>
-                <Button variant="outline" onClick={() => router.push('/alerts')}>
-                  전체 보기
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => router.push('/alerts')}>
+                    전체 보기
+                  </Button>
+                  {data.low_stock_items.length > 0 ? (
+                    <Button size="sm" onClick={() => setQuickOrderOpen(true)}>
+                      <ShoppingCart className="size-4" />
+                      바로 발주
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -268,6 +455,18 @@ export default function DashboardPage() {
           </div>
         </>
       )}
+
+      {data ? (
+        <QuickOrderDialog
+          items={data.low_stock_items}
+          open={quickOrderOpen}
+          onOpenChange={setQuickOrderOpen}
+          onSuccess={(orderId) => {
+            setQuickOrderOpen(false);
+            router.push(`/orders/${orderId}`);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
