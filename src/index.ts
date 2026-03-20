@@ -597,6 +597,16 @@ app.delete('/api/items/:id', async (c) => {
   const before = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
   if (!before) return c.json(apiErr('NOT_FOUND', '품목을 찾지 못했습니다.'), 404);
 
+  const outstanding = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS cnt FROM order_items oi
+       JOIN purchase_orders po ON po.id = oi.order_id
+      WHERE oi.item_id = ? AND oi.is_deleted = 0
+        AND po.is_deleted = 0 AND po.status NOT IN ('fully_received', 'canceled')`
+  ).bind(id).first<{ cnt: number }>();
+  if (outstanding && outstanding.cnt > 0) {
+    return c.json(apiErr('CONFLICT', '미완료 발주서에 포함된 품목은 삭제할 수 없습니다.'), 409);
+  }
+
   await c.env.DB.prepare('UPDATE items SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?')
     .bind(id)
     .run();
@@ -1289,8 +1299,8 @@ app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
   }
 
   const newReceived = target.received_qty + qty;
-  const item = await c.env.DB.prepare('SELECT current_stock FROM items WHERE id = ? AND is_deleted = 0').bind(target.item_id).first<{ current_stock: number }>();
-  if (!item) return c.json(apiErr('INVALID_INPUT', '품목이 삭제되었거나 존재하지 않습니다.'), 404);
+  const item = await c.env.DB.prepare('SELECT current_stock FROM items WHERE id = ?').bind(target.item_id).first<{ current_stock: number }>();
+  if (!item) return c.json(apiErr('INVALID_INPUT', '품목을 찾지 못했습니다.'), 404);
 
   await c.env.DB.batch([
     c.env.DB.prepare('UPDATE order_items SET received_qty = ?, updated_at = datetime("now") WHERE id = ?')

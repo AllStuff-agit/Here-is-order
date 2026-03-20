@@ -215,10 +215,13 @@ export default function ItemsPage() {
       await loadSeed();
       notifyInventoryStateUpdated();
       resetSubmitMessage('품목이 삭제되었습니다.');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '삭제에 실패했습니다.');
-    } finally {
       setDeleteTarget(null);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        resetSubmitMessage('미완료 발주서에 포함된 품목은 삭제할 수 없습니다. 발주서를 완료하거나 취소한 후 삭제해주세요.');
+      } else {
+        resetSubmitMessage(e instanceof Error ? e.message : '삭제에 실패했습니다.');
+      }
     }
   };
 
