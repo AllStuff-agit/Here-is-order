@@ -58,8 +58,12 @@ export default function OrdersPage() {
   const [orders, setOrders] = React.useState<PurchaseOrder[]>([]);
   const [items, setItems] = React.useState<Item[]>([]);
   const [statusFilter, setStatusFilter] = React.useState<BusinessStatusFilter>('all');
-  const [from, setFrom] = React.useState('');
-  const [to, setTo] = React.useState('');
+  const [from, setFrom] = React.useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  });
+  const [to, setTo] = React.useState(() => new Date().toISOString().slice(0, 10));
   const [search, setSearch] = React.useState('');
 
   const [deleteTarget, setDeleteTarget] = React.useState<PurchaseOrder | null>(null);
@@ -339,6 +343,25 @@ export default function OrdersPage() {
               <CardDescription>총 {filteredOrders.length}건</CardDescription>
             </div>
           </div>
+          {!loading && orders.length > 0 ? (() => {
+            const activeOrders = orders.filter(o => o.status !== 'canceled' && o.status !== 'fully_received');
+            const pendingQty = activeOrders.reduce((sum, o) => sum + Math.max(0, Number(o.ordered_qty || 0) - Number(o.received_qty || 0)), 0);
+            const receivedQty = orders.reduce((sum, o) => sum + Number(o.received_qty || 0), 0);
+            const openCount = activeOrders.length;
+            return (
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <Badge variant={openCount > 0 ? 'destructive' : 'secondary'}>
+                  미완료 발주 {openCount}건
+                </Badge>
+                <Badge variant="outline">
+                  미입고 수량 {pendingQty.toLocaleString('ko-KR')}개
+                </Badge>
+                <Badge variant="secondary">
+                  누적 입고 {receivedQty.toLocaleString('ko-KR')}개
+                </Badge>
+              </div>
+            );
+          })() : null}
         </CardHeader>
         <CardContent>
           {loading ? (

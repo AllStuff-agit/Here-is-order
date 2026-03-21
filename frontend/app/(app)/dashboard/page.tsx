@@ -1,9 +1,9 @@
 'use client';
 
 import * as React from 'react';
-import { ChevronDown, Minus, PackageSearch, ReceiptText, TrendingDown, TrendingUp, Warehouse } from 'lucide-react';
+import { ChevronDown, Minus, TrendingDown, TrendingUp } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { apiGet, apiPost, ApiError } from '@/lib/api';
+import { apiGet, apiPost, apiPatch, ApiError } from '@/lib/api';
 import type { DashboardData } from '@/lib/types';
 import { getStockStatus, stockStatusLabel } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
@@ -89,7 +89,11 @@ function QuickOrderDialog({
       initial[item.id] = { selected: needsMore, qty: String(Math.max(1, Number(item.suggested_qty || 1))) };
     }
     setRows(initial);
-    setTitle(`긴급 발주 ${new Date().toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })}`);
+    const now = new Date();
+    const yy = String(now.getFullYear()).slice(2);
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    setTitle(`${yy}${mm}${dd} 발주`);
     setError('');
   }, [open, items]);
 
@@ -115,7 +119,7 @@ function QuickOrderDialog({
     setRows((prev) => ({ ...prev, [id]: { ...prev[id], qty: value } }));
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(confirm: boolean) {
     const selectedItems = items
       .filter((item) => rows[item.id]?.selected)
       .map((item) => ({
@@ -134,6 +138,9 @@ function QuickOrderDialog({
         title: title.trim(),
         items: selectedItems,
       });
+      if (confirm) {
+        await apiPatch(`/api/purchase-orders/${order.id}`, { status: 'ordered' });
+      }
       onSuccess(order.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : '발주 생성에 실패했습니다.');
@@ -227,7 +234,7 @@ function QuickOrderDialog({
                               <span className="text-xs text-blue-600 dark:text-blue-400">발주중 {onOrderQty.toLocaleString('ko-KR')}개</span>
                             ) : null}
                             {fullyCovered ? (
-                              <span className="text-xs text-muted-foreground">입고 대기 중</span>
+                              <span className="text-xs text-muted-foreground">발주 처리 중</span>
                             ) : null}
                           </div>
                         </TableCell>
@@ -263,8 +270,11 @@ function QuickOrderDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
             취소
           </Button>
-          <Button onClick={() => void handleSubmit()} disabled={submitting || selectedCount === 0}>
-            {submitting ? '생성 중...' : `발주서 생성 (${selectedCount}개 품목)`}
+          <Button variant="outline" onClick={() => void handleSubmit(false)} disabled={submitting || selectedCount === 0}>
+            {submitting ? '처리 중...' : '발주초안 저장'}
+          </Button>
+          <Button onClick={() => void handleSubmit(true)} disabled={submitting || selectedCount === 0}>
+            {submitting ? '처리 중...' : `발주 확정 (${selectedCount}개 품목)`}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -382,11 +392,6 @@ export default function DashboardPage() {
               value={data.monthly_summary.open_qty}
               description="아직 입고되지 않은 수량"
             />
-            <MetricCard
-              title="최근 입고 수량"
-              value={data.monthly_summary.received_qty}
-              description={`${data.monthly_summary.period_from} ~ ${data.monthly_summary.period_to}`}
-            />
           </div>
             );
           })()}
@@ -412,6 +417,17 @@ export default function DashboardPage() {
               </div>
             </CardHeader>
             <CardContent>
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                <Badge variant={data.low_stock_count > 0 ? 'destructive' : 'secondary'}>
+                  발주 필요 {data.low_stock_count}건
+                </Badge>
+                <Badge variant="outline">
+                  미입고 발주 {Number(data.monthly_summary.orders_open).toLocaleString('ko-KR')}건
+                </Badge>
+                <Badge variant="secondary">
+                  기간: {data.monthly_summary.period_from} ~ {data.monthly_summary.period_to}
+                </Badge>
+              </div>
               {data.low_stock_items.length === 0 ? (
                 <p className="data-empty">현재 발주가 필요한 품목이 없습니다.</p>
               ) : (
@@ -459,7 +475,7 @@ export default function DashboardPage() {
                               </TableCell>
                               <TableCell className="text-right">
                                 {fullyCovered ? (
-                                  <Badge variant="outline">입고대기</Badge>
+                                  <Badge variant="outline">발주중</Badge>
                                 ) : (
                                   <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'}>
                                     {stockStatusLabel(status)}
@@ -477,46 +493,6 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">바로가기</CardTitle>
-                <CardDescription>자주 쓰는 업무로 바로 이동</CardDescription>
-              </CardHeader>
-              <CardContent className="toolbar">
-                <Button variant="outline" onClick={() => router.push('/items')}>
-                  <PackageSearch className="size-4" />
-                  품목관리로 이동
-                </Button>
-                <Button variant="outline" onClick={() => router.push('/orders')}>
-                  <ReceiptText className="size-4" />
-                  발주관리로 이동
-                </Button>
-                <Button variant="outline" onClick={() => router.push('/alerts')}>
-                  <Warehouse className="size-4" />
-                  알림으로 이동
-                </Button>
-              </CardContent>
-            </Card>
-
-            <Card className="md:col-span-2">
-              <CardHeader>
-                <CardTitle className="text-base">알림 요약</CardTitle>
-                <CardDescription>최근 기간 기준 발주 알림 상태</CardDescription>
-              </CardHeader>
-              <CardContent className="toolbar">
-                <Badge variant={data.low_stock_count > 0 ? 'destructive' : 'secondary'}>
-                  발주 필요 {data.low_stock_count}건
-                </Badge>
-                <Badge variant="outline">
-                  미입고 발주 {Number(data.monthly_summary.orders_open).toLocaleString('ko-KR')}건
-                </Badge>
-                <Badge variant="secondary">
-                  안전재고 임계치 계산 기준: 현재고 ≤ 안전재고
-                </Badge>
-              </CardContent>
-            </Card>
-          </div>
         </>
       )}
 
