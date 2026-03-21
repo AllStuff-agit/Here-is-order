@@ -93,15 +93,16 @@ function QuickOrderDialog({
     setError('');
   }, [open, items]);
 
+  const selectableItems = items.filter((item) => Number(item.suggested_qty || 0) > 0);
   const selectedCount = items.filter((item) => rows[item.id]?.selected).length;
-  const allSelected = selectedCount === items.length && items.length > 0;
+  const allSelected = selectedCount === selectableItems.length && selectableItems.length > 0;
   const someSelected = selectedCount > 0 && !allSelected;
 
   function toggleAll(checked: boolean | 'indeterminate') {
     const next = checked === true;
     setRows((prev) => {
       const updated = { ...prev };
-      for (const item of items) updated[item.id] = { ...updated[item.id], selected: next };
+      for (const item of selectableItems) updated[item.id] = { ...updated[item.id], selected: next };
       return updated;
     });
   }
@@ -203,12 +204,12 @@ function QuickOrderDialog({
                     const fullyCovered = suggestedQty === 0;
                     const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                     return (
-                      <TableRow key={item.id} className={selected ? '' : 'opacity-50'}>
+                      <TableRow key={item.id} className={fullyCovered ? 'opacity-40' : selected ? '' : 'opacity-50'}>
                         <TableCell>
                           <Checkbox
                             checked={selected}
                             onCheckedChange={() => toggleRow(item.id)}
-                            disabled={submitting}
+                            disabled={submitting || fullyCovered}
                           />
                         </TableCell>
                         <TableCell>
