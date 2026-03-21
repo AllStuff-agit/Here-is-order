@@ -59,7 +59,7 @@ export default function LoginPage() {
             <div className="mx-auto inline-flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
               <Coffee className="size-5" />
             </div>
-            <CardTitle className="text-xl">카페 발주 관리</CardTitle>
+            <CardTitle className="text-xl">Here is order</CardTitle>
             <CardDescription>관리자 1명 운영용 발주 모니터링 서비스</CardDescription>
           </CardHeader>
           <CardContent>

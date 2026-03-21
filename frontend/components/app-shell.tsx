@@ -170,7 +170,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </SheetTrigger>
             <SheetContent side="left" className="w-[84vw] sm:w-[360px]">
               <SheetHeader className="space-y-1">
-                <SheetTitle>카페 발주 관리</SheetTitle>
+                <SheetTitle>Here is order</SheetTitle>
                 <SheetDescription>관리자 전용 앱</SheetDescription>
               </SheetHeader>
               <div className="mt-4">
@@ -192,7 +192,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           <Link href="/dashboard" className="inline-flex items-center gap-2 font-semibold">
             <Home className="size-4 text-primary" />
-            <span className="text-sm md:text-base">카페 발주 관리</span>
+            <span className="text-sm md:text-base">Here is order</span>
           </Link>
 
           <Badge variant={statusTone(lowStockCount)} className="ml-1 gap-1">

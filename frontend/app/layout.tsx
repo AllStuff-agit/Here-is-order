@@ -4,7 +4,7 @@ import { AppShell } from '@/components/app-shell';
 import { Inter } from "next/font/google";
 
 export const metadata: Metadata = {
-  title: "카페 발주 관리",
+  title: "Here is order",
   description: "재고 갱신과 발주 관리 대시보드",
 };
 
