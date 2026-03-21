@@ -460,7 +460,7 @@ app.get('/api/items', async (c) => {
 
   if (needReorder) {
     whereClauses.push('i.safety_stock > 0');
-    whereClauses.push('i.current_stock <= i.safety_stock');
+    whereClauses.push('i.current_stock < i.safety_stock');
   }
 
   if (q) {
@@ -740,7 +740,7 @@ app.get('/api/dashboard', async (c) => {
        LEFT JOIN item_categories c ON c.id = i.category_id
       WHERE i.is_deleted = 0
         AND i.safety_stock > 0
-        AND i.current_stock <= i.safety_stock`
+        AND i.current_stock < i.safety_stock`
   ).all();
 
   const lowStockItems = rows.results as Array<Record<string, unknown>>;
