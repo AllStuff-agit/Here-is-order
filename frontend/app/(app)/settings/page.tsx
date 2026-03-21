@@ -12,11 +12,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import { AppUser } from '@/lib/types';
+import { useSortable } from '@/lib/use-sortable';
+import { SortableHeader } from '@/components/sortable-header';
 
 export default function SettingsPage() {
   const [users, setUsers] = React.useState<AppUser[]>([]);
   const [usersLoading, setUsersLoading] = React.useState(true);
   const [usersError, setUsersError] = React.useState('');
+
+  const { sorted: sortedUsers, sort: usersSort, toggle: usersToggle } = useSortable(users);
 
   const [addOpen, setAddOpen] = React.useState(false);
   const [addUsername, setAddUsername] = React.useState('');
@@ -176,14 +180,14 @@ export default function SettingsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>아이디</TableHead>
-                  <TableHead>이름</TableHead>
+                  <SortableHeader label="아이디" sortKey="username" sort={usersSort} onSort={usersToggle} />
+                  <SortableHeader label="이름" sortKey="name" sort={usersSort} onSort={usersToggle} />
                   <TableHead>상태</TableHead>
-                  <TableHead>생성일</TableHead>
+                  <SortableHeader label="생성일" sortKey="created_at" sort={usersSort} onSort={usersToggle} />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {users.map((u) => (
+                {sortedUsers.map((u) => (
                   <TableRow key={u.id}>
                     <TableCell className="font-medium">{u.username}</TableCell>
                     <TableCell>{u.name}</TableCell>

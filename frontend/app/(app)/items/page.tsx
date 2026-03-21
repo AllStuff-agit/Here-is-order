@@ -20,6 +20,8 @@ import { notifyInventoryStateUpdated } from '@/lib/order-ui';
 import { formatDateTime, getStockStatus, stockStatusLabel } from '@/lib/format';
 import { Category, Item, StockTransaction } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { useSortable } from '@/lib/use-sortable';
+import { SortableHeader } from '@/components/sortable-header';
 
 type StockMovement = {
   item_id: number;
@@ -305,6 +307,8 @@ export default function ItemsPage() {
     );
   }, [items]);
 
+  const { sorted: displayRows, sort, toggle } = useSortable(sortedRows);
+
   return (
     <div className="section-gap">
       <div className="page-header">
@@ -478,14 +482,14 @@ export default function ItemsPage() {
           ) : (
             <>
               <div className="space-y-2 md:hidden">
-                {sortedRows.length === 0 ? (
+                {displayRows.length === 0 ? (
                   <p className="data-empty">
                     {q || categoryId || needReorder
                       ? '검색 조건에 맞는 품목이 없습니다.'
                       : "아직 등록된 품목이 없습니다. 상단의 '품목 추가' 버튼을 눌러 시작하세요."}
                   </p>
                 ) : (
-                  sortedRows.map((item) => {
+                  displayRows.map((item) => {
                     const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                     const needOrder = status === 'critical' || status === 'warning';
                     return (
@@ -537,18 +541,18 @@ export default function ItemsPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>품목</TableHead>
-                      <TableHead>현재고</TableHead>
-                      <TableHead>안전재고</TableHead>
-                      <TableHead>최소재고</TableHead>
-                      <TableHead>권장입고</TableHead>
-                      <TableHead>단가</TableHead>
+                      <SortableHeader label="품목" sortKey="name" sort={sort} onSort={toggle} />
+                      <SortableHeader label="현재고" sortKey="current_stock" sort={sort} onSort={toggle} />
+                      <SortableHeader label="안전재고" sortKey="safety_stock" sort={sort} onSort={toggle} />
+                      <SortableHeader label="최소재고" sortKey="min_stock" sort={sort} onSort={toggle} />
+                      <SortableHeader label="권장입고" sortKey="suggested_qty" sort={sort} onSort={toggle} />
+                      <SortableHeader label="단가" sortKey="unit_price" sort={sort} onSort={toggle} />
                       <TableHead className="text-right">상태</TableHead>
                       <TableHead className="text-right">작업</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {sortedRows.map((item) => {
+                    {displayRows.map((item) => {
                       const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                       const needOrder = status === 'critical' || status === 'warning';
                       return (
@@ -595,7 +599,7 @@ export default function ItemsPage() {
                         </TableRow>
                       );
                     })}
-                    {sortedRows.length === 0 ? (
+                    {displayRows.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={9} className="py-6 text-center text-muted-foreground">
                           {q || categoryId || needReorder

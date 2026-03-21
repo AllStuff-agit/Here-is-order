@@ -7,6 +7,8 @@ import { useRouter } from 'next/navigation';
 import { apiGet, apiPost, apiPatch, ApiError } from '@/lib/api';
 import type { DashboardData } from '@/lib/types';
 import { getStockStatus, stockStatusLabel } from '@/lib/format';
+import { useSortable } from '@/lib/use-sortable';
+import { SortableHeader } from '@/components/sortable-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -307,6 +309,9 @@ export default function DashboardPage() {
   const [error, setError] = React.useState('');
   const [quickOrderOpen, setQuickOrderOpen] = React.useState(false);
 
+  const lowStockItems = data?.low_stock_items ?? [];
+  const { sorted: sortedLowStock, sort: lowStockSort, toggle: lowStockToggle } = useSortable(lowStockItems);
+
   const loadDashboard = React.useCallback(async () => {
     setLoading(true);
     setError('');
@@ -441,24 +446,26 @@ export default function DashboardPage() {
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>품목명</TableHead>
-                        <TableHead className="text-right">현재고</TableHead>
+                        <SortableHeader label="품목명" sortKey="name" sort={lowStockSort} onSort={lowStockToggle} />
+                        <SortableHeader label="현재고" sortKey="current_stock" sort={lowStockSort} onSort={lowStockToggle} className="text-right" />
                         <TableHead className="text-right">안전재고</TableHead>
                         <TableHead className="text-right">최소재고</TableHead>
                         <TableHead className="text-right">발주대기</TableHead>
-                        <TableHead className="text-right">추가 필요</TableHead>
+                        <SortableHeader label="추가 필요" sortKey="suggested_qty" sort={lowStockSort} onSort={lowStockToggle} className="text-right" />
                         <TableHead className="text-right">상태</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {(() => {
                         const statusOrder = { critical: 0, warning: 1, normal: 2 } as const;
-                        const sortedItems = [...data.low_stock_items].sort((a, b) => {
-                          const stA = getStockStatus(a.current_stock, a.safety_stock, a.min_stock);
-                          const stB = getStockStatus(b.current_stock, b.safety_stock, b.min_stock);
-                          return statusOrder[stA] - statusOrder[stB];
-                        });
-                        return sortedItems.slice(0, 8).map((item) => {
+                        const baseItems = lowStockSort.key
+                          ? sortedLowStock
+                          : [...data.low_stock_items].sort((a, b) => {
+                              const stA = getStockStatus(a.current_stock, a.safety_stock, a.min_stock);
+                              const stB = getStockStatus(b.current_stock, b.safety_stock, b.min_stock);
+                              return statusOrder[stA] - statusOrder[stB];
+                            });
+                        return baseItems.slice(0, 8).map((item) => {
                           const unit = item.unit || '개';
                           const suggestedQty = Number(item.suggested_qty || 0);
                           const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);

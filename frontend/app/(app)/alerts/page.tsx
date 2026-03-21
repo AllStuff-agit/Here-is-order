@@ -13,6 +13,8 @@ import { apiGet, ApiError } from '@/lib/api';
 import { ALL_CATEGORY_VALUE } from '@/lib/constants';
 import { getStockStatus, stockStatusLabel, type StockStatus } from '@/lib/format';
 import type { Category, Item } from '@/lib/types';
+import { useSortable } from '@/lib/use-sortable';
+import { SortableHeader } from '@/components/sortable-header';
 
 function num(value: number) {
   return Number(value || 0).toLocaleString('ko-KR');
@@ -74,6 +76,8 @@ export default function AlertsPage() {
         return order[getStockStatus(a.current_stock, a.safety_stock, a.min_stock)] - order[getStockStatus(b.current_stock, b.safety_stock, b.min_stock)];
       });
   }, [orders, categoryId, keyword, severity]);
+
+  const { sorted: sortedFiltered, sort: alertSort, toggle: alertToggle } = useSortable(filtered);
 
   const urgentCount = orders.filter((item) => Number(item.current_stock || 0) <= Number(item.min_stock || 0)).length;
 
@@ -242,17 +246,17 @@ export default function AlertsPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>품목</TableHead>
-                      <TableHead>현재고</TableHead>
-                      <TableHead>안전재고</TableHead>
-                      <TableHead>최소재고</TableHead>
-                      <TableHead>권장입고</TableHead>
+                      <SortableHeader label="품목" sortKey="name" sort={alertSort} onSort={alertToggle} />
+                      <SortableHeader label="현재고" sortKey="current_stock" sort={alertSort} onSort={alertToggle} />
+                      <SortableHeader label="안전재고" sortKey="safety_stock" sort={alertSort} onSort={alertToggle} />
+                      <SortableHeader label="최소재고" sortKey="min_stock" sort={alertSort} onSort={alertToggle} />
+                      <SortableHeader label="권장입고" sortKey="suggested_qty" sort={alertSort} onSort={alertToggle} />
                       <TableHead className="text-right">상태</TableHead>
                       <TableHead className="text-right">작업</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filtered.map((item) => {
+                    {sortedFiltered.map((item) => {
                       const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                       return (
                         <TableRow key={item.id} className={status === 'critical' ? 'bg-destructive/5' : ''}>

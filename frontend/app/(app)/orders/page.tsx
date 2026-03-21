@@ -25,6 +25,8 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { SortableHeader } from '@/components/sortable-header';
+import { useSortable } from '@/lib/use-sortable';
 import {
   BUSINESS_STATUS_FILTER_OPTIONS,
   BusinessStatusFilter,
@@ -162,6 +164,8 @@ export default function OrdersPage() {
     () => orders.filter((order) => matchesBusinessStatusFilter(order.status, statusFilter)),
     [orders, statusFilter],
   );
+
+  const { sorted: sortedOrders, sort, toggle } = useSortable(filteredOrders);
 
   const confirmDelete = (order: PurchaseOrder) => {
     setDeleteTarget(order);
@@ -373,14 +377,14 @@ export default function OrdersPage() {
           ) : (
             <>
               <div className="space-y-2 md:hidden">
-                {filteredOrders.length === 0 ? (
+                {sortedOrders.length === 0 ? (
                   <p className="data-empty">
                     {orders.length === 0
                       ? '아직 발주서가 없습니다. 새 발주서를 만들어보세요.'
                       : '검색 조건에 맞는 발주서가 없습니다.'}
                   </p>
                 ) : (
-                  filteredOrders.map((order) => (
+                  sortedOrders.map((order) => (
                     <Card key={order.id} className="border-border/70">
                       <CardContent className="space-y-3 p-3">
                         <div className="flex items-start justify-between gap-2">
@@ -434,17 +438,17 @@ export default function OrdersPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>발주명</TableHead>
-                      <TableHead>발주일</TableHead>
-                      <TableHead>상태</TableHead>
-                      <TableHead>주문수량</TableHead>
-                      <TableHead>입고수량</TableHead>
-                      <TableHead>최근수정</TableHead>
+                      <SortableHeader label="발주명" sortKey="title" sort={sort} onSort={toggle} />
+                      <SortableHeader label="발주일" sortKey="order_date" sort={sort} onSort={toggle} />
+                      <SortableHeader label="상태" sortKey="status" sort={sort} onSort={toggle} />
+                      <SortableHeader label="주문수량" sortKey="ordered_qty" sort={sort} onSort={toggle} />
+                      <SortableHeader label="입고수량" sortKey="received_qty" sort={sort} onSort={toggle} />
+                      <SortableHeader label="최근수정" sortKey="updated_at" sort={sort} onSort={toggle} />
                       <TableHead className="text-right">작업</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredOrders.map((order) => (
+                    {sortedOrders.map((order) => (
                       <TableRow key={order.id}>
                         <TableCell>
                           <p className="font-medium">{order.title}</p>
@@ -484,7 +488,7 @@ export default function OrdersPage() {
                         </TableCell>
                       </TableRow>
                     ))}
-                    {filteredOrders.length === 0 ? (
+                    {sortedOrders.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} className="py-6 text-center text-muted-foreground">
                           {orders.length === 0
