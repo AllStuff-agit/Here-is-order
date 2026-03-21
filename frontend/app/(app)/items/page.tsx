@@ -227,6 +227,7 @@ export default function ItemsPage() {
       movementType: 'IN',
       quantity: '1',
       reason: '',
+      error: '',
     });
   };
 
