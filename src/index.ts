@@ -25,7 +25,7 @@ const AUTH_COOKIE = 'isorder_sid';
 const SESSION_DAYS = 30;
 const SESSION_SECONDS = SESSION_DAYS * 24 * 60 * 60;
 const PASSWORD_HASH_SCHEME = 'pbkdf2_sha256';
-const PASSWORD_HASH_ITERATIONS = 600_000;
+const PASSWORD_HASH_ITERATIONS = 100_000;
 const PASSWORD_SALT_BYTES = 16;
 const PASSWORD_HASH_BITS = 256;
 const PUBLIC_API_PATHS = new Set(['/api/auth/login', '/health', '/login']);
@@ -162,10 +162,7 @@ async function verifyPassword(value: string, storedHash: string) {
     return { valid: false, upgradedHash: null };
   }
 
-  return {
-    valid: true,
-    upgradedHash: await hashPassword(value),
-  };
+  return { valid: true, upgradedHash: null };
 }
 
 async function getSessionUser(c: any): Promise<SessionUser | null> {
