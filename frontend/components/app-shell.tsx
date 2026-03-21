@@ -9,7 +9,6 @@ import { INVENTORY_REFRESH_EVENT } from '@/lib/constants';
 import type { DashboardData } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
@@ -47,14 +46,14 @@ function TopNavItem({
       className={cn(
         'group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition',
         active
-          ? 'bg-sidebar-accent text-foreground shadow-xs'
-          : 'text-muted-foreground hover:bg-background/80 hover:text-foreground',
+          ? 'bg-sidebar-accent text-sidebar-accent-foreground shadow-xs'
+          : 'text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground',
       )}
       aria-current={active ? 'page' : undefined}
     >
-      <Icon className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
+      <Icon className="size-4 shrink-0 text-sidebar-foreground/50 group-hover:text-sidebar-foreground" />
       <span className="font-medium">{item.label}</span>
-      <span className="ml-auto hidden truncate text-xs text-muted-foreground md:inline">{item.description}</span>
+      <span className="ml-auto hidden truncate text-xs text-sidebar-foreground/40 md:inline">{item.description}</span>
     </Link>
   );
 }
@@ -121,7 +120,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="app-shell">
-      <header className="sticky top-0 z-30 border-b border-border/70 bg-background/95 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-sidebar-border bg-sidebar text-sidebar-foreground">
         <div className="mx-auto flex h-[56px] w-full max-w-7xl items-center gap-2 px-4 md:px-6">
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger asChild>
@@ -129,13 +128,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Menu className="size-4" />
               </Button>
             </SheetTrigger>
-            <SheetContent side="left" className="w-[84vw] sm:w-[360px]">
+            <SheetContent side="left" className="w-[84vw] bg-sidebar text-sidebar-foreground sm:w-[360px]">
               <SheetHeader className="space-y-1">
-                <SheetTitle>Here is order</SheetTitle>
-                <SheetDescription>관리자 전용 앱</SheetDescription>
+                <SheetTitle className="text-sidebar-foreground">Here is order</SheetTitle>
+                <SheetDescription className="text-sidebar-foreground/50">관리자 전용 앱</SheetDescription>
               </SheetHeader>
               <div className="mt-4">
-                <Card className="p-2">
+                <div className="rounded-lg bg-sidebar p-2">
                   <nav className="space-y-1">
                     {navItems.map((item) => (
                       <TopNavItem
@@ -146,7 +145,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       />
                     ))}
                   </nav>
-                </Card>
+                </div>
               </div>
             </SheetContent>
           </Sheet>
@@ -162,7 +161,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Badge>
 
           <div className="ml-auto">
-            <Button variant="ghost" size="sm" onClick={handleLogout}>
+            <Button variant="ghost" size="sm" className="text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground" onClick={handleLogout}>
               <LogOut className="size-4" />
               로그아웃
             </Button>
@@ -173,15 +172,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <div className="app-shell-shell">
         <aside className="hidden w-64 shrink-0 md:block">
-          <Card className="overflow-hidden p-2">
-            <p className="px-2 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">메뉴</p>
-            <Separator />
+          <div className="overflow-hidden rounded-lg bg-sidebar p-2">
+            <p className="px-2 py-2 text-xs font-semibold uppercase tracking-wide text-sidebar-foreground/40">메뉴</p>
+            <div className="border-b border-sidebar-border" />
             <nav className="space-y-1 p-2">
               {navItems.map((item) => (
                 <TopNavItem key={item.href} item={item} pathname={pathname} />
               ))}
             </nav>
-          </Card>
+          </div>
         </aside>
 
         <main className="content-shell">{children}</main>
