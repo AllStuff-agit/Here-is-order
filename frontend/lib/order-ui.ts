@@ -27,7 +27,7 @@ export function notifyInventoryStateUpdated() {
 }
 
 export function toBusinessStatus(status: OrderStatus) {
-  if (status === 'fully_received') return '입고완료';
+  if (status === 'fully_received') return '✓ 입고완료';
   if (status === 'partially_received') return '부분입고';
   if (status === 'ordered') return '입고대기';
   if (status === 'draft') return '발주초안';
@@ -38,6 +38,7 @@ export function statusBadgeVariant(status: OrderStatus) {
   if (status === 'draft') return 'default';
   if (status === 'ordered') return 'outline';
   if (status === 'partially_received') return 'secondary';
+  if (status === 'fully_received') return 'secondary';
   if (status === 'canceled') return 'destructive';
   return 'secondary';
 }

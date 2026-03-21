@@ -472,6 +472,7 @@ export default function OrderDetailPage() {
                       onChange={(event) => setDraftTitle(event.target.value)}
                       placeholder="발주명을 입력하세요"
                       className="w-full min-w-0 md:min-w-[620px] xl:min-w-[760px]"
+                      autoFocus
                     />
                   </div>
                   <div className="space-y-1">
@@ -540,12 +541,12 @@ export default function OrderDetailPage() {
             </Button>
             <Button variant="outline" onClick={() => void loadOrderDetail()}>
               <ReceiptText className="size-4" />
-              최신화
+              새로고침
             </Button>
           </div>
 
           {selectedOrder.items.length === 0 ? (
-            <p className="data-empty">선택한 발주에 항목이 없습니다.</p>
+            <p className="data-empty">아직 추가된 품목이 없습니다. 품목을 추가해보세요.</p>
           ) : (
             <>
               <div className="space-y-2 md:hidden">
@@ -555,7 +556,6 @@ export default function OrderDetailPage() {
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <p className="font-medium">{item.item_name}</p>
-                          <p className="text-xs text-muted-foreground">{item.spec || '규격없음'}</p>
                         </div>
                         {item.remaining_qty > 0 ? (
                           <Badge variant="outline">
@@ -610,7 +610,6 @@ export default function OrderDetailPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>품목</TableHead>
-                      <TableHead>규격</TableHead>
                       <TableHead className="text-right">주문 수량</TableHead>
                       <TableHead className="text-right">입고 수량</TableHead>
                       <TableHead className="text-right">잔여 수량</TableHead>
@@ -622,7 +621,6 @@ export default function OrderDetailPage() {
                     {selectedOrder.items.map((item) => (
                       <TableRow key={item.id}>
                         <TableCell>{item.item_name}</TableCell>
-                        <TableCell>{item.spec || '-'}</TableCell>
                         <TableCell className="text-right">{formatQty(item.ordered_qty)}</TableCell>
                         <TableCell className="text-right">{formatQty(item.received_qty)}</TableCell>
                         <TableCell className="text-right">{formatQty(item.remaining_qty)}</TableCell>
@@ -723,7 +721,7 @@ export default function OrderDetailPage() {
                 <SelectContent>
                   {items.map((item) => (
                     <SelectItem key={item.id} value={String(item.id)}>
-                      {item.name} ({item.spec || '규격없음'})
+                      {item.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -772,7 +770,7 @@ export default function OrderDetailPage() {
           </DialogHeader>
           <div className="space-y-2">
             <Label>주문 수량</Label>
-            <Input type="number" min="1" value={editOrderedQty} onChange={(event) => setEditOrderedQty(event.target.value)} />
+            <Input type="number" min="1" value={editOrderedQty} onChange={(event) => setEditOrderedQty(event.target.value)} autoFocus />
             <Label>메모</Label>
             <Input value={editMemo} onChange={(event) => setEditMemo(event.target.value)} />
             {orderItemEditError ? <p className="text-sm text-destructive">{orderItemEditError}</p> : null}
@@ -810,10 +808,27 @@ export default function OrderDetailPage() {
               value={receiveQty}
               onChange={(event) => setReceiveQty(event.target.value)}
               onFocus={(event) => event.target.select()}
+              autoFocus
             />
+            {receiveOpen.item ? (() => {
+              const matchedItem = items.find((i) => i.id === receiveOpen.item!.item_id);
+              const currentStock = matchedItem != null ? Number(matchedItem.current_stock || 0) : null;
+              const enteredQty = Number(receiveQty);
+              const validQty = Number.isInteger(enteredQty) && enteredQty > 0;
+              if (currentStock != null) {
+                return (
+                  <p className="text-sm text-muted-foreground">
+                    현재고 {currentStock.toLocaleString('ko-KR')}개
+                    {validQty ? ` → 입고 후 ${(currentStock + enteredQty).toLocaleString('ko-KR')}개` : ''}
+                  </p>
+                );
+              }
+              return null;
+            })() : null}
             <Label>메모</Label>
             <Input value={receiveNote} onChange={(event) => setReceiveNote(event.target.value)} />
             {receiveError ? <p className="text-sm text-destructive">{receiveError}</p> : null}
+            <p className="text-xs text-muted-foreground">입고 처리 후에는 수정할 수 없습니다.</p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setReceiveOpen({ open: false })}>

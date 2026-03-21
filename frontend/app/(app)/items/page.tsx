@@ -46,7 +46,6 @@ type LedgerState = {
 type ItemFormState = {
   name: string;
   categoryId: string;
-  spec: string;
   safetyStock: string;
   minStock: string;
   currentStock: string;
@@ -64,7 +63,6 @@ function initItemForm(item?: Item | null): ItemFormState {
   return {
     name: item?.name || '',
     categoryId: item?.category_id ? String(item.category_id) : '',
-    spec: item?.spec || '',
     safetyStock: String(item?.safety_stock || 0),
     minStock: String(item?.min_stock || 0),
     currentStock: String(item?.current_stock || 0),
@@ -180,7 +178,6 @@ export default function ItemsPage() {
       const payload = {
         name: form.name.trim(),
         category_id: form.categoryId ? Number(form.categoryId) : null,
-        spec: form.spec.trim() || null,
         safety_stock: Number(form.safetyStock || 0),
         min_stock: Number(form.minStock || 0),
         current_stock: Number(form.currentStock || 0),
@@ -335,33 +332,23 @@ export default function ItemsPage() {
                     onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
                   />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="category">분류</Label>
-                    <Select
-                      value={form.categoryId}
-                      onValueChange={(value) => setForm((prev) => ({ ...prev, categoryId: value }))}
-                    >
-                      <SelectTrigger id="category">
-                        <SelectValue placeholder="분류를 선택하세요" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {categories.map((category) => (
-                          <SelectItem key={category.id} value={String(category.id)}>
-                            {category.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="spec">규격</Label>
-                    <Input
-                      id="spec"
-                      value={form.spec}
-                      onChange={(event) => setForm((prev) => ({ ...prev, spec: event.target.value }))}
-                    />
-                  </div>
+                <div className="space-y-2">
+                  <Label htmlFor="category">분류</Label>
+                  <Select
+                    value={form.categoryId}
+                    onValueChange={(value) => setForm((prev) => ({ ...prev, categoryId: value }))}
+                  >
+                    <SelectTrigger id="category">
+                      <SelectValue placeholder="분류를 선택하세요" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {categories.map((category) => (
+                        <SelectItem key={category.id} value={String(category.id)}>
+                          {category.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-3">
                   <div className="space-y-2">
@@ -431,14 +418,14 @@ export default function ItemsPage() {
       <Card>
         <CardHeader>
           <CardTitle>품목 검색/필터</CardTitle>
-          <CardDescription>품목명, 규격, 분류명을 검색하고 발주 필요 목록만 추려볼 수 있어요.</CardDescription>
+          <CardDescription>품목명, 분류명을 검색하고 발주 필요 목록만 추려볼 수 있어요.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <label className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-2 top-2.5 size-4 text-muted-foreground" />
             <Input
               className="h-9 pl-8"
-              placeholder="품목명/규격/분류 검색"
+              placeholder="품목명/분류 검색"
               value={q}
               onChange={(event) => setQ(event.target.value)}
             />
@@ -547,7 +534,6 @@ export default function ItemsPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>품목</TableHead>
-                      <TableHead>규격</TableHead>
                       <TableHead>현재고</TableHead>
                       <TableHead>안전재고</TableHead>
                       <TableHead>최소재고</TableHead>
@@ -571,7 +557,6 @@ export default function ItemsPage() {
                               ) : null}
                             </div>
                           </TableCell>
-                          <TableCell>{item.spec || '-'}</TableCell>
                           <TableCell>{num(item.current_stock)}개</TableCell>
                           <TableCell>{num(item.safety_stock)}개</TableCell>
                           <TableCell>{num(item.min_stock)}개</TableCell>
@@ -608,7 +593,7 @@ export default function ItemsPage() {
                     })}
                     {sortedRows.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={10} className="py-6 text-center text-muted-foreground">
+                        <TableCell colSpan={9} className="py-6 text-center text-muted-foreground">
                           {q || categoryId || needReorder
                             ? '검색 조건에 맞는 품목이 없습니다.'
                             : "아직 등록된 품목이 없습니다. 상단의 '품목 추가' 버튼을 눌러 시작하세요."}

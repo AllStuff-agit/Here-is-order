@@ -61,7 +61,6 @@ export default function AlertsPage() {
         if (!q) return true;
         return (
           item.name.toLowerCase().includes(q) ||
-          (item.spec || '').toLowerCase().includes(q) ||
           (item.category_name || '').toLowerCase().includes(q)
         );
       })
@@ -135,7 +134,7 @@ export default function AlertsPage() {
           <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <Input
               className="h-9"
-              placeholder="품목명/규격/분류 검색"
+              placeholder="품목명/분류 검색"
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
             />
@@ -213,7 +212,6 @@ export default function AlertsPage() {
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <p className="font-medium">{item.name}</p>
-                            {item.spec ? <p className="text-xs text-muted-foreground">{item.spec}</p> : null}
                             {item.category_name ? <p className="text-xs text-muted-foreground">{item.category_name}</p> : null}
                           </div>
                           <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'}>
@@ -245,7 +243,6 @@ export default function AlertsPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>품목</TableHead>
-                      <TableHead>규격</TableHead>
                       <TableHead>현재고</TableHead>
                       <TableHead>안전재고</TableHead>
                       <TableHead>최소재고</TableHead>
@@ -267,7 +264,6 @@ export default function AlertsPage() {
                               ) : null}
                             </div>
                           </TableCell>
-                          <TableCell>{item.spec || '-'}</TableCell>
                           <TableCell>{num(item.current_stock)}개</TableCell>
                           <TableCell>{num(item.safety_stock)}개</TableCell>
                           <TableCell>{num(item.min_stock)}개</TableCell>

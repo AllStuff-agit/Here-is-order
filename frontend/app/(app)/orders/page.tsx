@@ -292,6 +292,7 @@ export default function OrdersPage() {
                 onChange={(event) => setNewDraftTitle(event.target.value)}
                 disabled={creatingOrder}
                 placeholder="발주명을 입력하세요"
+                autoFocus
               />
             </div>
             <div className="space-y-1">
@@ -312,7 +313,7 @@ export default function OrdersPage() {
               취소
             </Button>
             <Button onClick={() => void confirmCreateDraft()} disabled={creatingOrder}>
-              {creatingOrder ? '생성 중...' : '확인'}
+              {creatingOrder ? '생성 중...' : '생성'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -349,7 +350,11 @@ export default function OrdersPage() {
             <>
               <div className="space-y-2 md:hidden">
                 {filteredOrders.length === 0 ? (
-                  <p className="data-empty">발주서가 없습니다.</p>
+                  <p className="data-empty">
+                    {orders.length === 0
+                      ? '아직 발주서가 없습니다. 새 발주서를 만들어보세요.'
+                      : '검색 조건에 맞는 발주서가 없습니다.'}
+                  </p>
                 ) : (
                   filteredOrders.map((order) => (
                     <Card key={order.id} className="border-border/70">
@@ -458,7 +463,9 @@ export default function OrdersPage() {
                     {filteredOrders.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} className="py-6 text-center text-muted-foreground">
-                          발주서가 없습니다.
+                          {orders.length === 0
+                            ? '아직 발주서가 없습니다. 새 발주서를 만들어보세요.'
+                            : '검색 조건에 맞는 발주서가 없습니다.'}
                         </TableCell>
                       </TableRow>
                     ) : null}
