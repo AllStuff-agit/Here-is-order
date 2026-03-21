@@ -759,15 +759,20 @@ app.post('/api/stock/adjust', async (c) => {
     }
     delta = -quantity;
   } else {
-    if (!Number.isInteger(quantity)) {
-      return c.json(apiErr('INVALID_INPUT', 'ADJUST 수량은 정수여야 합니다.'), 400);
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      return c.json(apiErr('INVALID_INPUT', 'ADJUST 수량은 0 이상의 정수여야 합니다.'), 400);
     }
-    delta = quantity;
+    // delta는 item 조회 후 계산 (아래에서 처리)
   }
 
   const item = await c.env.DB.prepare('SELECT id, current_stock, is_deleted, unit FROM items WHERE id = ?').bind(itemId).first<{ id: number; current_stock: number; is_deleted: number; unit: string }>();
   if (!item || item.is_deleted === 1) {
     return c.json(apiErr('NOT_FOUND', '품목이 존재하지 않거나 삭제되었습니다.'), 404);
+  }
+
+  // ADJUST: 지정한 값으로 직접 설정 (delta = 목표값 - 현재값)
+  if (movementType === 'ADJUST') {
+    delta = quantity - item.current_stock;
   }
 
   const newStock = item.current_stock + delta;
