@@ -213,9 +213,8 @@ export default function AlertsPage() {
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <p className="font-medium">{item.name}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {item.spec || '규격없음'} · {item.category_name || '분류없음'}
-                            </p>
+                            {item.spec ? <p className="text-xs text-muted-foreground">{item.spec}</p> : null}
+                            {item.category_name ? <p className="text-xs text-muted-foreground">{item.category_name}</p> : null}
                           </div>
                           <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'}>
                             {stockStatusLabel(status)}
@@ -247,7 +246,6 @@ export default function AlertsPage() {
                     <TableRow>
                       <TableHead>품목</TableHead>
                       <TableHead>규격</TableHead>
-                      <TableHead>분류</TableHead>
                       <TableHead>현재고</TableHead>
                       <TableHead>안전재고</TableHead>
                       <TableHead>최소재고</TableHead>
@@ -261,9 +259,15 @@ export default function AlertsPage() {
                       const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                       return (
                         <TableRow key={item.id} className={status === 'critical' ? 'bg-destructive/5' : ''}>
-                          <TableCell>{item.name}</TableCell>
+                          <TableCell>
+                            <div>
+                              <p className="font-medium">{item.name}</p>
+                              {item.category_name ? (
+                                <p className="text-xs text-muted-foreground">{item.category_name}</p>
+                              ) : null}
+                            </div>
+                          </TableCell>
                           <TableCell>{item.spec || '-'}</TableCell>
-                          <TableCell>{item.category_name || '-'}</TableCell>
                           <TableCell>{num(item.current_stock)}개</TableCell>
                           <TableCell>{num(item.safety_stock)}개</TableCell>
                           <TableCell>{num(item.min_stock)}개</TableCell>

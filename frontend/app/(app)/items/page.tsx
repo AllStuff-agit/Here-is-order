@@ -548,7 +548,6 @@ export default function ItemsPage() {
                     <TableRow>
                       <TableHead>품목</TableHead>
                       <TableHead>규격</TableHead>
-                      <TableHead>분류</TableHead>
                       <TableHead>현재고</TableHead>
                       <TableHead>안전재고</TableHead>
                       <TableHead>최소재고</TableHead>
@@ -573,7 +572,6 @@ export default function ItemsPage() {
                             </div>
                           </TableCell>
                           <TableCell>{item.spec || '-'}</TableCell>
-                          <TableCell>{item.category_name || '-'}</TableCell>
                           <TableCell>{num(item.current_stock)}개</TableCell>
                           <TableCell>{num(item.safety_stock)}개</TableCell>
                           <TableCell>{num(item.min_stock)}개</TableCell>
