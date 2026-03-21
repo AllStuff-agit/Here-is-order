@@ -38,11 +38,11 @@
   }
 
   .page-title {
-    @apply text-xl leading-tight font-semibold tracking-tight text-white;
+    @apply text-xl leading-tight font-semibold tracking-tight text-black;
   }
 
   .page-subtitle {
-    @apply mt-1 text-sm text-white/60;
+    @apply mt-1 text-sm text-black/60;
   }
 
   .toolbar {

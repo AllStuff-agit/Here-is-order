@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Bell, Boxes, Home, LayoutDashboard, LogOut, Menu, Package, ReceiptText, Settings } from 'lucide-react';
+import { Bell, Boxes, LayoutDashboard, LogOut, Menu, Package, ReceiptText, Settings } from 'lucide-react';
 import { apiGet, apiPost, ApiError } from '@/lib/api';
 import { INVENTORY_REFRESH_EVENT } from '@/lib/constants';
 import type { DashboardData } from '@/lib/types';
@@ -150,9 +150,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </SheetContent>
           </Sheet>
 
-          <Link href="/dashboard" className="inline-flex items-center gap-2 font-semibold">
-            <Home className="size-4 text-primary" />
-            <span className="text-sm md:text-base">Here is order</span>
+          <Link href="/dashboard" className="inline-flex items-center font-semibold">
+            <span className="text-base md:text-lg">Here is order</span>
           </Link>
 
           <Badge variant={statusTone(lowStockCount)} className="ml-1 gap-1">
