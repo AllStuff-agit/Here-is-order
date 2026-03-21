@@ -45,3 +45,4 @@ notion-export/
 
 # AI session memory transfer docs
 docs/AI_MEMORY_TRANSFER_*.md
+.vercel
