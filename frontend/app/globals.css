@@ -21,7 +21,8 @@
 
 @layer components {
   .app-shell {
-    @apply min-h-screen bg-muted/40;
+    @apply min-h-screen;
+    background-color: #B76953;
   }
 
   .app-shell-shell {
