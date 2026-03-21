@@ -743,7 +743,7 @@ app.post('/api/stock/adjust', async (c) => {
   if (!['IN', 'OUT', 'ADJUST'].includes(movementType)) {
     return c.json(apiErr('INVALID_INPUT', 'movement_type은 IN/OUT/ADJUST만 허용됩니다.'), 400);
   }
-  if (quantity === null || quantity === 0) {
+  if (quantity === null || (quantity === 0 && movementType !== 'ADJUST')) {
     return c.json(apiErr('INVALID_INPUT', 'quantity는 0이 아닌 정수여야 합니다.'), 400);
   }
 
