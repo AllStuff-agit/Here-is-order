@@ -231,7 +231,7 @@ function QuickOrderDialog({
                           </div>
                         </TableCell>
                         <TableCell className="text-right text-sm tabular-nums">
-                          {Number(item.current_stock || 0).toLocaleString('ko-KR')}개
+                          {Number(item.current_stock || 0).toLocaleString('ko-KR')}{item.unit || '개'}
                         </TableCell>
                         <TableCell className="text-right">
                           {fullyCovered ? (
@@ -420,6 +420,7 @@ export default function DashboardPage() {
                       <TableRow>
                         <TableHead>품목명</TableHead>
                         <TableHead className="text-right">현재고</TableHead>
+                        <TableHead className="text-right">안전재고</TableHead>
                         <TableHead className="text-right">발주대기</TableHead>
                         <TableHead className="text-right">추가 필요</TableHead>
                         <TableHead className="text-right">상태</TableHead>
@@ -434,19 +435,24 @@ export default function DashboardPage() {
                           return statusOrder[stA] - statusOrder[stB];
                         });
                         return sortedItems.slice(0, 8).map((item) => {
+                          const unit = item.unit || '개';
                           const suggestedQty = Number(item.suggested_qty || 0);
                           const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
                           const fullyCovered = suggestedQty === 0 && onOrderQty > 0;
                           const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                           return (
                             <TableRow key={item.id} className={status === 'critical' ? 'bg-destructive/5' : ''}>
-                              <TableCell>{item.name}</TableCell>
-                              <TableCell className="text-right tabular-nums">{Number(item.current_stock || 0).toLocaleString('ko-KR')}개</TableCell>
+                              <TableCell>
+                                <div>{item.name}</div>
+                                {item.category_name ? <div className="text-xs text-muted-foreground">{item.category_name}</div> : null}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">{Number(item.current_stock || 0).toLocaleString('ko-KR')}{unit}</TableCell>
+                              <TableCell className="text-right tabular-nums text-muted-foreground">{Number(item.safety_stock || 0).toLocaleString('ko-KR')}{unit}</TableCell>
                               <TableCell className="text-right tabular-nums text-blue-600 dark:text-blue-400">
-                                {onOrderQty > 0 ? `${onOrderQty.toLocaleString('ko-KR')}개` : '—'}
+                                {onOrderQty > 0 ? `${onOrderQty.toLocaleString('ko-KR')}${unit}` : '—'}
                               </TableCell>
                               <TableCell className="text-right tabular-nums">
-                                {suggestedQty > 0 ? `${suggestedQty.toLocaleString('ko-KR')}개` : '—'}
+                                {suggestedQty > 0 ? `${suggestedQty.toLocaleString('ko-KR')}${unit}` : '—'}
                               </TableCell>
                               <TableCell className="text-right">
                                 {fullyCovered ? (

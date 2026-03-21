@@ -419,6 +419,15 @@ app.delete('/api/categories/:id', async (c) => {
     .first();
   if (!before) return c.json(apiErr('NOT_FOUND', '카테고리를 찾지 못했습니다.'), 404);
 
+  const itemCount = await c.env.DB.prepare(
+    'SELECT COUNT(*) as count FROM items WHERE category_id = ? AND is_deleted = 0'
+  )
+    .bind(id)
+    .first<{ count: number }>();
+  if (itemCount && itemCount.count > 0) {
+    return c.json(apiErr('CONFLICT', '이 분류에 속한 품목이 있어 삭제할 수 없습니다.'), 409);
+  }
+
   await c.env.DB.prepare('UPDATE item_categories SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?')
     .bind(id)
     .run();
@@ -520,7 +529,9 @@ app.post('/api/items', async (c) => {
   ).bind(categoryId, name, spec || null, '개', safetyStock, minStock, currentStock, unitPrice, memo).run();
 
   const id = Number(inserted.meta.last_row_id);
-  const row = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?')
+  const row = await c.env.DB.prepare(
+    `SELECT i.*, c.name AS category_name FROM items i LEFT JOIN item_categories c ON c.id = i.category_id WHERE i.id = ?`
+  )
     .bind(id)
     .first();
 
@@ -584,7 +595,9 @@ app.patch('/api/items/:id', async (c) => {
     await c.env.DB.prepare(sql).bind(...params, id).run();
   }
 
-  const after = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
+  const after = await c.env.DB.prepare(
+    `SELECT i.*, c.name AS category_name FROM items i LEFT JOIN item_categories c ON c.id = i.category_id WHERE i.id = ?`
+  ).bind(id).first();
   await writeAudit(c.env.DB, user.id, 'update', 'item', id, before, after);
   return c.json(apiOk(after));
 });
@@ -712,8 +725,8 @@ app.get('/api/dashboard', async (c) => {
   const to = c.req.query('to') ?? today;
 
   const rows = await c.env.DB.prepare(
-    `SELECT i.id, i.name, i.current_stock, i.safety_stock,
-            i.min_stock,
+    `SELECT i.id, i.name, i.unit, i.current_stock, i.safety_stock,
+            i.min_stock, c.name AS category_name,
             MAX(0, i.safety_stock - i.current_stock - (
               SELECT COALESCE(SUM(oi.ordered_qty - oi.received_qty), 0)
               FROM order_items oi
@@ -724,6 +737,7 @@ app.get('/api/dashboard', async (c) => {
                 AND po.status NOT IN ('canceled', 'fully_received')
             )) AS suggested_qty
        FROM items i
+       LEFT JOIN item_categories c ON c.id = i.category_id
       WHERE i.is_deleted = 0
         AND i.safety_stock > 0
         AND i.current_stock <= i.safety_stock`
