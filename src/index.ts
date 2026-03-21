@@ -464,8 +464,8 @@ app.get('/api/items', async (c) => {
   }
 
   if (q) {
-    whereClauses.push('(i.name LIKE ? ESCAPE \'\\\\\' OR i.spec LIKE ? ESCAPE \'\\\\\' OR c.name LIKE ? ESCAPE \'\\\\\')');
-    const escaped = q.replace(/[%_\\]/g, '\\$&');
+    whereClauses.push("(i.name LIKE ? ESCAPE '!' OR i.spec LIKE ? ESCAPE '!' OR c.name LIKE ? ESCAPE '!')");
+    const escaped = q.replace(/[%_!]/g, '!$&');
     const like = `%${escaped}%`;
     params.push(like, like, like);
   }
@@ -824,8 +824,8 @@ app.get('/api/purchase-orders', async (c) => {
   }
 
   if (q) {
-    where.push('(po.title LIKE ? ESCAPE \'\\\\\' OR po.note LIKE ? ESCAPE \'\\\\\')');
-    const escaped = q.replace(/[%_\\]/g, '\\$&');
+    where.push("(po.title LIKE ? ESCAPE '!' OR po.note LIKE ? ESCAPE '!')");
+    const escaped = q.replace(/[%_!]/g, '!$&');
     const like = `%${escaped}%`;
     params.push(like, like);
   }
