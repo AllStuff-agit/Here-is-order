@@ -231,7 +231,7 @@ export default function ItemsPage() {
   const submitStockAdjust = async () => {
     if (!stockDialog.item || stockSubmitting) return;
     const qty = Number(stockDialog.quantity);
-    if (!Number.isInteger(qty) || qty === 0) {
+    if (!Number.isInteger(qty) || (qty === 0 && stockDialog.movementType !== 'ADJUST')) {
       resetSubmitMessage('수량은 0이 아닌 정수여야 합니다.');
       return;
     }
