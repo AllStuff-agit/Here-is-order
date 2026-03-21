@@ -421,6 +421,7 @@ export default function DashboardPage() {
                         <TableHead>품목명</TableHead>
                         <TableHead className="text-right">현재고</TableHead>
                         <TableHead className="text-right">안전재고</TableHead>
+                        <TableHead className="text-right">최소재고</TableHead>
                         <TableHead className="text-right">발주대기</TableHead>
                         <TableHead className="text-right">추가 필요</TableHead>
                         <TableHead className="text-right">상태</TableHead>
@@ -448,6 +449,7 @@ export default function DashboardPage() {
                               </TableCell>
                               <TableCell className="text-right tabular-nums">{Number(item.current_stock || 0).toLocaleString('ko-KR')}{unit}</TableCell>
                               <TableCell className="text-right tabular-nums text-muted-foreground">{Number(item.safety_stock || 0).toLocaleString('ko-KR')}{unit}</TableCell>
+                              <TableCell className="text-right tabular-nums text-muted-foreground">{Number(item.min_stock || 0).toLocaleString('ko-KR')}{unit}</TableCell>
                               <TableCell className="text-right tabular-nums text-blue-600 dark:text-blue-400">
                                 {onOrderQty > 0 ? `${onOrderQty.toLocaleString('ko-KR')}${unit}` : '—'}
                               </TableCell>
