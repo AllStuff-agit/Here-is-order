@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { ChevronDown, Minus, TrendingDown, TrendingUp } from 'lucide-react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { apiGet, apiPost, apiPatch, ApiError } from '@/lib/api';
 import type { DashboardData } from '@/lib/types';
@@ -493,6 +494,13 @@ export default function DashboardPage() {
                       })()}
                     </TableBody>
                   </Table>
+                  {data.low_stock_items.length > 8 && (
+                    <div className="mt-2 text-center">
+                      <Link href="/alerts" className="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground">
+                        전체 {data.low_stock_count}건 보기 →
+                      </Link>
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>

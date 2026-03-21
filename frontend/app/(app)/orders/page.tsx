@@ -133,7 +133,6 @@ export default function OrdersPage() {
         const targetItem = items.find((item) => item.id === prefillTargetItemId);
         if (!targetItem) {
           setMessage('알림에서 전달된 품목을 찾지 못했습니다.');
-          router.replace('/orders');
           return;
         }
 
@@ -153,7 +152,6 @@ export default function OrdersPage() {
         router.replace(`/orders/${created.id}`);
       } catch (error) {
         setMessage(error instanceof Error ? error.message : '알림 기반 발주 초안 생성에 실패했습니다.');
-        router.replace('/orders');
       }
     };
 
@@ -202,7 +200,7 @@ export default function OrdersPage() {
       if (prefillItems && prefillItems.length > 0) {
         const created = await apiPost<PurchaseOrder>('/api/purchase-orders/with-items', {
           order_date: new Date().toISOString().slice(0, 10),
-          notes: note ?? '',
+          note: note ?? '',
           items: prefillItems,
         });
         createdId = created.id;

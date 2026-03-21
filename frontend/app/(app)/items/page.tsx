@@ -15,7 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
-import { ALL_CATEGORY_VALUE, INVENTORY_REFRESH_EVENT } from '@/lib/constants';
+import { ALL_CATEGORY_VALUE } from '@/lib/constants';
+import { notifyInventoryStateUpdated } from '@/lib/order-ui';
 import { formatDateTime, getStockStatus, stockStatusLabel } from '@/lib/format';
 import { Category, Item, StockTransaction } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -53,11 +54,6 @@ type ItemFormState = {
   memo: string;
 };
 
-
-function notifyInventoryStateUpdated() {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new Event(INVENTORY_REFRESH_EVENT));
-}
 
 function initItemForm(item?: Item | null): ItemFormState {
   return {
@@ -237,6 +233,10 @@ export default function ItemsPage() {
     const qty = Number(stockDialog.quantity);
     if (!Number.isInteger(qty) || qty === 0) {
       resetSubmitMessage('수량은 0이 아닌 정수여야 합니다.');
+      return;
+    }
+    if ((stockDialog.movementType === 'IN' || stockDialog.movementType === 'OUT') && qty < 0) {
+      resetSubmitMessage('입고/사용 수량은 양수여야 합니다.');
       return;
     }
 

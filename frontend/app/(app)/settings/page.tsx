@@ -166,7 +166,12 @@ export default function SettingsPage() {
               <div className="h-10 animate-pulse rounded bg-muted" />
             </div>
           ) : usersError ? (
-            <p className="text-sm text-destructive">{usersError}</p>
+            <div className="flex flex-col gap-2">
+              <p className="text-sm text-destructive">{usersError}</p>
+              <Button variant="outline" size="sm" className="w-fit" onClick={() => void loadUsers()}>
+                다시 시도
+              </Button>
+            </div>
           ) : (
             <Table>
               <TableHeader>

@@ -414,9 +414,18 @@ app.post('/api/categories', async (c) => {
     return c.json(apiErr('DUPLICATE', '동일한 이름의 카테고리가 이미 존재합니다.'), 409);
   }
 
-  const result = await c.env.DB.prepare(
-    `INSERT INTO item_categories (name, description) VALUES (?, ?)`
-  ).bind(name, description).run();
+  let result;
+  try {
+    result = await c.env.DB.prepare(
+      `INSERT INTO item_categories (name, description) VALUES (?, ?)`
+    ).bind(name, description).run();
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('UNIQUE constraint failed')) {
+      return c.json(apiErr('DUPLICATE', '동일한 이름의 카테고리가 이미 존재합니다.'), 409);
+    }
+    throw e;
+  }
 
   const id = Number(result.meta.last_row_id);
   const row = await c.env.DB.prepare('SELECT id, name, description FROM item_categories WHERE id = ?')
@@ -583,10 +592,19 @@ app.post('/api/items', async (c) => {
     return c.json(apiErr('DUPLICATE', '이미 동일한 품목이 존재합니다.'), 409);
   }
 
-  const inserted = await c.env.DB.prepare(
-    `INSERT INTO items (category_id, name, spec, unit, safety_stock, min_stock, current_stock, unit_price, memo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(categoryId, name, spec || null, '개', safetyStock, minStock, currentStock, unitPrice, memo).run();
+  let inserted;
+  try {
+    inserted = await c.env.DB.prepare(
+      `INSERT INTO items (category_id, name, spec, unit, safety_stock, min_stock, current_stock, unit_price, memo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(categoryId, name, spec || null, '개', safetyStock, minStock, currentStock, unitPrice, memo).run();
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('UNIQUE constraint failed')) {
+      return c.json(apiErr('DUPLICATE_ITEM', '이미 동일한 이름의 품목이 존재합니다.'), 409);
+    }
+    throw e;
+  }
 
   const id = Number(inserted.meta.last_row_id);
   const row = await c.env.DB.prepare(

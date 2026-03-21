@@ -16,7 +16,6 @@ export type Item = {
   category_id: number | null;
   category_name: string | null;
   name: string;
-  spec: string | null;
   unit: string;
   safety_stock: number;
   min_stock: number;
@@ -91,7 +90,6 @@ export type PurchaseOrderItem = {
   id: number;
   item_id: number;
   item_name: string;
-  spec: string | null;
   ordered_qty: number;
   received_qty: number;
   remaining_qty: number;
