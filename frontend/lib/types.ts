@@ -101,3 +101,11 @@ export type PurchaseOrderItem = {
 export type PurchaseOrderDetail = PurchaseOrder & {
   items: PurchaseOrderItem[];
 };
+
+export type AppUser = {
+  id: number;
+  username: string;
+  name: string;
+  is_active: number;
+  created_at: string;
+};

@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Bell, Boxes, Home, LayoutDashboard, LogOut, Menu, Package, ReceiptText } from 'lucide-react';
+import { Bell, Boxes, Home, LayoutDashboard, LogOut, Menu, Package, ReceiptText, Settings } from 'lucide-react';
 import { apiGet, apiPost, ApiError } from '@/lib/api';
 import { INVENTORY_REFRESH_EVENT } from '@/lib/constants';
 import type { DashboardData } from '@/lib/types';
@@ -19,6 +19,7 @@ const navItems = [
   { href: '/items', label: '품목관리', icon: Boxes, description: '재고/단가' },
   { href: '/orders', label: '발주관리', icon: ReceiptText, description: '발주/입고' },
   { href: '/alerts', label: '발주 알림', icon: Package, description: '부족 품목' },
+  { href: '/settings', label: '설정', icon: Settings, description: '계정/보안' },
 ];
 
 function statusTone(count: number) {

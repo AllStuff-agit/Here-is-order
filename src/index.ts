@@ -321,6 +321,69 @@ app.post('/api/auth/logout', async (c) => {
   return c.json(apiOk({ loggedOut: true }));
 });
 
+app.get('/api/users', async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT id, username, name, is_active, created_at FROM users WHERE is_deleted = 0 ORDER BY id ASC`
+  ).all<{ id: number; username: string; name: string; is_active: number; created_at: string }>();
+  return c.json(apiOk(rows.results));
+});
+
+app.post('/api/users', async (c) => {
+  const actor = c.get('user') as SessionUser;
+  const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const username = String(payload.username || '').trim();
+  const name = String(payload.name || '').trim();
+  const password = String(payload.password || '');
+
+  if (!username || !password) {
+    return c.json(apiErr('INVALID_INPUT', '아이디와 비밀번호는 필수입니다.'), 400);
+  }
+  if (password.length < 6) {
+    return c.json(apiErr('INVALID_INPUT', '비밀번호는 6자 이상이어야 합니다.'), 400);
+  }
+
+  const existing = await c.env.DB.prepare(`SELECT id FROM users WHERE username = ? AND is_deleted = 0`).bind(username).first();
+  if (existing) {
+    return c.json(apiErr('DUPLICATE_USERNAME', '이미 사용 중인 아이디입니다.'), 409);
+  }
+
+  const hash = await hashPassword(password);
+  const result = await c.env.DB.prepare(
+    `INSERT INTO users (username, password_hash, name) VALUES (?, ?, ?)`
+  ).bind(username, hash, name || username).run();
+
+  const newUser = await c.env.DB.prepare(`SELECT id, username, name, is_active, created_at FROM users WHERE id = ?`).bind(result.meta.last_row_id).first();
+  await writeAudit(c.env.DB, actor.id, 'create', 'user', Number(result.meta.last_row_id), undefined, { username });
+  return c.json(apiOk(newUser), 201);
+});
+
+app.patch('/api/users/me/password', async (c) => {
+  const user = c.get('user') as SessionUser;
+  const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const currentPassword = String(payload.current_password || '');
+  const newPassword = String(payload.new_password || '');
+
+  if (!currentPassword || !newPassword) {
+    return c.json(apiErr('INVALID_INPUT', '현재 비밀번호와 새 비밀번호를 입력해주세요.'), 400);
+  }
+  if (newPassword.length < 6) {
+    return c.json(apiErr('INVALID_INPUT', '새 비밀번호는 6자 이상이어야 합니다.'), 400);
+  }
+
+  const row = await c.env.DB.prepare(`SELECT password_hash FROM users WHERE id = ?`).bind(user.id).first<{ password_hash: string }>();
+  if (!row) return c.json(apiErr('NOT_FOUND', '계정을 찾을 수 없습니다.'), 404);
+
+  const check = await verifyPassword(currentPassword, row.password_hash);
+  if (!check.valid) {
+    return c.json(apiErr('INVALID_CREDENTIALS', '현재 비밀번호가 올바르지 않습니다.'), 401);
+  }
+
+  const newHash = await hashPassword(newPassword);
+  await c.env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`).bind(newHash, user.id).run();
+  await writeAudit(c.env.DB, user.id, 'change_password', 'user', user.id);
+  return c.json(apiOk({ ok: true }));
+});
+
 app.get('/api/categories', async (c) => {
   const includeDeleted = c.req.query('includeDeleted') === 'true';
   const rows = await c.env.DB.prepare(
