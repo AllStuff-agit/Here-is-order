@@ -16,7 +16,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
 import { ALL_CATEGORY_VALUE, INVENTORY_REFRESH_EVENT } from '@/lib/constants';
-import { formatDateTime } from '@/lib/format';
+import { formatDateTime, getStockStatus, stockStatusLabel } from '@/lib/format';
 import { Category, Item, StockTransaction } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -296,6 +296,14 @@ export default function ItemsPage() {
     };
   }, []);
 
+  const sortedRows = React.useMemo(() => {
+    const order = { critical: 0, warning: 1, normal: 2 } as const;
+    return [...items].sort((a, b) =>
+      order[getStockStatus(a.current_stock, a.safety_stock, a.min_stock)] -
+      order[getStockStatus(b.current_stock, b.safety_stock, b.min_stock)],
+    );
+  }, [items]);
+
   return (
     <div className="section-gap">
       <div className="page-header">
@@ -322,6 +330,7 @@ export default function ItemsPage() {
                   <Input
                     id="name"
                     required
+                    autoFocus
                     value={form.name}
                     onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
                   />
@@ -478,41 +487,35 @@ export default function ItemsPage() {
           ) : (
             <>
               <div className="space-y-2 md:hidden">
-                {items.length === 0 ? (
-                  <p className="data-empty">품목이 없습니다.</p>
+                {sortedRows.length === 0 ? (
+                  <p className="data-empty">
+                    {q || categoryId || needReorder
+                      ? '검색 조건에 맞는 품목이 없습니다.'
+                      : "아직 등록된 품목이 없습니다. 상단의 '품목 추가' 버튼을 눌러 시작하세요."}
+                  </p>
                 ) : (
-                  items.map((item) => {
-                    const needOrder = Number(item.current_stock || 0) <= Number(item.safety_stock || 0);
-                    const critical = Number(item.current_stock || 0) <= Number(item.min_stock || 0);
+                  sortedRows.map((item) => {
+                    const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
+                    const needOrder = status === 'critical' || status === 'warning';
                     return (
                       <Card key={item.id} className="border-border/70">
                         <CardContent className="space-y-3 p-3">
                           <div className="flex items-start justify-between gap-2">
                             <div>
                               <p className="font-medium">{item.name}</p>
-                              <p className="text-xs text-muted-foreground">
-                                {item.spec || '규격없음'} · {item.category_name || '분류없음'}
-                              </p>
+                              {item.category_name ? (
+                                <p className="text-xs text-muted-foreground">{item.category_name}</p>
+                              ) : null}
                             </div>
-                            {critical ? (
-                              <Badge variant="destructive" className="text-xs">
-                                <ShieldAlert className="mr-1 size-3" />
-                                긴급
-                              </Badge>
-                            ) : needOrder ? (
-                              <Badge variant="secondary" className="text-xs">
-                                주의
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="text-xs">정상</Badge>
-                            )}
+                            <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'} className="text-xs">
+                              {status === 'critical' && <ShieldAlert className="mr-1 size-3" />}
+                              {stockStatusLabel(status)}
+                            </Badge>
                           </div>
                           <div className="grid grid-cols-2 gap-2 text-xs">
                             <p className="text-muted-foreground">현재고: <span className="font-medium text-foreground">{num(item.current_stock)}개</span></p>
                             <p className="text-muted-foreground">안전재고: <span className="font-medium text-foreground">{num(item.safety_stock)}개</span></p>
-                            <p className="text-muted-foreground">최소재고: <span className="font-medium text-foreground">{num(item.min_stock)}개</span></p>
-                            <p className="text-muted-foreground">권장입고: <span className="font-semibold text-primary">{num(item.suggested_qty)}개</span></p>
-                            <p className="col-span-2 text-muted-foreground">단가: <span className="font-medium text-foreground">{num(item.unit_price)}원</span></p>
+                            <p className="col-span-2 text-muted-foreground">권장입고: <span className="font-semibold text-primary">{num(item.suggested_qty)}개</span></p>
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <Button variant="outline" size="sm" onClick={() => openStockDialog(item)}>
@@ -556,11 +559,11 @@ export default function ItemsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {items.map((item) => {
-                      const needOrder = Number(item.current_stock || 0) <= Number(item.safety_stock || 0);
-                      const critical = Number(item.current_stock || 0) <= Number(item.min_stock || 0);
+                    {sortedRows.map((item) => {
+                      const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
+                      const needOrder = status === 'critical' || status === 'warning';
                       return (
-                        <TableRow key={item.id}>
+                        <TableRow key={item.id} className={status === 'critical' ? 'bg-destructive/5' : ''}>
                           <TableCell>
                             <div>
                               <p className="font-medium">{item.name}</p>
@@ -575,18 +578,10 @@ export default function ItemsPage() {
                           <TableCell>{num(item.suggested_qty)}개</TableCell>
                           <TableCell>{num(item.unit_price)}원</TableCell>
                           <TableCell className="text-right">
-                            {critical ? (
-                              <Badge variant="destructive" className="text-xs">
-                                <ShieldAlert className="mr-1 size-3" />
-                                긴급
-                              </Badge>
-                            ) : needOrder ? (
-                              <Badge variant="secondary" className="text-xs">
-                                주의
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="text-xs">정상</Badge>
-                            )}
+                            <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'} className="text-xs">
+                              {status === 'critical' && <ShieldAlert className="mr-1 size-3" />}
+                              {stockStatusLabel(status)}
+                            </Badge>
                           </TableCell>
                           <TableCell className="text-right">
                             <div className="flex flex-wrap justify-end gap-1">
@@ -611,10 +606,12 @@ export default function ItemsPage() {
                         </TableRow>
                       );
                     })}
-                    {items.length === 0 ? (
+                    {sortedRows.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={10} className="py-6 text-center text-muted-foreground">
-                          품목이 없습니다.
+                          {q || categoryId || needReorder
+                            ? '검색 조건에 맞는 품목이 없습니다.'
+                            : "아직 등록된 품목이 없습니다. 상단의 '품목 추가' 버튼을 눌러 시작하세요."}
                         </TableCell>
                       </TableRow>
                     ) : null}
@@ -663,9 +660,9 @@ export default function ItemsPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="IN">IN(입고 +)</SelectItem>
-                  <SelectItem value="OUT">OUT(사용 -)</SelectItem>
-                  <SelectItem value="ADJUST">ADJUST(직접 조정)</SelectItem>
+                  <SelectItem value="IN">입고</SelectItem>
+                  <SelectItem value="OUT">사용</SelectItem>
+                  <SelectItem value="ADJUST">조정</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -674,6 +671,7 @@ export default function ItemsPage() {
               <Input
                 id="quantity"
                 type="number"
+                autoFocus
                 value={stockDialog.quantity}
                 onChange={(event) => setStockDialog((prev) => ({ ...prev, quantity: event.target.value }))}
               />
@@ -730,12 +728,12 @@ export default function ItemsPage() {
                     <TableRow key={row.id}>
                       <TableCell>{formatDateTime(row.created_at)}</TableCell>
                       <TableCell>
-                        <Badge variant={row.movement_type === 'IN' ? 'secondary' : 'destructive'}>
-                          {row.movement_type}
+                        <Badge variant={row.movement_type === 'IN' ? 'secondary' : row.movement_type === 'ADJUST' ? 'outline' : 'destructive'}>
+                          {row.movement_type === 'IN' ? '입고' : row.movement_type === 'OUT' ? '사용' : '조정'}
                         </Badge>
                       </TableCell>
                       <TableCell className={cn(row.quantity > 0 ? 'text-primary' : 'text-destructive')}>
-                        {row.quantity > 0 ? `+${row.quantity}` : row.quantity}
+                        {row.quantity > 0 ? `+${num(row.quantity)}` : num(row.quantity)}
                       </TableCell>
                       <TableCell>{row.reason || '-'}</TableCell>
                     </TableRow>

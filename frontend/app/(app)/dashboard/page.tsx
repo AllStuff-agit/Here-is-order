@@ -5,6 +5,7 @@ import { ChevronDown, Minus, PackageSearch, ReceiptText, TrendingDown, TrendingU
 import { useRouter } from 'next/navigation';
 import { apiGet, apiPost, ApiError } from '@/lib/api';
 import type { DashboardData } from '@/lib/types';
+import { getStockStatus, stockStatusLabel } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -183,55 +184,73 @@ function QuickOrderDialog({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {items.map((item) => {
-                  const row = rows[item.id];
-                  const selected = row?.selected ?? false;
-                  const suggestedQty = Number(item.suggested_qty || 0);
-                  const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
-                  const fullyCovered = suggestedQty === 0;
-                  return (
-                    <TableRow key={item.id} className={selected ? '' : 'opacity-50'}>
-                      <TableCell>
-                        <Checkbox
-                          checked={selected}
-                          onCheckedChange={() => toggleRow(item.id)}
-                          disabled={submitting}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <div className="font-medium">{item.name}</div>
-                        <div className="flex flex-wrap gap-1 mt-0.5">
-                          {item.category_name ? (
-                            <span className="text-xs text-muted-foreground">{item.category_name}</span>
-                          ) : null}
-                          {onOrderQty > 0 ? (
-                            <span className="text-xs text-blue-600 dark:text-blue-400">발주중 {onOrderQty.toLocaleString('ko-KR')}개</span>
-                          ) : null}
-                          {fullyCovered ? (
-                            <span className="text-xs text-muted-foreground">입고 대기 중</span>
-                          ) : null}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right text-sm tabular-nums">
-                        {Number(item.current_stock || 0).toLocaleString('ko-KR')}개
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {fullyCovered ? (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        ) : (
-                          <Input
-                            type="number"
-                            min="1"
-                            value={row?.qty ?? '1'}
-                            onChange={(e) => setQty(item.id, e.target.value)}
-                            disabled={!selected || submitting}
-                            className="h-8 w-20 text-right"
+                {(() => {
+                  const statusOrder = { critical: 0, warning: 1, normal: 2 } as const;
+                  const sortedItems = [...items].sort((a, b) => {
+                    const sugA = Number(a.suggested_qty || 0);
+                    const sugB = Number(b.suggested_qty || 0);
+                    if (sugA === 0 && sugB > 0) return 1;
+                    if (sugB === 0 && sugA > 0) return -1;
+                    const stA = getStockStatus(a.current_stock, a.safety_stock, a.min_stock);
+                    const stB = getStockStatus(b.current_stock, b.safety_stock, b.min_stock);
+                    return statusOrder[stA] - statusOrder[stB];
+                  });
+                  return sortedItems.map((item) => {
+                    const row = rows[item.id];
+                    const selected = row?.selected ?? false;
+                    const suggestedQty = Number(item.suggested_qty || 0);
+                    const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
+                    const fullyCovered = suggestedQty === 0;
+                    const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
+                    return (
+                      <TableRow key={item.id} className={selected ? '' : 'opacity-50'}>
+                        <TableCell>
+                          <Checkbox
+                            checked={selected}
+                            onCheckedChange={() => toggleRow(item.id)}
+                            disabled={submitting}
                           />
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1.5 font-medium">
+                            {item.name}
+                            {status === 'critical' && !fullyCovered ? (
+                              <Badge variant="destructive" className="px-1 py-0 text-[10px]">위험</Badge>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap gap-1 mt-0.5">
+                            {item.category_name ? (
+                              <span className="text-xs text-muted-foreground">{item.category_name}</span>
+                            ) : null}
+                            {onOrderQty > 0 ? (
+                              <span className="text-xs text-blue-600 dark:text-blue-400">발주중 {onOrderQty.toLocaleString('ko-KR')}개</span>
+                            ) : null}
+                            {fullyCovered ? (
+                              <span className="text-xs text-muted-foreground">입고 대기 중</span>
+                            ) : null}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right text-sm tabular-nums">
+                          {Number(item.current_stock || 0).toLocaleString('ko-KR')}개
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {fullyCovered ? (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          ) : (
+                            <Input
+                              type="number"
+                              min="1"
+                              value={row?.qty ?? '1'}
+                              onChange={(e) => setQty(item.id, e.target.value)}
+                              disabled={!selected || submitting}
+                              className="h-8 w-20 text-right"
+                            />
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  });
+                })()}
               </TableBody>
             </Table>
           </div>
@@ -344,13 +363,13 @@ export default function DashboardPage() {
         </div>
       ) : (
         <>
+          {(() => {
+            const criticalCount = data.low_stock_items.filter(i => getStockStatus(i.current_stock, i.safety_stock, i.min_stock) === 'critical').length;
+            const warningCount = data.low_stock_items.filter(i => getStockStatus(i.current_stock, i.safety_stock, i.min_stock) === 'warning').length;
+            return (
           <div className="metric-grid">
-            <MetricCard
-              title="발주 필요 품목"
-              value={data.low_stock_count}
-              description={`임계치 미만 품목 (${from} ~ ${to})`}
-              tone={data.low_stock_count >= 8 ? 'destructive' : 'default'}
-            />
+            <MetricCard title="위험 품목" value={criticalCount} description="최소재고 미만 (즉시 발주 필요)" tone={criticalCount > 0 ? 'destructive' : 'default'} />
+            <MetricCard title="주의 품목" value={warningCount} description="안전재고 미만 (발주 권장)" tone="default" />
             <MetricCard
               title="등록 품목"
               value={data.item_count}
@@ -368,6 +387,8 @@ export default function DashboardPage() {
               description={`${data.monthly_summary.period_from} ~ ${data.monthly_summary.period_to}`}
             />
           </div>
+            );
+          })()}
 
           <Card>
             <CardHeader>
@@ -405,33 +426,41 @@ export default function DashboardPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.low_stock_items.slice(0, 8).map((item) => {
-                        const suggestedQty = Number(item.suggested_qty || 0);
-                        const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
-                        const fullyCovered = suggestedQty === 0 && onOrderQty > 0;
-                        const isCritical = Number(item.current_stock || 0) <= Number(item.min_stock);
-                        return (
-                          <TableRow key={item.id}>
-                            <TableCell>{item.name}</TableCell>
-                            <TableCell className="text-right tabular-nums">{Number(item.current_stock || 0).toLocaleString('ko-KR')}개</TableCell>
-                            <TableCell className="text-right tabular-nums text-blue-600 dark:text-blue-400">
-                              {onOrderQty > 0 ? `${onOrderQty.toLocaleString('ko-KR')}개` : '—'}
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums">
-                              {suggestedQty > 0 ? `${suggestedQty.toLocaleString('ko-KR')}개` : '—'}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {fullyCovered ? (
-                                <Badge variant="outline">입고대기</Badge>
-                              ) : isCritical ? (
-                                <Badge variant="destructive">임계치 미만</Badge>
-                              ) : (
-                                <Badge variant="secondary">주의</Badge>
-                              )}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
+                      {(() => {
+                        const statusOrder = { critical: 0, warning: 1, normal: 2 } as const;
+                        const sortedItems = [...data.low_stock_items].sort((a, b) => {
+                          const stA = getStockStatus(a.current_stock, a.safety_stock, a.min_stock);
+                          const stB = getStockStatus(b.current_stock, b.safety_stock, b.min_stock);
+                          return statusOrder[stA] - statusOrder[stB];
+                        });
+                        return sortedItems.slice(0, 8).map((item) => {
+                          const suggestedQty = Number(item.suggested_qty || 0);
+                          const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
+                          const fullyCovered = suggestedQty === 0 && onOrderQty > 0;
+                          const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
+                          return (
+                            <TableRow key={item.id} className={status === 'critical' ? 'bg-destructive/5' : ''}>
+                              <TableCell>{item.name}</TableCell>
+                              <TableCell className="text-right tabular-nums">{Number(item.current_stock || 0).toLocaleString('ko-KR')}개</TableCell>
+                              <TableCell className="text-right tabular-nums text-blue-600 dark:text-blue-400">
+                                {onOrderQty > 0 ? `${onOrderQty.toLocaleString('ko-KR')}개` : '—'}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {suggestedQty > 0 ? `${suggestedQty.toLocaleString('ko-KR')}개` : '—'}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                {fullyCovered ? (
+                                  <Badge variant="outline">입고대기</Badge>
+                                ) : (
+                                  <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'}>
+                                    {stockStatusLabel(status)}
+                                  </Badge>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        });
+                      })()}
                     </TableBody>
                   </Table>
                 </div>

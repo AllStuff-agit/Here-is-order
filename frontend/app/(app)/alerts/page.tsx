@@ -6,13 +6,12 @@ import { useRouter } from 'next/navigation';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiGet, ApiError } from '@/lib/api';
 import { ALL_CATEGORY_VALUE } from '@/lib/constants';
+import { getStockStatus, stockStatusLabel, type StockStatus } from '@/lib/format';
 import type { Category, Item } from '@/lib/types';
 
 function num(value: number) {
@@ -25,7 +24,7 @@ export default function AlertsPage() {
   const [error, setError] = React.useState('');
   const [keyword, setKeyword] = React.useState('');
   const [categoryId, setCategoryId] = React.useState('');
-  const [onlyCritical, setOnlyCritical] = React.useState(false);
+  const [severity, setSeverity] = React.useState<'all' | 'warning' | 'critical'>('all');
   const [orders, setOrders] = React.useState<Item[]>([]);
   const [categories, setCategories] = React.useState<Category[]>([]);
 
@@ -66,11 +65,16 @@ export default function AlertsPage() {
           (item.category_name || '').toLowerCase().includes(q)
         );
       })
-      .filter((item) => {
-        if (!onlyCritical) return true;
-        return Number(item.current_stock || 0) <= Number(item.min_stock || 0);
+      .filter((row) => {
+        if (severity === 'all') return true;
+        const status = getStockStatus(row.current_stock, row.safety_stock, row.min_stock);
+        return status === severity;
+      })
+      .sort((a, b) => {
+        const order = { critical: 0, warning: 1, normal: 2 };
+        return order[getStockStatus(a.current_stock, a.safety_stock, a.min_stock)] - order[getStockStatus(b.current_stock, b.safety_stock, b.min_stock)];
       });
-  }, [orders, categoryId, keyword, onlyCritical]);
+  }, [orders, categoryId, keyword, severity]);
 
   const urgentCount = orders.filter((item) => Number(item.current_stock || 0) <= Number(item.min_stock || 0)).length;
 
@@ -151,14 +155,29 @@ export default function AlertsPage() {
                 ))}
               </SelectContent>
             </Select>
-            <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-              <Checkbox
-                id="onlyCritical"
-                checked={onlyCritical}
-                onCheckedChange={(value) => setOnlyCritical(Boolean(value))}
-              />
-              <Label htmlFor="onlyCritical">매우 긴급(현재고 ≤ 최소재고)만 보기</Label>
-            </label>
+            <div className="flex gap-1">
+              <Button
+                size="sm"
+                variant={severity === 'all' ? 'default' : 'outline'}
+                onClick={() => setSeverity('all')}
+              >
+                전체
+              </Button>
+              <Button
+                size="sm"
+                variant={severity === 'warning' ? 'secondary' : 'outline'}
+                onClick={() => setSeverity('warning')}
+              >
+                주의
+              </Button>
+              <Button
+                size="sm"
+                variant={severity === 'critical' ? 'destructive' : 'outline'}
+                onClick={() => setSeverity('critical')}
+              >
+                위험
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -178,14 +197,18 @@ export default function AlertsPage() {
               </Button>
             </div>
           ) : filtered.length === 0 ? (
-            <p className="data-empty">현재 조건에 해당하는 발주 알림이 없습니다.</p>
+            <p className="data-empty">
+              {orders.length === 0
+                ? '현재 재고 부족 품목이 없습니다. 재고가 안전재고 이하로 떨어지면 여기에 표시됩니다.'
+                : '선택한 조건에 해당하는 알림이 없습니다.'}
+            </p>
           ) : (
             <>
               <div className="space-y-2 md:hidden">
                 {filtered.map((item) => {
-                  const isCritical = Number(item.current_stock || 0) <= Number(item.min_stock || 0);
+                  const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                   return (
-                    <Card key={item.id} className="border-border/70">
+                    <Card key={item.id} className={`border-border/70 ${status === 'critical' ? 'border-destructive/40' : ''}`}>
                       <CardContent className="space-y-3 p-3">
                         <div className="flex items-start justify-between gap-2">
                           <div>
@@ -194,8 +217,8 @@ export default function AlertsPage() {
                               {item.spec || '규격없음'} · {item.category_name || '분류없음'}
                             </p>
                           </div>
-                          <Badge variant={isCritical ? 'destructive' : 'secondary'}>
-                            {isCritical ? '긴급' : '주의'}
+                          <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'}>
+                            {stockStatusLabel(status)}
                           </Badge>
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -210,7 +233,7 @@ export default function AlertsPage() {
                           onClick={() => goToOrderDraft(item)}
                         >
                           <ArrowRightCircle className="size-4" />
-                          발주 초안으로 추가
+                          발주 초안 추가
                         </Button>
                       </CardContent>
                     </Card>
@@ -235,9 +258,9 @@ export default function AlertsPage() {
                   </TableHeader>
                   <TableBody>
                     {filtered.map((item) => {
-                      const isCritical = Number(item.current_stock || 0) <= Number(item.min_stock || 0);
+                      const status = getStockStatus(item.current_stock, item.safety_stock, item.min_stock);
                       return (
-                        <TableRow key={item.id}>
+                        <TableRow key={item.id} className={status === 'critical' ? 'bg-destructive/5' : ''}>
                           <TableCell>{item.name}</TableCell>
                           <TableCell>{item.spec || '-'}</TableCell>
                           <TableCell>{item.category_name || '-'}</TableCell>
@@ -246,8 +269,8 @@ export default function AlertsPage() {
                           <TableCell>{num(item.min_stock)}개</TableCell>
                           <TableCell>{num(item.suggested_qty)}개</TableCell>
                           <TableCell className="text-right">
-                            <Badge variant={isCritical ? 'destructive' : 'secondary'}>
-                              {isCritical ? '긴급' : '주의'}
+                            <Badge variant={status === 'critical' ? 'destructive' : status === 'warning' ? 'secondary' : 'outline'}>
+                              {stockStatusLabel(status)}
                             </Badge>
                           </TableCell>
                           <TableCell className="text-right">
@@ -257,7 +280,7 @@ export default function AlertsPage() {
                               onClick={() => goToOrderDraft(item)}
                             >
                               <ArrowRightCircle className="size-4" />
-                              발주초안
+                              발주 초안 추가
                             </Button>
                           </TableCell>
                         </TableRow>
