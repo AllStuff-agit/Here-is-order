@@ -84,7 +84,8 @@ function QuickOrderDialog({
     if (!open) return;
     const initial: Record<number, RowState> = {};
     for (const item of items) {
-      initial[item.id] = { selected: true, qty: String(Math.max(1, Number(item.suggested_qty || 1))) };
+      const needsMore = Number(item.suggested_qty || 0) > 0;
+      initial[item.id] = { selected: needsMore, qty: String(Math.max(1, Number(item.suggested_qty || 1))) };
     }
     setRows(initial);
     setTitle(`긴급 발주 ${new Date().toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })}`);
@@ -184,9 +185,12 @@ function QuickOrderDialog({
               <TableBody>
                 {items.map((item) => {
                   const row = rows[item.id];
-                  const selected = row?.selected ?? true;
+                  const selected = row?.selected ?? false;
+                  const suggestedQty = Number(item.suggested_qty || 0);
+                  const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
+                  const fullyCovered = suggestedQty === 0;
                   return (
-                    <TableRow key={item.id} className={selected ? '' : 'opacity-40'}>
+                    <TableRow key={item.id} className={selected ? '' : 'opacity-50'}>
                       <TableCell>
                         <Checkbox
                           checked={selected}
@@ -196,22 +200,34 @@ function QuickOrderDialog({
                       </TableCell>
                       <TableCell>
                         <div className="font-medium">{item.name}</div>
-                        {item.category_name ? (
-                          <div className="text-xs text-muted-foreground">{item.category_name}</div>
-                        ) : null}
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {item.category_name ? (
+                            <span className="text-xs text-muted-foreground">{item.category_name}</span>
+                          ) : null}
+                          {onOrderQty > 0 ? (
+                            <span className="text-xs text-blue-600 dark:text-blue-400">발주중 {onOrderQty.toLocaleString('ko-KR')}개</span>
+                          ) : null}
+                          {fullyCovered ? (
+                            <span className="text-xs text-muted-foreground">입고 대기 중</span>
+                          ) : null}
+                        </div>
                       </TableCell>
                       <TableCell className="text-right text-sm tabular-nums">
                         {Number(item.current_stock || 0).toLocaleString('ko-KR')}개
                       </TableCell>
                       <TableCell className="text-right">
-                        <Input
-                          type="number"
-                          min="1"
-                          value={row?.qty ?? '1'}
-                          onChange={(e) => setQty(item.id, e.target.value)}
-                          disabled={!selected || submitting}
-                          className="h-8 w-20 text-right"
-                        />
+                        {fullyCovered ? (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        ) : (
+                          <Input
+                            type="number"
+                            min="1"
+                            value={row?.qty ?? '1'}
+                            onChange={(e) => setQty(item.id, e.target.value)}
+                            disabled={!selected || submitting}
+                            className="h-8 w-20 text-right"
+                          />
+                        )}
                       </TableCell>
                     </TableRow>
                   );
@@ -364,7 +380,7 @@ export default function DashboardPage() {
                   <Button variant="outline" onClick={() => router.push('/alerts')}>
                     전체 보기
                   </Button>
-                  {data.low_stock_items.length > 0 ? (
+                  {data.low_stock_items.some((i) => Number(i.suggested_qty || 0) > 0) ? (
                     <Button size="sm" onClick={() => setQuickOrderOpen(true)}>
                       <ShoppingCart className="size-4" />
                       바로 발주
@@ -382,26 +398,36 @@ export default function DashboardPage() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>품목명</TableHead>
-                        <TableHead>현재고</TableHead>
-                        <TableHead>안전재고</TableHead>
-                        <TableHead>권장 입고</TableHead>
+                        <TableHead className="text-right">현재고</TableHead>
+                        <TableHead className="text-right">발주대기</TableHead>
+                        <TableHead className="text-right">추가 필요</TableHead>
                         <TableHead className="text-right">상태</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {data.low_stock_items.slice(0, 8).map((item) => {
-                        const isCritical =
-                          Number(item.current_stock || 0) <= Number(item.min_stock);
+                        const suggestedQty = Number(item.suggested_qty || 0);
+                        const onOrderQty = Math.max(0, (Number(item.safety_stock) - Number(item.current_stock)) - suggestedQty);
+                        const fullyCovered = suggestedQty === 0 && onOrderQty > 0;
+                        const isCritical = Number(item.current_stock || 0) <= Number(item.min_stock);
                         return (
                           <TableRow key={item.id}>
                             <TableCell>{item.name}</TableCell>
-                            <TableCell>{Number(item.current_stock || 0).toLocaleString('ko-KR')}개</TableCell>
-                            <TableCell>{Number(item.safety_stock || 0).toLocaleString('ko-KR')}개</TableCell>
-                            <TableCell>{Number(item.suggested_qty || 0).toLocaleString('ko-KR')}개</TableCell>
+                            <TableCell className="text-right tabular-nums">{Number(item.current_stock || 0).toLocaleString('ko-KR')}개</TableCell>
+                            <TableCell className="text-right tabular-nums text-blue-600 dark:text-blue-400">
+                              {onOrderQty > 0 ? `${onOrderQty.toLocaleString('ko-KR')}개` : '—'}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {suggestedQty > 0 ? `${suggestedQty.toLocaleString('ko-KR')}개` : '—'}
+                            </TableCell>
                             <TableCell className="text-right">
-                              <Badge variant={isCritical ? 'destructive' : 'secondary'}>
-                                {isCritical ? '임계치 미만' : '주의'}
-                              </Badge>
+                              {fullyCovered ? (
+                                <Badge variant="outline">입고대기</Badge>
+                              ) : isCritical ? (
+                                <Badge variant="destructive">임계치 미만</Badge>
+                              ) : (
+                                <Badge variant="secondary">주의</Badge>
+                              )}
                             </TableCell>
                           </TableRow>
                         );
