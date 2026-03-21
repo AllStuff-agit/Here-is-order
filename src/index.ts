@@ -21,6 +21,11 @@ type AppVariables = {
 
 const app = new Hono<{ Bindings: Env['Bindings']; Variables: AppVariables }>();
 
+app.onError((err, c) => {
+  console.error(err);
+  return c.json(apiErr('INTERNAL_ERROR', '서버 오류가 발생했습니다.'), 500);
+});
+
 const AUTH_COOKIE = 'isorder_sid';
 const SESSION_DAYS = 30;
 const SESSION_SECONDS = SESSION_DAYS * 24 * 60 * 60;
@@ -433,7 +438,7 @@ app.post('/api/categories', async (c) => {
     .first();
 
   await writeAudit(c.env.DB, user.id, 'create', 'category', id, undefined, row);
-  return c.json(apiOk(row));
+  return c.json(apiOk(row), 201);
 });
 
 app.patch('/api/categories/:id', async (c) => {
@@ -614,7 +619,7 @@ app.post('/api/items', async (c) => {
     .first();
 
   await writeAudit(c.env.DB, user.id, 'create', 'item', id, undefined, row);
-  return c.json(apiOk(row));
+  return c.json(apiOk(row), 201);
 });
 
 app.patch('/api/items/:id', async (c) => {
@@ -1027,7 +1032,7 @@ app.post('/api/purchase-orders/with-items', async (c) => {
 
   const orderRow = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0').bind(orderId).first();
   await writeAudit(c.env.DB, user.id, 'create', 'purchase_order', orderId, undefined, orderRow);
-  return c.json(apiOk({ id: orderId, title }), 201);
+  return c.json(apiOk(orderRow), 201);
 });
 
 app.get('/api/purchase-orders/:id', async (c) => {
