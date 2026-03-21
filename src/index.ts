@@ -942,7 +942,7 @@ app.post('/api/purchase-orders', async (c) => {
   const id = Number(r.meta.last_row_id);
   const row = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ?').bind(id).first();
   await writeAudit(c.env.DB, user.id, 'create', 'purchase_order', id, undefined, row);
-  return c.json(apiOk(row));
+  return c.json(apiOk(row), 201);
 });
 
 app.post('/api/purchase-orders/with-items', async (c) => {
