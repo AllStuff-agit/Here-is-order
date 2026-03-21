@@ -389,6 +389,27 @@ app.patch('/api/users/me/password', async (c) => {
   return c.json(apiOk({ ok: true }));
 });
 
+app.patch('/api/users/:id/password', async (c) => {
+  const actor = c.get('user') as SessionUser;
+  const targetId = parseIntValue(c.req.param('id'), null);
+  if (!targetId) return c.json(apiErr('INVALID_INPUT', '유효하지 않은 사용자 ID입니다.'), 400);
+
+  const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const newPassword = String(payload.new_password || '');
+
+  if (!newPassword || newPassword.length < 6) {
+    return c.json(apiErr('INVALID_INPUT', '새 비밀번호는 6자 이상이어야 합니다.'), 400);
+  }
+
+  const target = await c.env.DB.prepare(`SELECT id FROM users WHERE id = ? AND is_deleted = 0`).bind(targetId).first();
+  if (!target) return c.json(apiErr('NOT_FOUND', '사용자를 찾을 수 없습니다.'), 404);
+
+  const newHash = await hashPassword(newPassword);
+  await c.env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`).bind(newHash, targetId).run();
+  await writeAudit(c.env.DB, actor.id, 'reset_password', 'user', targetId);
+  return c.json(apiOk({ ok: true }));
+});
+
 app.get('/api/categories', async (c) => {
   const includeDeleted = c.req.query('includeDeleted') === 'true';
   const rows = await c.env.DB.prepare(

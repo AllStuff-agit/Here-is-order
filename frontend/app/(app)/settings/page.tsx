@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { KeyRound, Plus, UserCog } from 'lucide-react';
+import { KeyRound, Plus, RotateCcw, UserCog } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -28,6 +28,13 @@ export default function SettingsPage() {
   const [addPassword, setAddPassword] = React.useState('');
   const [addSubmitting, setAddSubmitting] = React.useState(false);
   const [addError, setAddError] = React.useState('');
+
+  const [resetTarget, setResetTarget] = React.useState<AppUser | null>(null);
+  const [resetPassword, setResetPassword] = React.useState('');
+  const [resetConfirm, setResetConfirm] = React.useState('');
+  const [resetSubmitting, setResetSubmitting] = React.useState(false);
+  const [resetError, setResetError] = React.useState('');
+  const [resetMessage, setResetMessage] = React.useState('');
 
   const [pwCurrent, setPwCurrent] = React.useState('');
   const [pwNew, setPwNew] = React.useState('');
@@ -66,6 +73,28 @@ export default function SettingsPage() {
       setAddError(e instanceof Error ? e.message : '생성에 실패했습니다.');
     } finally {
       setAddSubmitting(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError('');
+    setResetMessage('');
+    if (resetPassword !== resetConfirm) {
+      setResetError('새 비밀번호가 일치하지 않습니다.');
+      return;
+    }
+    if (!resetTarget) return;
+    setResetSubmitting(true);
+    try {
+      await apiPatch(`/api/users/${resetTarget.id}/password`, { new_password: resetPassword });
+      setResetMessage('비밀번호가 초기화되었습니다.');
+      setResetPassword('');
+      setResetConfirm('');
+    } catch (e) {
+      setResetError(e instanceof ApiError ? e.message : '초기화에 실패했습니다.');
+    } finally {
+      setResetSubmitting(false);
     }
   };
 
@@ -184,6 +213,7 @@ export default function SettingsPage() {
                   <SortableHeader label="이름" sortKey="name" sort={usersSort} onSort={usersToggle} />
                   <TableHead>상태</TableHead>
                   <SortableHeader label="생성일" sortKey="created_at" sort={usersSort} onSort={usersToggle} />
+                  <TableHead className="text-right">비밀번호</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -197,6 +227,22 @@ export default function SettingsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">{formatDateTime(u.created_at)}</TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setResetTarget(u);
+                          setResetPassword('');
+                          setResetConfirm('');
+                          setResetError('');
+                          setResetMessage('');
+                        }}
+                      >
+                        <RotateCcw className="size-3" />
+                        초기화
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -204,6 +250,48 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* 비밀번호 강제 초기화 다이얼로그 */}
+      <Dialog open={!!resetTarget} onOpenChange={(open) => { if (!open) setResetTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>비밀번호 강제 초기화</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            <span className="font-semibold text-foreground">{resetTarget?.username}</span> 계정의 비밀번호를 새로 설정합니다.
+          </p>
+          <form onSubmit={handleResetPassword} className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>새 비밀번호</Label>
+              <Input
+                required
+                autoFocus
+                type="password"
+                value={resetPassword}
+                onChange={(e) => setResetPassword(e.target.value)}
+                placeholder="6자 이상"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>새 비밀번호 확인</Label>
+              <Input
+                required
+                type="password"
+                value={resetConfirm}
+                onChange={(e) => setResetConfirm(e.target.value)}
+              />
+            </div>
+            {resetError ? <p className="text-sm text-destructive">{resetError}</p> : null}
+            {resetMessage ? <p className="text-sm text-primary">{resetMessage}</p> : null}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setResetTarget(null)}>취소</Button>
+              <Button type="submit" disabled={resetSubmitting}>
+                {resetSubmitting ? '초기화 중...' : '초기화'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* 비밀번호 변경 */}
       <Card>
