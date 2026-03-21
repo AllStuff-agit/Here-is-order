@@ -58,12 +58,15 @@ export default function OrdersPage() {
   const [orders, setOrders] = React.useState<PurchaseOrder[]>([]);
   const [items, setItems] = React.useState<Item[]>([]);
   const [statusFilter, setStatusFilter] = React.useState<BusinessStatusFilter>('all');
-  const [from, setFrom] = React.useState(() => {
+  const [from, setFrom] = React.useState('');
+  const [to, setTo] = React.useState('');
+
+  React.useEffect(() => {
     const d = new Date();
     d.setDate(d.getDate() - 30);
-    return d.toISOString().slice(0, 10);
-  });
-  const [to, setTo] = React.useState(() => new Date().toISOString().slice(0, 10));
+    setFrom(d.toISOString().slice(0, 10));
+    setTo(new Date().toISOString().slice(0, 10));
+  }, []);
   const [search, setSearch] = React.useState('');
 
   const [deleteTarget, setDeleteTarget] = React.useState<PurchaseOrder | null>(null);

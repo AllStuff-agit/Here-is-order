@@ -35,7 +35,7 @@ function toOrderId(raw: string | string[] | undefined): ParsedOrderId {
   return { value: id };
 }
 
-export default function OrderDetailPage() {
+function OrderDetailPageContent() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -839,5 +839,13 @@ export default function OrderDetailPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+export default function OrderDetailPage() {
+  return (
+    <React.Suspense>
+      <OrderDetailPageContent />
+    </React.Suspense>
   );
 }

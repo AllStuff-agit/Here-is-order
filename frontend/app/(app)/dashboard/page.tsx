@@ -294,8 +294,13 @@ function getDefaultTo() {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [from, setFrom] = React.useState(getDefaultFrom());
-  const [to, setTo] = React.useState(getDefaultTo());
+  const [from, setFrom] = React.useState('');
+  const [to, setTo] = React.useState('');
+
+  React.useEffect(() => {
+    setFrom(getDefaultFrom());
+    setTo(getDefaultTo());
+  }, []);
   const [loading, setLoading] = React.useState(true);
   const [data, setData] = React.useState<DashboardData | null>(null);
   const [error, setError] = React.useState('');
