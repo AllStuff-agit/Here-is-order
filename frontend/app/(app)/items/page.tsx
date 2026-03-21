@@ -567,7 +567,9 @@ export default function ItemsPage() {
                           <TableCell>
                             <div>
                               <p className="font-medium">{item.name}</p>
-                              <p className="text-xs text-muted-foreground">{item.memo || '-'}</p>
+                              {item.category_name ? (
+                                <p className="text-xs text-muted-foreground">{item.category_name}</p>
+                              ) : null}
                             </div>
                           </TableCell>
                           <TableCell>{item.spec || '-'}</TableCell>
