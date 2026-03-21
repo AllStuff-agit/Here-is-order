@@ -34,6 +34,7 @@ type StockDialogState = {
   movementType: StockMovement['movement_type'];
   quantity: string;
   reason: string;
+  error: string;
 };
 
 type LedgerState = {
@@ -92,6 +93,7 @@ export default function ItemsPage() {
     movementType: 'IN',
     quantity: '1',
     reason: '',
+    error: '',
   });
   const [ledger, setLedger] = React.useState<LedgerState>({
     open: false,
@@ -232,14 +234,15 @@ export default function ItemsPage() {
     if (!stockDialog.item || stockSubmitting) return;
     const qty = Number(stockDialog.quantity);
     if (!Number.isInteger(qty) || (qty === 0 && stockDialog.movementType !== 'ADJUST')) {
-      resetSubmitMessage('수량은 0이 아닌 정수여야 합니다.');
+      setStockDialog((prev) => ({ ...prev, error: '수량은 0이 아닌 정수여야 합니다.' }));
       return;
     }
     if ((stockDialog.movementType === 'IN' || stockDialog.movementType === 'OUT') && qty < 0) {
-      resetSubmitMessage('입고/사용 수량은 양수여야 합니다.');
+      setStockDialog((prev) => ({ ...prev, error: '입고/사용 수량은 양수여야 합니다.' }));
       return;
     }
 
+    setStockDialog((prev) => ({ ...prev, error: '' }));
     setStockSubmitting(true);
     try {
       const payload: StockMovement = {
@@ -254,7 +257,7 @@ export default function ItemsPage() {
       await loadSeed();
       notifyInventoryStateUpdated();
     } catch (e) {
-      resetSubmitMessage(e instanceof Error ? e.message : '재고 반영 실패');
+      setStockDialog((prev) => ({ ...prev, error: e instanceof Error ? e.message : '재고 반영 실패' }));
     } finally {
       setStockSubmitting(false);
     }
@@ -671,6 +674,9 @@ export default function ItemsPage() {
               />
             </div>
           </div>
+          {stockDialog.error ? (
+            <p className="text-sm text-destructive">{stockDialog.error}</p>
+          ) : null}
           <DialogFooter>
             <Button variant="outline" onClick={() => setStockDialog((prev) => ({ ...prev, open: false }))}>
               취소
