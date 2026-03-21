@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { KeyRound, Plus, RotateCcw, UserCog } from 'lucide-react';
+import { Plus, RotateCcw, UserCog } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogT
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
+import { apiGet, apiPatch, apiPost } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import { AppUser } from '@/lib/types';
 import { useSortable } from '@/lib/use-sortable';
@@ -36,12 +36,6 @@ export default function SettingsPage() {
   const [resetError, setResetError] = React.useState('');
   const [resetMessage, setResetMessage] = React.useState('');
 
-  const [pwCurrent, setPwCurrent] = React.useState('');
-  const [pwNew, setPwNew] = React.useState('');
-  const [pwConfirm, setPwConfirm] = React.useState('');
-  const [pwSubmitting, setPwSubmitting] = React.useState(false);
-  const [pwMessage, setPwMessage] = React.useState('');
-  const [pwError, setPwError] = React.useState('');
 
   const loadUsers = React.useCallback(async () => {
     setUsersLoading(true);
@@ -95,28 +89,6 @@ export default function SettingsPage() {
       setResetError(e instanceof ApiError ? e.message : '초기화에 실패했습니다.');
     } finally {
       setResetSubmitting(false);
-    }
-  };
-
-  const handleChangePassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPwError('');
-    setPwMessage('');
-    if (pwNew !== pwConfirm) {
-      setPwError('새 비밀번호가 일치하지 않습니다.');
-      return;
-    }
-    setPwSubmitting(true);
-    try {
-      await apiPatch('/api/users/me/password', { current_password: pwCurrent, new_password: pwNew });
-      setPwMessage('비밀번호가 변경되었습니다.');
-      setPwCurrent('');
-      setPwNew('');
-      setPwConfirm('');
-    } catch (e) {
-      setPwError(e instanceof ApiError ? e.message : '변경에 실패했습니다.');
-    } finally {
-      setPwSubmitting(false);
     }
   };
 
@@ -292,54 +264,6 @@ export default function SettingsPage() {
           </form>
         </DialogContent>
       </Dialog>
-
-      {/* 비밀번호 변경 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <KeyRound className="size-4" />
-            비밀번호 변경
-          </CardTitle>
-          <CardDescription>현재 로그인된 계정의 비밀번호를 변경합니다.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
-            <div className="space-y-1.5">
-              <Label>현재 비밀번호</Label>
-              <Input
-                type="password"
-                value={pwCurrent}
-                onChange={(e) => setPwCurrent(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>새 비밀번호</Label>
-              <Input
-                type="password"
-                value={pwNew}
-                onChange={(e) => setPwNew(e.target.value)}
-                placeholder="6자 이상"
-                required
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>새 비밀번호 확인</Label>
-              <Input
-                type="password"
-                value={pwConfirm}
-                onChange={(e) => setPwConfirm(e.target.value)}
-                required
-              />
-            </div>
-            {pwError ? <p className="text-sm text-destructive">{pwError}</p> : null}
-            {pwMessage ? <p className="text-sm text-primary">{pwMessage}</p> : null}
-            <Button type="submit" disabled={pwSubmitting}>
-              {pwSubmitting ? '변경 중...' : '비밀번호 변경'}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
 
       {/* 비밀번호 분실 메뉴얼 */}
       <Card>

@@ -67,13 +67,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [lowStockCount, setLowStockCount] = React.useState(0);
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const [shellError, setShellError] = React.useState('');
+  const [currentUsername, setCurrentUsername] = React.useState('');
 
   const loadAlerts = React.useCallback(async () => {
     setLoading(true);
     setShellError('');
     try {
-      const data = await apiGet<DashboardData>('/api/dashboard');
-      setLowStockCount(Number(data?.low_stock_count || 0));
+      const [dashData, meData] = await Promise.all([
+        apiGet<DashboardData>('/api/dashboard'),
+        apiGet<{ id: number; username: string; name: string }>('/api/users/me'),
+      ]);
+      setLowStockCount(Number(dashData?.low_stock_count || 0));
+      setCurrentUsername(meData?.username || '');
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         router.replace('/login');
@@ -159,7 +164,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {loading ? '확인중...' : `발주 필요 ${lowStockCount}개`}
           </Badge>
 
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            {currentUsername ? (
+              <span className="text-sm text-sidebar-foreground/60">{currentUsername}</span>
+            ) : null}
             <Button variant="ghost" size="sm" className="text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground" onClick={handleLogout}>
               <LogOut className="size-4" />
               로그아웃

@@ -362,6 +362,11 @@ app.post('/api/users', async (c) => {
   return c.json(apiOk(newUser), 201);
 });
 
+app.get('/api/users/me', async (c) => {
+  const user = c.get('user') as SessionUser;
+  return c.json(apiOk({ id: user.id, username: user.username, name: user.name }));
+});
+
 app.patch('/api/users/me/password', async (c) => {
   const user = c.get('user') as SessionUser;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
