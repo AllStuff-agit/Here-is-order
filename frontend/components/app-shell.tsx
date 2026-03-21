@@ -58,46 +58,6 @@ function TopNavItem({
   );
 }
 
-function MobileNavItem({
-  item,
-  pathname,
-  lowStockCount,
-  onNavigate,
-}: {
-  item: (typeof navItems)[number];
-  pathname: string;
-  lowStockCount: number;
-  onNavigate?: () => void;
-}) {
-  const Icon = item.icon;
-  const active = pathname === item.href;
-  const showBadge = item.href === '/alerts' && lowStockCount > 0;
-
-  return (
-    <Link
-      href={item.href}
-      onClick={onNavigate}
-      className={cn(
-        'relative flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg px-2 transition',
-        active
-          ? 'bg-muted text-foreground'
-          : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
-      )}
-      aria-current={active ? 'page' : undefined}
-    >
-      {showBadge ? (
-        <Badge
-          variant={statusTone(lowStockCount)}
-          className="absolute right-1.5 top-1.5 h-4 min-w-4 px-1 text-[10px]"
-        >
-          {lowStockCount}
-        </Badge>
-      ) : null}
-      <Icon className="size-4" />
-      <span className="text-[11px]">{item.label}</span>
-    </Link>
-  );
-}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -226,20 +186,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <main className="content-shell">{children}</main>
       </div>
 
-      <nav className="fixed right-0 bottom-0 left-0 z-20 border-t border-border/70 bg-background/95 px-2 py-2 backdrop-blur md:hidden">
-        <div className="app-shell-shell !max-w-7xl !px-0 !py-0">
-          {navItems.map((item) => (
-            <MobileNavItem
-              key={item.href}
-              item={item}
-              pathname={pathname}
-              lowStockCount={lowStockCount}
-              onNavigate={() => {}}
-            />
-          ))}
-        </div>
-      </nav>
-      <div className="h-16 md:hidden" />
     </div>
   );
 }
