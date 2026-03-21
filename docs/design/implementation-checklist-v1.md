@@ -1,0 +1,32 @@
+# MVP 구현 체크리스트 (1차)
+
+- [ ] Cloudflare 계정 연결 (`wrangler whoami`)
+- [ ] D1 DB 생성 + schema 적용
+- [ ] Notion export seed 생성 (`node scripts/import-notion-export.mjs`)
+- [ ] 시드 적용
+- [ ] 관리자 로그인 API + 세션
+- [ ] 품목 API
+  - [ ] 목록/검색
+  - [ ] 등록/수정/SoftDelete
+  - [ ] 재고 단가/수량 수정
+- [ ] 재고 조정 API
+  - [ ] IN/OUT/ADJUST 기록
+  - [ ] ledger 조회
+- [ ] 대시보드 API
+  - [ ] low_stock_count
+  - [ ] 최근 변동 7/30일 집계
+- [ ] 발주 관리 API
+  - [ ] 주문 생성/수정/상태변경
+  - [ ] 항목 추가/수정
+  - [ ] 부분입고 처리 + 상태 자동 갱신
+- [ ] 감사로그 API
+  - [ ] 핵심 행위 로깅
+- [ ] Stitch 디자인 화면 개발 반영
+  - [ ] 로그인
+  - [ ] 대시보드
+  - [ ] 품목관리
+  - [ ] 발주관리
+- [ ] 배포/운영
+  - [ ] Cloudflare staging 배포
+  - [ ] 수동 export/export 검증
+  - [ ] 모바일 접속 동작 확인

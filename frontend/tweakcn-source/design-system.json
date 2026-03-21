@@ -1,0 +1,564 @@
+{
+  "meta": {
+    "name": "vendure-like-analytics-admin",
+    "version": "1.0.0",
+    "source": "single screenshot (admin dashboard style)",
+    "intent": "Provide reusable design tokens + component structure for consistent reproduction in Codex CLI",
+    "notes": [
+      "No product/content strings included; only visual style + layout patterns.",
+      "Overall look: neutral light-gray app shell + white cards, subtle borders, soft shadows, rounded corners, compact typography, data-dense admin layout."
+    ]
+  },
+  "foundations": {
+    "color": {
+      "model": "oklch",
+      "strategy": "TweakCN/shadcn-like semantic tokens",
+      "paletteApprox": {
+        "neutral": {
+          "n0": "#FFFFFF",
+          "n50": "#F6F7F8",
+          "n100": "#EEF0F1",
+          "n200": "#E6E8EB",
+          "n300": "#DADDE2",
+          "n400": "#BFC5CD",
+          "n500": "#A3A4A6",
+          "n700": "#5B5D5F",
+          "n900": "#232421"
+        },
+        "accentOrange": {
+          "a500": "#DF5E33",
+          "a400": "#E1724D",
+          "a300": "#E58C6D",
+          "a100": "#F1C7B7"
+        },
+        "accentBlue": {
+          "b500": "#5D87B6",
+          "b300": "#B8C9DA"
+        },
+        "support": {
+          "limeHint": "#C5E12D"
+        }
+      },
+      "tokens": {
+        "--background": "oklch(0.96 0.005 270)",
+        "--foreground": "oklch(0.22 0.01 270)",
+        "--muted": "oklch(0.94 0.004 270)",
+        "--muted-foreground": "oklch(0.52 0.01 270)",
+        "--card": "oklch(1 0 0)",
+        "--card-foreground": "var(--foreground)",
+        "--popover": "var(--card)",
+        "--popover-foreground": "var(--foreground)",
+        "--border": "oklch(0.90 0.005 270)",
+        "--input": "var(--border)",
+        "--ring": "oklch(0.72 0.09 250)",
+        "--primary": "oklch(0.67 0.17 35)",
+        "--primary-foreground": "oklch(0.98 0 0)",
+        "--secondary": "oklch(0.93 0.004 270)",
+        "--secondary-foreground": "var(--foreground)",
+        "--accent": "oklch(0.93 0.004 270)",
+        "--accent-foreground": "var(--foreground)",
+        "--destructive": "oklch(0.60 0.20 27)",
+        "--destructive-foreground": "oklch(0.98 0 0)",
+        "--sidebar": "oklch(0.92 0.004 270)",
+        "--sidebar-foreground": "var(--foreground)",
+        "--sidebar-accent": "oklch(0.88 0.005 270)",
+        "--sidebar-accent-foreground": "var(--foreground)",
+        "--sidebar-border": "oklch(0.88 0.004 270)",
+        "--chart-blue": "oklch(0.70 0.06 250)",
+        "--chart-orange": "oklch(0.70 0.12 35)",
+        "--chart-blue-fill": "color-mix(in oklab, var(--chart-blue) 35%, transparent)",
+        "--chart-orange-fill": "color-mix(in oklab, var(--chart-orange) 28%, transparent)"
+      }
+    },
+    "typography": {
+      "fontFamily": {
+        "--font-sans": "var(--font-sans)",
+        "--font-mono": "var(--font-mono)"
+      },
+      "scale": {
+        "xs": {
+          "fontSize": "0.75rem",
+          "lineHeight": "1rem"
+        },
+        "sm": {
+          "fontSize": "0.875rem",
+          "lineHeight": "1.25rem"
+        },
+        "base": {
+          "fontSize": "1rem",
+          "lineHeight": "1.5rem"
+        },
+        "lg": {
+          "fontSize": "1.125rem",
+          "lineHeight": "1.75rem"
+        },
+        "xl": {
+          "fontSize": "1.25rem",
+          "lineHeight": "1.75rem"
+        },
+        "metric": {
+          "fontSize": "1.75rem",
+          "lineHeight": "2.25rem",
+          "fontWeight": 650
+        }
+      },
+      "weights": {
+        "regular": 400,
+        "medium": 500,
+        "semibold": 600,
+        "bold": 700
+      },
+      "usage": {
+        "appDefault": {
+          "fontFamily": "var(--font-sans)",
+          "fontSize": "0.875rem",
+          "lineHeight": "1.25rem"
+        },
+        "cardTitle": {
+          "fontSize": "0.875rem",
+          "fontWeight": 600,
+          "color": "var(--muted-foreground)"
+        },
+        "metricValue": {
+          "fontSize": "1.75rem",
+          "fontWeight": 700,
+          "color": "var(--foreground)"
+        },
+        "helperText": {
+          "fontSize": "0.8125rem",
+          "color": "var(--muted-foreground)"
+        },
+        "badgeText": {
+          "fontSize": "0.75rem",
+          "fontWeight": 600
+        }
+      }
+    },
+    "radius": {
+      "--radius": "0.75rem",
+      "--radius-sm": "calc(var(--radius) - 6px)",
+      "--radius-md": "calc(var(--radius) - 3px)",
+      "--radius-lg": "var(--radius)",
+      "--radius-xl": "calc(var(--radius) + 6px)",
+      "usage": {
+        "card": "var(--radius-lg)",
+        "button": "var(--radius-md)",
+        "pill": "9999px",
+        "input": "var(--radius-md)"
+      }
+    },
+    "shadow": {
+      "model": "soft-elevation",
+      "--shadow-xs": "0 1px 2px color-mix(in oklab, var(--foreground) 6%, transparent)",
+      "--shadow-sm": "0 1px 3px color-mix(in oklab, var(--foreground) 10%, transparent), 0 1px 2px color-mix(in oklab, var(--foreground) 6%, transparent)",
+      "--shadow-md": "0 6px 18px color-mix(in oklab, var(--foreground) 12%, transparent)",
+      "usage": {
+        "card": "var(--shadow-sm)",
+        "floatingClose": "var(--shadow-md)",
+        "popover": "var(--shadow-md)"
+      }
+    },
+    "spacing": {
+      "baseUnit": "4px",
+      "tokens": {
+        "1": "4px",
+        "2": "8px",
+        "3": "12px",
+        "4": "16px",
+        "5": "20px",
+        "6": "24px",
+        "8": "32px",
+        "10": "40px",
+        "12": "48px"
+      },
+      "layout": {
+        "appPadding": "24px",
+        "cardPadding": "16px",
+        "sectionGap": "16px",
+        "gridGap": "16px"
+      }
+    },
+    "borders": {
+      "width": {
+        "hairline": "1px"
+      },
+      "styles": {
+        "default": "1px solid var(--border)",
+        "subtle": "1px solid color-mix(in oklab, var(--border) 80%, transparent)"
+      }
+    },
+    "motion": {
+      "duration": {
+        "fast": "120ms",
+        "base": "180ms"
+      },
+      "easing": {
+        "standard": "cubic-bezier(0.2, 0, 0, 1)"
+      },
+      "usage": {
+        "hover": "transform 120ms var(--ease-standard), background-color 120ms var(--ease-standard)",
+        "focusRing": "box-shadow 180ms var(--ease-standard)"
+      }
+    }
+  },
+  "layoutSystem": {
+    "canvas": {
+      "appShell": "sidebar-left + topbar + content",
+      "background": "var(--muted)"
+    },
+    "dimensions": {
+      "sidebarWidth": "260px",
+      "topbarHeight": "56px",
+      "contentMaxWidth": "none (fluid)",
+      "contentPadding": "24px"
+    },
+    "grid": {
+      "kpiCards": {
+        "columnsDesktop": 4,
+        "gap": "16px",
+        "cardMinWidth": "260px",
+        "responsive": [
+          {
+            "breakpoint": "lg",
+            "columns": 4
+          },
+          {
+            "breakpoint": "md",
+            "columns": 2
+          },
+          {
+            "breakpoint": "sm",
+            "columns": 1
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "Sidebar": {
+      "container": {
+        "background": "var(--sidebar)",
+        "color": "var(--sidebar-foreground)",
+        "borderRight": "1px solid var(--sidebar-border)",
+        "padding": "16px",
+        "display": "flex",
+        "flexDirection": "column",
+        "gap": "12px"
+      },
+      "navItem": {
+        "height": "36px",
+        "paddingX": "12px",
+        "borderRadius": "var(--radius-md)",
+        "color": "var(--foreground)",
+        "background": "transparent",
+        "hover": {
+          "background": "color-mix(in oklab, var(--sidebar-accent) 70%, transparent)"
+        },
+        "active": {
+          "background": "var(--sidebar-accent)",
+          "fontWeight": 600
+        },
+        "icon": {
+          "size": "16px",
+          "opacity": 0.9
+        }
+      },
+      "primaryCTA": {
+        "type": "filled",
+        "background": "var(--primary)",
+        "color": "var(--primary-foreground)",
+        "height": "36px",
+        "borderRadius": "var(--radius-md)",
+        "shadow": "var(--shadow-xs)"
+      }
+    },
+    "Topbar": {
+      "container": {
+        "height": "56px",
+        "background": "color-mix(in oklab, var(--card) 75%, transparent)",
+        "borderBottom": "1px solid var(--border)",
+        "display": "flex",
+        "alignItems": "center",
+        "justifyContent": "space-between",
+        "paddingX": "24px"
+      },
+      "breadcrumb": {
+        "fontSize": "0.875rem",
+        "color": "var(--muted-foreground)"
+      },
+      "closeFloating": {
+        "shape": "circle",
+        "size": "40px",
+        "background": "var(--foreground)",
+        "color": "var(--background)",
+        "shadow": "var(--shadow-md)",
+        "position": "fixed (top center overlay feel)"
+      }
+    },
+    "Card": {
+      "base": {
+        "background": "var(--card)",
+        "color": "var(--card-foreground)",
+        "border": "1px solid var(--border)",
+        "borderRadius": "var(--radius-lg)",
+        "shadow": "var(--shadow-sm)",
+        "padding": "16px"
+      },
+      "kpi": {
+        "header": {
+          "display": "flex",
+          "justifyContent": "space-between",
+          "alignItems": "start"
+        },
+        "title": {
+          "fontSize": "0.875rem",
+          "fontWeight": 600,
+          "color": "var(--muted-foreground)"
+        },
+        "value": {
+          "fontSize": "1.75rem",
+          "fontWeight": 700,
+          "color": "var(--foreground)"
+        },
+        "subtext": {
+          "fontSize": "0.8125rem",
+          "color": "var(--muted-foreground)"
+        },
+        "deltaPill": {
+          "display": "inline-flex",
+          "alignItems": "center",
+          "gap": "6px",
+          "padding": "4px 8px",
+          "borderRadius": "9999px",
+          "border": "1px solid var(--border)",
+          "background": "color-mix(in oklab, var(--muted) 70%, transparent)",
+          "color": "var(--foreground)",
+          "fontSize": "0.75rem",
+          "fontWeight": 600
+        }
+      }
+    },
+    "SegmentedControl": {
+      "container": {
+        "display": "inline-flex",
+        "gap": "6px"
+      },
+      "chip": {
+        "height": "32px",
+        "paddingX": "10px",
+        "borderRadius": "var(--radius-md)",
+        "border": "1px solid var(--border)",
+        "background": "var(--card)",
+        "color": "var(--foreground)",
+        "selected": {
+          "background": "color-mix(in oklab, var(--ring) 18%, var(--card))",
+          "border": "1px solid color-mix(in oklab, var(--ring) 35%, var(--border))",
+          "color": "var(--foreground)",
+          "fontWeight": 600
+        }
+      }
+    },
+    "ChartPanel": {
+      "container": {
+        "background": "var(--card)",
+        "border": "1px solid var(--border)",
+        "borderRadius": "var(--radius-lg)",
+        "shadow": "var(--shadow-sm)",
+        "padding": "16px"
+      },
+      "title": {
+        "fontWeight": 650,
+        "color": "var(--foreground)"
+      },
+      "subtitle": {
+        "fontSize": "0.8125rem",
+        "color": "var(--muted-foreground)"
+      },
+      "gridlines": {
+        "stroke": "color-mix(in oklab, var(--border) 70%, transparent)",
+        "strokeWidth": "1px"
+      },
+      "series": [
+        {
+          "name": "primarySeries",
+          "stroke": "var(--chart-blue)",
+          "fill": "var(--chart-blue-fill)",
+          "strokeWidth": "2px",
+          "areaOpacity": 1
+        },
+        {
+          "name": "secondarySeries",
+          "stroke": "var(--chart-orange)",
+          "fill": "var(--chart-orange-fill)",
+          "strokeWidth": "2px",
+          "areaOpacity": 1
+        }
+      ],
+      "axes": {
+        "tickColor": "var(--muted-foreground)",
+        "tickFontSize": "0.75rem"
+      }
+    },
+    "Tabs": {
+      "container": {
+        "display": "inline-flex",
+        "gap": "8px",
+        "padding": "4px",
+        "background": "color-mix(in oklab, var(--muted) 70%, transparent)",
+        "borderRadius": "var(--radius-md)",
+        "border": "1px solid var(--border)"
+      },
+      "tab": {
+        "height": "32px",
+        "paddingX": "10px",
+        "borderRadius": "var(--radius-md)",
+        "color": "var(--muted-foreground)",
+        "active": {
+          "background": "var(--card)",
+          "color": "var(--foreground)",
+          "shadow": "var(--shadow-xs)",
+          "fontWeight": 600
+        },
+        "badgeCount": {
+          "marginLeft": "6px",
+          "minWidth": "18px",
+          "height": "18px",
+          "borderRadius": "9999px",
+          "background": "color-mix(in oklab, var(--border) 65%, transparent)",
+          "color": "var(--muted-foreground)",
+          "fontSize": "0.75rem",
+          "fontWeight": 600,
+          "display": "inline-flex",
+          "alignItems": "center",
+          "justifyContent": "center"
+        }
+      }
+    },
+    "Table": {
+      "container": {
+        "background": "var(--card)",
+        "border": "1px solid var(--border)",
+        "borderRadius": "var(--radius-lg)",
+        "overflow": "hidden"
+      },
+      "headerRow": {
+        "background": "color-mix(in oklab, var(--muted) 75%, transparent)",
+        "borderBottom": "1px solid var(--border)",
+        "fontSize": "0.75rem",
+        "color": "var(--muted-foreground)",
+        "textTransform": "none"
+      },
+      "row": {
+        "height": "52px",
+        "borderBottom": "1px solid color-mix(in oklab, var(--border) 70%, transparent)",
+        "hover": {
+          "background": "color-mix(in oklab, var(--muted) 65%, transparent)"
+        }
+      },
+      "cell": {
+        "paddingX": "16px",
+        "fontSize": "0.875rem",
+        "color": "var(--foreground)"
+      },
+      "pillTag": {
+        "display": "inline-flex",
+        "alignItems": "center",
+        "height": "22px",
+        "paddingX": "8px",
+        "borderRadius": "9999px",
+        "border": "1px solid var(--border)",
+        "background": "color-mix(in oklab, var(--muted) 70%, transparent)",
+        "color": "var(--muted-foreground)",
+        "fontSize": "0.75rem",
+        "fontWeight": 600
+      },
+      "checkbox": {
+        "size": "16px",
+        "border": "1px solid var(--border)",
+        "borderRadius": "calc(var(--radius) - 6px)",
+        "background": "var(--card)"
+      }
+    },
+    "Button": {
+      "base": {
+        "height": "36px",
+        "paddingX": "12px",
+        "borderRadius": "var(--radius-md)",
+        "fontWeight": 600,
+        "display": "inline-flex",
+        "alignItems": "center",
+        "gap": "8px"
+      },
+      "outline": {
+        "background": "var(--card)",
+        "color": "var(--foreground)",
+        "border": "1px solid var(--border)",
+        "shadow": "none",
+        "hover": {
+          "background": "color-mix(in oklab, var(--muted) 60%, transparent)"
+        }
+      },
+      "ghost": {
+        "background": "transparent",
+        "color": "var(--foreground)",
+        "hover": {
+          "background": "color-mix(in oklab, var(--muted) 60%, transparent)"
+        }
+      },
+      "primary": {
+        "background": "var(--primary)",
+        "color": "var(--primary-foreground)",
+        "border": "1px solid color-mix(in oklab, var(--primary) 85%, black)",
+        "shadow": "var(--shadow-xs)"
+      }
+    }
+  },
+  "compositionRules": {
+    "visualHierarchy": [
+      "App shell background is muted (light gray).",
+      "Primary surfaces are white cards with subtle border + soft shadow.",
+      "Text is dark neutral; secondary text uses muted-foreground.",
+      "Primary action uses a warm orange accent; most other controls are neutral/outlined.",
+      "Charts use two series: cool blue (dominant) + warm orange (secondary) with gradient area fills."
+    ],
+    "density": {
+      "mode": "comfortable-compact",
+      "guidelines": [
+        "Use 36px controls for sidebar/buttons; 32px for segmented chips/tabs.",
+        "Table rows around ~52px with thin separators.",
+        "Card padding 16px; section spacing 16–24px."
+      ]
+    },
+    "focusAndA11y": {
+      "focusRing": "Use --ring with 2px outline/box-shadow; apply color-mix for softer ring when supported.",
+      "contrast": "Ensure muted text still passes contrast on white and light gray backgrounds."
+    }
+  },
+  "implementationHints": {
+    "tailwindMapping": {
+      "bg": {
+        "app": "bg-[var(--muted)]",
+        "card": "bg-[var(--card)]",
+        "sidebar": "bg-[var(--sidebar)]"
+      },
+      "text": {
+        "default": "text-[var(--foreground)]",
+        "muted": "text-[var(--muted-foreground)]"
+      },
+      "border": "border-[var(--border)]",
+      "radius": {
+        "card": "rounded-[var(--radius-lg)]",
+        "control": "rounded-[var(--radius-md)]"
+      },
+      "shadow": {
+        "card": "shadow-[var(--shadow-sm)]",
+        "popover": "shadow-[var(--shadow-md)]"
+      }
+    },
+    "doNotTokenize": [
+      "display",
+      "position",
+      "flex/grid layout decisions"
+    ]
+  }
+}

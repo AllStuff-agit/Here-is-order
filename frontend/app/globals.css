@@ -1,0 +1,82 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../tweakcn-source/tokens.css";
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40;
+  }
+}
+
+@layer components {
+  .app-shell {
+    @apply min-h-screen bg-muted/40;
+  }
+
+  .app-shell-shell {
+    @apply mx-auto flex w-full max-w-7xl gap-5 px-4 py-5 md:px-6;
+  }
+
+  .content-shell {
+    @apply w-full min-w-0;
+  }
+
+  .page-header {
+    @apply flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between;
+  }
+
+  .page-title {
+    @apply text-xl leading-tight font-semibold tracking-tight;
+  }
+
+  .page-subtitle {
+    @apply mt-1 text-sm text-muted-foreground;
+  }
+
+  .toolbar {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .section-gap {
+    @apply space-y-4;
+  }
+
+  .metric-grid {
+    @apply grid gap-4 sm:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .metric-card {
+    @apply gap-1;
+  }
+
+  .metric-kpi {
+    @apply text-2xl font-semibold tracking-tight;
+  }
+
+  .metric-label {
+    @apply text-sm text-muted-foreground;
+  }
+
+  .metric-note {
+    @apply inline-flex items-center rounded-full border border-border/70 bg-muted px-2 py-1 text-xs text-muted-foreground;
+  }
+
+  .data-empty {
+    @apply rounded-md bg-muted px-4 py-3 text-sm text-muted-foreground;
+  }
+
+  .table-head {
+    @apply whitespace-nowrap;
+  }
+}
