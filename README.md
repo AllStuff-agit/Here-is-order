@@ -37,6 +37,25 @@ npm run dev
 - 아이디: `admin`
 - 비밀번호: `admin1234`
 
+### 비밀번호를 잊어버렸을 때
+
+Cloudflare D1 콘솔에서 직접 비밀번호를 초기화할 수 있습니다.
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com)에 로그인합니다.
+2. 좌측 메뉴에서 **Storage & Databases → D1 SQL Database**를 클릭합니다.
+3. **hereisorder** 데이터베이스를 클릭합니다.
+4. 상단 **Console** 탭을 클릭합니다.
+5. 새 비밀번호의 SHA-256 해시를 구합니다. 예: [SHA-256 온라인 도구](https://emn178.github.io/online-tools/sha256.html)에 새 비밀번호를 입력하면 해시값이 나옵니다.
+6. 아래 SQL을 입력하고 **Execute** 버튼을 누릅니다.
+
+```sql
+UPDATE users
+SET password_hash = '여기에_SHA256_해시값_붙여넣기'
+WHERE username = '아이디';
+```
+
+7. 앱으로 돌아와 새 비밀번호로 로그인합니다.
+
 ## API 체크리스트
 
 - `POST /api/auth/login`

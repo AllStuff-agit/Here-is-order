@@ -167,7 +167,7 @@ async function verifyPassword(value: string, storedHash: string) {
     return { valid: false, upgradedHash: null };
   }
 
-  return { valid: true, upgradedHash: null };
+  return { valid: true, upgradedHash: await hashPassword(value) };
 }
 
 async function getSessionUser(c: any): Promise<SessionUser | null> {
