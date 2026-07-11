@@ -102,9 +102,19 @@ WHERE username = '아이디';
 - `npm run deploy --prefix frontend`: 웹 Worker 배포
 - `npm run deploy`: API Worker 배포
 
-## Cloudflare 배포
+## Cloudflare 자동 배포
 
-API Worker를 먼저 배포한 뒤 해당 origin을 웹 빌드의 서버 전용 `API_PROXY_URL`로 전달합니다.
+GitHub Actions에 `CLOUDFLARE_API_TOKEN`과 `CLOUDFLARE_ACCOUNT_ID` repository secret을 한 번 등록한 뒤에는 `main` push만으로 배포됩니다.
+
+```bash
+git push origin main
+```
+
+Workflow는 검증 → production D1 migration → API Worker 배포/health check → API URL을 주입한 웹 Worker 배포 → 웹/API proxy smoke test 순서로 실행됩니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
+
+### 수동 복구 배포
+
+GitHub Actions를 사용할 수 없는 장애 상황에서는 API Worker를 먼저 배포한 뒤 해당 origin을 웹 빌드의 서버 전용 `API_PROXY_URL`로 전달합니다. 관리자 계정이 없는 최초 bootstrap에서만 `ADMIN_PASSWORD` 명령을 먼저 실행합니다.
 
 ```bash
 ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:remote
@@ -112,4 +122,4 @@ npm run deploy
 API_PROXY_URL='https://hereisorder.<subdomain>.workers.dev' npm run deploy --prefix frontend
 ```
 
-GitHub Actions는 pull request와 `main`에서 API typecheck/test/build, D1 migration, 웹 lint/build, OpenNext build를 검증합니다. `main` 배포는 production D1 migration → API Worker → 웹 Worker 순서입니다. 필요한 secret/variable과 최초 설정은 [Cloudflare 배포 가이드](docs/design/cloudflare-deploy-guide.md)를 참고하세요.
+세부 권한과 최초 설정은 [Cloudflare 배포 가이드](docs/design/cloudflare-deploy-guide.md)를 참고하세요.

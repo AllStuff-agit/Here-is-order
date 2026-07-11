@@ -84,34 +84,36 @@ API_PROXY_URL='https://hereisorder.<subdomain>.workers.dev' npm run preview --pr
 
 기존의 `wrangler pages deploy .vercel/output/static` 방식은 사용하지 않습니다. 현재 Next.js 앱은 `@opennextjs/cloudflare`가 생성하는 `.open-next/worker.js`와 `.open-next/assets`를 Cloudflare Worker로 배포합니다.
 
-## 4. GitHub Actions 배포
+## 4. GitHub Actions 자동 배포
 
-`.github/workflows/deploy-worker.yml`은 pull request와 `main` push에서 다음 품질 게이트를 실행합니다.
+`.github/workflows/deploy-worker.yml`은 모든 pull request와 `main` push에서 다음 품질 게이트를 실행합니다.
 
 1. 루트 `npm ci`, API typecheck/test, Worker dry-run build
 2. 로컬 D1 migration 적용 검증
 3. 프론트엔드 `npm ci`, lint, Next.js build
 4. OpenNext Cloudflare build
 
-검증이 성공한 `main` push 또는 수동 실행만 아래 순서로 production에 반영됩니다.
+검증이 성공한 `main` push는 별도 입력이나 승인 없이 아래 순서로 production에 반영됩니다. `workflow_dispatch`는 같은 workflow를 다시 실행하는 복구 경로입니다.
 
 1. 원격 D1 migration 적용
 2. API Worker 배포
-3. 웹 Worker 배포
+3. API `GET /health` 200 및 응답 계약 확인
+4. Wrangler Action의 API `deployment-url`을 `API_PROXY_URL`로 주입해 웹 Worker build/deploy
+5. 웹 `GET /login` 200과 세션 없는 `GET /api/users/me` 401로 same-origin proxy 확인
 
-GitHub의 `production` environment에 다음 값을 설정합니다. `PRODUCTION_API_PROXY_URL`은 repository variable로 두어도 같은 `vars` context로 사용할 수 있습니다.
+GitHub Actions repository secret에 다음 두 값만 설정합니다.
 
 | 종류 | 이름 | 값 |
 | --- | --- | --- |
-| Secret | `CLOUDFLARE_API_TOKEN` | D1/Workers 배포 권한을 가진 token |
-| Secret | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
-| Variable | `PRODUCTION_API_PROXY_URL` | 배포된 API Worker의 HTTPS origin(credential/path/query/hash 없음) |
+| Secret | `CLOUDFLARE_API_TOKEN` | Workers 배포와 D1 migration 권한을 가진 API token |
+| Secret | `CLOUDFLARE_ACCOUNT_ID` | 대상 Cloudflare account ID |
 
-`PRODUCTION_API_PROXY_URL`은 웹 배포 job에서 서버 전용 `API_PROXY_URL`로 전달됩니다. 브라우저 코드에 API origin을 직접 넣지 않습니다.
+`main`의 모든 push가 production 배포를 시작합니다. API Worker의 실제 URL은 Wrangler Action의 `deployment-url` output으로 웹 job에 전달되므로 `PRODUCTION_API_PROXY_URL` 변수와 GitHub Environment 승인은 설정하지 않습니다. 브라우저 코드에도 API origin을 직접 넣지 않습니다.
 
 ## 5. 배포 후 확인
 
-- API Worker의 `/health`가 `ok: true`를 반환하는지 확인
+- 자동 smoke test에서 API Worker의 `GET /health`가 200과 `ok: true`를 반환하는지 확인
+- 자동 smoke test에서 웹 Worker의 세션 없는 `GET /api/users/me`가 401을 반환하는지 확인
 - 웹 Worker에서 로그인 후 새로고침해도 세션이 유지되는지 확인
 - `/api/dashboard`, 품목 수정, 발주 생성과 부분입고를 smoke test
 - 휴대폰 브라우저에서 레이아웃과 로그인 쿠키 동작 확인

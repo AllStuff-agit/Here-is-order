@@ -36,17 +36,20 @@
 - [x] API/관리자 seed 자동 테스트와 strict TypeScript typecheck
 - [x] Next.js lint/build 및 Worker dry-run 검증
 - [x] OpenNext 기반 Cloudflare 웹 Worker 구성
-- [x] pull request/`main` 품질 게이트와 API→웹 순차 배포 workflow
+- [x] pull request/`main` 품질 게이트와 D1→API→웹 순차 배포 workflow
+- [x] `main`의 모든 push에서 production 자동 배포
+- [x] Wrangler Action 배포 URL을 웹 `API_PROXY_URL`로 자동 전달
+- [x] API health 및 웹 same-origin proxy smoke test
+- [x] 별도 production URL 변수와 Environment 승인 불필요
 
 ## 운영자 설정 필요
 
 - [ ] Cloudflare 인증 확인(`npx wrangler whoami`)
 - [ ] production D1 생성 또는 기존 D1 확인
 - [ ] 루트 `wrangler.toml`의 D1 `database_id` 확인
-- [ ] GitHub `production` environment 설정
+- [ ] GitHub Actions repository secret 확인
   - [ ] Secret `CLOUDFLARE_API_TOKEN`
   - [ ] Secret `CLOUDFLARE_ACCOUNT_ID`
-  - [ ] Variable `PRODUCTION_API_PROXY_URL`
 - [ ] 12자 이상 `ADMIN_PASSWORD`로 production DB bootstrap
 - [ ] 필요한 경우 Notion export를 준비해 카테고리/품목 seed 적용
 - [ ] API Worker와 웹 Worker 최초 배포
