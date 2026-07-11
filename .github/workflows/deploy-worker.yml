@@ -2,35 +2,9 @@ name: Verify and deploy
 
 on:
   pull_request:
-    paths:
-      - '.github/workflows/**'
-      - 'db/**'
-      - 'frontend/**'
-      - 'migrations/**'
-      - 'scripts/**'
-      - 'src/**'
-      - 'test/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tsconfig.json'
-      - 'vitest.config.ts'
-      - 'wrangler.toml'
   push:
     branches:
       - main
-    paths:
-      - '.github/workflows/**'
-      - 'db/**'
-      - 'frontend/**'
-      - 'migrations/**'
-      - 'scripts/**'
-      - 'src/**'
-      - 'test/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tsconfig.json'
-      - 'vitest.config.ts'
-      - 'wrangler.toml'
   workflow_dispatch:
 
 permissions:
@@ -45,9 +19,9 @@ jobs:
     name: Verify API, migrations, and web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -59,15 +33,10 @@ jobs:
         run: npm ci
 
       - name: Type-check API
-        run: npm exec -- tsc --noEmit
+        run: npm run typecheck
 
-      - name: Test API when configured
-        run: |
-          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
-            npm test
-          else
-            echo "No root test script configured; skipping."
-          fi
+      - name: Test API and deployment contracts
+        run: npm test
 
       - name: Validate Worker bundle
         run: npm run build
@@ -81,14 +50,6 @@ jobs:
       - name: Lint web
         run: npm run lint --prefix frontend
 
-      - name: Test web when configured
-        run: |
-          if node -e "process.exit(require('./frontend/package.json').scripts?.test ? 0 : 1)"; then
-            npm test --prefix frontend
-          else
-            echo "No frontend test script configured; skipping."
-          fi
-
       - name: Build web
         run: npm run build --prefix frontend
 
@@ -100,11 +61,12 @@ jobs:
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: verify
     runs-on: ubuntu-latest
-    environment: production
+    outputs:
+      api-url: ${{ steps.deploy-api.outputs.deployment-url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -119,10 +81,25 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy API Worker
-        run: npm exec -- wrangler deploy
+        id: deploy-api
+        uses: cloudflare/wrangler-action@v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          packageManager: npm
+
+      - name: Smoke test API deployment
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DEPLOYMENT_URL: ${{ steps.deploy-api.outputs.deployment-url }}
+        run: node scripts/smoke-deployment.mjs api "$DEPLOYMENT_URL"
+
+      - name: Record API deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy-api.outputs.deployment-url }}
+        run: |
+          echo "### API Worker" >> "$GITHUB_STEP_SUMMARY"
+          echo "$DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-web:
     name: Deploy web Worker
@@ -131,11 +108,10 @@ jobs:
       - verify
       - deploy-api
     runs-on: ubuntu-latest
-    environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -144,14 +120,29 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefix frontend
 
-      - name: Validate production API proxy URL
-        run: node -e "const value = process.env.API_PROXY_URL; if (!value) throw new Error('PRODUCTION_API_PROXY_URL is required'); const url = new URL(value); if (url.protocol !== 'https:') throw new Error('PRODUCTION_API_PROXY_URL must use https'); if (url.username || url.password) throw new Error('PRODUCTION_API_PROXY_URL must not include credentials'); if (url.pathname !== '/') throw new Error('PRODUCTION_API_PROXY_URL must be an origin without a path'); if (url.search || url.hash) throw new Error('PRODUCTION_API_PROXY_URL must not include a query string or hash')"
+      - name: Build production web Worker
+        run: npm run build:cloudflare --prefix frontend
         env:
-          API_PROXY_URL: ${{ vars.PRODUCTION_API_PROXY_URL }}
+          API_PROXY_URL: ${{ needs.deploy-api.outputs.api-url }}
 
       - name: Deploy web Worker
-        run: npm run deploy --prefix frontend
+        id: deploy-web
+        uses: cloudflare/wrangler-action@v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          workingDirectory: frontend
+          packageManager: npm
+
+      - name: Smoke test web deployment and API proxy
         env:
-          API_PROXY_URL: ${{ vars.PRODUCTION_API_PROXY_URL }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DEPLOYMENT_URL: ${{ steps.deploy-web.outputs.deployment-url }}
+        run: node scripts/smoke-deployment.mjs web "$DEPLOYMENT_URL"
+
+      - name: Record web deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy-web.outputs.deployment-url }}
+        run: |
+          echo "### Web Worker" >> "$GITHUB_STEP_SUMMARY"
+          echo "$DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"

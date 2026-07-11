@@ -516,7 +516,7 @@ node --test scripts/deploy-workflow.test.mjs
 node -e "require('yaml').parse(require('fs').readFileSync('.github/workflows/deploy-worker.yml', 'utf8')); console.log('YAML OK')"
 npm run build
 API_PROXY_URL=https://api.example.com npm run build:cloudflare --prefix frontend
-npm exec --prefix frontend -- wrangler deploy --dry-run
+(cd frontend && npm exec -- wrangler deploy --dry-run)
 ```
 
 Expected: contract tests pass, `YAML OK` is printed, and all Worker builds/dry-runs exit 0. If `yaml` is not resolvable from the installed dependency graph, use Ruby's standard YAML parser solely for the syntax check:
@@ -633,7 +633,7 @@ npm exec -- wrangler d1 migrations apply hereisorder --local --persist-to /tmp/h
 npm run web:lint
 npm run web:build
 API_PROXY_URL=https://api.example.com npm run build:cloudflare --prefix frontend
-npm exec --prefix frontend -- wrangler deploy --dry-run
+(cd frontend && npm exec -- wrangler deploy --dry-run)
 npm audit --omit=dev
 npm audit --omit=dev --prefix frontend
 git diff --check
