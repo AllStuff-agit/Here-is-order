@@ -1,41 +1,63 @@
 # 카페 발주 관리 웹 MVP (Cloudflare D1 + Workers)
 
-> 단일 관리자(1명), 모바일 우선 사용, 발주 수동 연동, 재고·발주 현황 관리용 웹 서비스
+> 매장 1곳의 재고·발주·부분입고를 관리하는 모바일 우선 웹 서비스
 
-## 현재 상태
+## 현재 구현
 
-현재 구현한 기능
+- `admin` / `staff` 역할과 30일 세션 로그인
+- 카테고리·품목 조회/등록/수정/soft-delete
+- IN / OUT / ADJUST 재고 조정과 원장
+- 부족재고 알림: `current_stock < safety_stock`
+- 진행 중 발주의 미입고 수량을 뺀 추천발주 수량
+- 발주 초안, 일괄 항목 생성, 확정, 부분입고, 상태 자동 전환
+- 핵심 변경 감사로그
+- Next.js 모바일/PC 반응형 화면
+- API/웹 품질 게이트와 Cloudflare 분리 배포
 
-- 단일 관리자 세션 로그인 (`/login`)
-- 품목 관리: 조회/등록/수정/soft-delete
-- 재고 조정: IN / OUT / ADJUST + 히스토리 기록
-- 발주 관리: 발주서 생성/수정/삭제, 항목 추가/수정, 부분입고
-- 대시보드: 발주 필요 품목 카운트 + 배지 알림 + 최근 기간 집계
-- soft-delete + 감사로그(audit logs)
-- Notion export(`notion-export/`) 기반 초기 seed 생성/적용
+## 구조
+
+```text
+Browser
+  └─ hereisorder-web (Next.js + OpenNext Worker)
+       └─ same-origin /api/* proxy
+            └─ hereisorder (Hono API Worker)
+                 └─ Cloudflare D1
+```
 
 ## 빠른 시작 (로컬)
 
+Node.js 22가 필요합니다. 루트와 `frontend/`는 별도 npm 프로젝트이므로 두 lockfile을 각각 설치합니다.
+
 ```bash
 npm ci
-npm run db:bootstrap:from-notion   # notion-export -> D1 local seed + 관리자 생성
-npm run dev:api
+npm ci --prefix frontend
 ```
 
-### 프론트엔드(리뉴얼) 실행
-
-메인 프론트엔드는 `frontend/` 폴더의 Next.js 앱입니다.
+fresh clone에서는 12자 이상의 관리자 비밀번호를 직접 지정해 migration과 관리자 seed를 적용합니다.
 
 ```bash
-cd frontend
-npm install
-npm run dev
+ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap
 ```
 
-기본 관리자 계정은 `seed_admin.sql` 기준:
+기본 관리자 아이디는 `admin`, 표시 이름은 `관리자`입니다. 필요하면 bootstrap 명령에 `ADMIN_USERNAME`, `ADMIN_NAME`도 전달할 수 있습니다. 비밀번호가 포함된 `data/seed_admin.sql`은 실행 시 생성되며 Git에 포함하지 않습니다.
 
-- 아이디: `admin`
-- 비밀번호: `admin1234`
+API와 웹 개발 서버를 각각 실행합니다.
+
+```bash
+# 터미널 1
+npm run dev:api
+
+# 터미널 2
+npm run web:dev:local
+```
+
+`web:dev:local`은 브라우저의 상대 `/api/*` 요청을 `http://127.0.0.1:8787`로 프록시해 쿠키 기반 인증을 유지합니다.
+
+Notion export로 카테고리/품목도 초기화하려면 저장소 루트에 `notion-export/`를 준비한 뒤 다음 명령을 사용합니다.
+
+```bash
+ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:from-notion
+```
 
 ### 비밀번호를 잊어버렸을 때
 
@@ -56,53 +78,38 @@ WHERE username = '아이디';
 
 7. 앱으로 돌아와 새 비밀번호로 로그인합니다.
 
-## API 체크리스트
+## 주요 API
 
-- `POST /api/auth/login`
-- `GET /api/dashboard`
-- `GET /api/items?needReorder=true`
-- `POST /api/stock/adjust`
-- `GET /api/stock/ledger/:item_id`
-- `POST /api/purchase-orders`, `PATCH /api/purchase-orders/:id`
-- `POST /api/purchase-orders/:id/items`, `POST .../items/:itemId/receive`
+- 인증/사용자: `POST /api/auth/login`, `GET /api/users/me`, `GET|POST /api/users`
+- 대시보드: `GET /api/dashboard`
+- 품목: `GET /api/items?needReorder=true`, `POST|PATCH|DELETE /api/items/*`
+- 재고: `POST /api/stock/adjust`, `GET /api/stock/ledger/:item_id`
+- 발주: `GET|POST /api/purchase-orders`, `POST /api/purchase-orders/with-items`
+- 발주 항목/입고: `POST /api/purchase-orders/:id/items`, `PATCH /api/purchase-orders/:id/items/:itemId`, `POST .../:itemId/receive`
+- 감사로그: `GET /api/audit-logs` (admin)
 
-## 프론트엔드/백엔드 실행 분리
+`/purchase-orders/:id/items/:itemId`의 `:itemId`는 품목 ID가 아니라 `order_items.id`입니다. 전체 요청·응답 계약은 [API 설계](docs/design/api-spec-v1.md)를 참고하세요.
 
-- 백엔드(Cloudflare Worker): `npm run dev:api`
-- 프론트엔드(next app, shadcn 기반): `npm run web:dev`
-- 로컬 프록시 고정(권장): `npm run web:dev:local`
+## 프로젝트 스크립트
 
-`web:dev:local`는 Next 개발 서버가 `/api/*` 요청을 `http://127.0.0.1:8787`로 프록시하도록 해
-쿠키 기반 인증이 브라우저에서 정상 동작하도록 돕습니다.
+- `dev:api`, `web:dev:local`: API Worker와 로컬 API proxy 웹 실행
+- `typecheck`, `test`, `build`: API typecheck, test, Worker dry-run
+- `web:lint`, `web:build`: Next.js lint/build
+- `db:migrate`, `db:migrate:remote`: `migrations/` 로컬/원격 적용
+- `db:bootstrap`, `db:bootstrap:remote`: migration + 관리자 seed
+- `db:bootstrap:from-notion`, `db:bootstrap:remote:from-notion`: Notion 품목 seed 포함
+- `npm run build:cloudflare --prefix frontend`: OpenNext Worker 산출물 검증
+- `npm run deploy --prefix frontend`: 웹 Worker 배포
+- `npm run deploy`: API Worker 배포
 
-### 프로젝트 스크립트 요약
+## Cloudflare 배포
 
-- `dev:api`: API Worker 실행 (`wrangler dev`)
-- `web:dev`: 프론트엔드 개발 서버
-- `web:dev:local`: 프론트엔드 개발 서버 + API 프록시 기본 설정
-- `web:build`: 프론트엔드 빌드
-- `web:start`: 프론트엔드 실행
-- `web:lint`: 프론트엔드 lint
-- `build`: Worker 배포 전 dry-run
-- `deploy`: Worker 배포
-
-## Cloudflare 배포 (원격)
+API Worker를 먼저 배포한 뒤 해당 origin을 웹 빌드의 서버 전용 `API_PROXY_URL`로 전달합니다.
 
 ```bash
-# 1) 인증
-npx wrangler whoami
-# 미인증이면 npx wrangler login
-
-# 2) DB 생성 (Cloudflare dashboard/CLI)
-npx wrangler d1 create hereisorder
-
-# 3) wrangler.toml의 <DB_ID>를 생성된 database_id로 교체
-
-# 4) DB 마이그레이션/시드(원격)
-npm run db:bootstrap:remote:from-notion
-
-# 5) 배포
+ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:remote
 npm run deploy
+API_PROXY_URL='https://hereisorder.<subdomain>.workers.dev' npm run deploy --prefix frontend
 ```
 
-> 참고: 이 저장소는 요청하신 Cloudflare D1 기반 배포를 전제로 설계되어 있습니다.
+GitHub Actions는 pull request와 `main`에서 API typecheck/test/build, D1 migration, 웹 lint/build, OpenNext build를 검증합니다. `main` 배포는 production D1 migration → API Worker → 웹 Worker 순서입니다. 필요한 secret/variable과 최초 설정은 [Cloudflare 배포 가이드](docs/design/cloudflare-deploy-guide.md)를 참고하세요.

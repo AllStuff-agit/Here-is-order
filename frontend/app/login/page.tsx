@@ -60,7 +60,7 @@ export default function LoginPage() {
               <Coffee className="size-5" />
             </div>
             <CardTitle className="text-xl">Here is order</CardTitle>
-            <CardDescription>관리자 1명 운영용 발주 모니터링 서비스</CardDescription>
+            <CardDescription>매장 재고·발주 관리 서비스</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={onSubmit} className="space-y-4" autoComplete="on">

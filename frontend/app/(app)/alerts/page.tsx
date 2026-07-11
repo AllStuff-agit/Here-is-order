@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiGet, ApiError } from '@/lib/api';
 import { ALL_CATEGORY_VALUE } from '@/lib/constants';
-import { getStockStatus, stockStatusLabel, type StockStatus } from '@/lib/format';
+import { getStockStatus, stockStatusLabel } from '@/lib/format';
 import type { Category, Item } from '@/lib/types';
 import { useSortable } from '@/lib/use-sortable';
 import { SortableHeader } from '@/components/sortable-header';
@@ -96,7 +96,7 @@ export default function AlertsPage() {
       <div className="page-header">
         <div>
           <h1 className="page-title">발주 알림</h1>
-          <p className="page-subtitle">안전재고 이하 품목을 중심으로 누락 없이 확인합니다.</p>
+          <p className="page-subtitle">안전재고 미만 품목을 중심으로 누락 없이 확인합니다.</p>
         </div>
         <div className="toolbar">
           <Button variant="outline" onClick={() => router.push('/orders')}>
@@ -202,7 +202,7 @@ export default function AlertsPage() {
           ) : filtered.length === 0 ? (
             <p className="data-empty">
               {orders.length === 0
-                ? '현재 재고 부족 품목이 없습니다. 재고가 안전재고 이하로 떨어지면 여기에 표시됩니다.'
+                ? '현재 재고 부족 품목이 없습니다. 재고가 안전재고 미만으로 떨어지면 여기에 표시됩니다.'
                 : '선택한 조건에 해당하는 알림이 없습니다.'}
             </p>
           ) : (

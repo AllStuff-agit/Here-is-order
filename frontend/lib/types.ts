@@ -100,10 +100,15 @@ export type PurchaseOrderDetail = PurchaseOrder & {
   items: PurchaseOrderItem[];
 };
 
+export type UserRole = 'admin' | 'staff';
+
 export type AppUser = {
   id: number;
   username: string;
   name: string;
+  role: UserRole;
   is_active: number;
   created_at: string;
 };
+
+export type CurrentUser = Pick<AppUser, 'id' | 'username' | 'name' | 'role'>;

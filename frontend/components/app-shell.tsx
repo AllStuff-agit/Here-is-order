@@ -6,11 +6,10 @@ import { usePathname, useRouter } from 'next/navigation';
 import { Bell, Boxes, LayoutDashboard, LogOut, Menu, Package, ReceiptText, Settings } from 'lucide-react';
 import { apiGet, apiPost, ApiError } from '@/lib/api';
 import { INVENTORY_REFRESH_EVENT } from '@/lib/constants';
-import type { DashboardData } from '@/lib/types';
+import type { CurrentUser, DashboardData } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
-import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -67,7 +66,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [lowStockCount, setLowStockCount] = React.useState(0);
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const [shellError, setShellError] = React.useState('');
-  const [currentUsername, setCurrentUsername] = React.useState('');
+  const [currentUser, setCurrentUser] = React.useState<CurrentUser | null>(null);
 
   const loadAlerts = React.useCallback(async () => {
     setLoading(true);
@@ -75,10 +74,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     try {
       const [dashData, meData] = await Promise.all([
         apiGet<DashboardData>('/api/dashboard'),
-        apiGet<{ id: number; username: string; name: string }>('/api/users/me'),
+        apiGet<CurrentUser>('/api/users/me'),
       ]);
       setLowStockCount(Number(dashData?.low_stock_count || 0));
-      setCurrentUsername(meData?.username || '');
+      setCurrentUser(meData);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         router.replace('/login');
@@ -119,6 +118,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const visibleNavItems = currentUser?.role === 'admin' ? navItems : navItems.filter((item) => item.href !== '/settings');
+
   if (isPublicPage) {
     return <>{children}</>;
   }
@@ -136,12 +137,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <SheetContent side="left" className="w-[84vw] bg-sidebar text-sidebar-foreground sm:w-[360px]">
               <SheetHeader className="space-y-1">
                 <SheetTitle className="text-sidebar-foreground">Here is order</SheetTitle>
-                <SheetDescription className="text-sidebar-foreground/50">관리자 전용 앱</SheetDescription>
+                <SheetDescription className="text-sidebar-foreground/50">재고·발주 관리 앱</SheetDescription>
               </SheetHeader>
               <div className="mt-4">
                 <div className="rounded-lg bg-sidebar p-2">
                   <nav className="space-y-1">
-                    {navItems.map((item) => (
+                    {visibleNavItems.map((item) => (
                       <TopNavItem
                         key={item.href}
                         item={item}
@@ -165,8 +166,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Badge>
 
           <div className="ml-auto flex items-center gap-2">
-            {currentUsername ? (
-              <span className="text-sm text-sidebar-foreground/60">{currentUsername}</span>
+            {currentUser?.username ? (
+              <span className="text-sm text-sidebar-foreground/60">{currentUser.username}</span>
             ) : null}
             <Button variant="ghost" size="sm" className="text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground" onClick={handleLogout}>
               <LogOut className="size-4" />
@@ -183,7 +184,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <p className="px-2 py-2 text-xs font-semibold uppercase tracking-wide text-sidebar-foreground/40">메뉴</p>
             <div className="border-b border-sidebar-border" />
             <nav className="space-y-1 p-2">
-              {navItems.map((item) => (
+              {visibleNavItems.map((item) => (
                 <TopNavItem key={item.href} item={item} pathname={pathname} />
               ))}
             </nav>

@@ -1,6 +1,8 @@
 # Dashboard Quick Order Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **상태: 구현 완료된 역사 문서.** 이 문서는 더 이상 실행 계획이 아닙니다. 현재 동작과 API 계약은 `frontend/app/(app)/dashboard/page.tsx`, `src/index.ts`, `docs/design/api-spec-v1.md`를 기준으로 확인하세요.
+>
+> 구현은 이 초안 이후 발전했습니다. 현재는 진행 중 발주가 부족분을 이미 충당한 품목을 선택하지 않으며, 생성한 발주서를 초안으로 저장하거나 즉시 확정할 수 있습니다. 아래 코드 조각은 최초 구현 당시의 설계 기록으로 보존합니다.
 
 **Goal:** 대시보드의 발주 필요 품목 테이블에 "바로 발주" 버튼을 추가하고, 클릭 시 모달이 열려 품목을 선택(기본 전체 선택)·수량 조정 후 즉시 발주서를 생성하는 기능.
 
@@ -140,7 +142,7 @@ Dialog
 
 ---
 
-- [ ] **Step 1.1: import 추가**
+- [x] **Step 1.1: import 추가**
 
 `dashboard/page.tsx` 상단에 필요한 import 추가:
 
@@ -154,7 +156,7 @@ import { ShoppingCart } from 'lucide-react';
 
 (이미 import된 것: `Input`, `Button`, `Table`, `TableBody`, `TableCell`, `TableHead`, `TableHeader`, `TableRow` — 중복 추가 금지)
 
-- [ ] **Step 1.2: RowState 타입 및 QuickOrderDialog 컴포넌트 작성**
+- [x] **Step 1.2: RowState 타입 및 QuickOrderDialog 컴포넌트 작성**
 
 `MetricCard` 컴포넌트 정의 **아래**, `DashboardPage` 함수 **위**에 삽입:
 
@@ -351,7 +353,7 @@ function QuickOrderDialog({
 }
 ```
 
-- [ ] **Step 1.3: DashboardPage에 모달 상태 추가 및 버튼 연결**
+- [x] **Step 1.3: DashboardPage에 모달 상태 추가 및 버튼 연결**
 
 `DashboardPage` 함수 안에 상태 추가:
 ```ts
@@ -396,7 +398,7 @@ const [quickOrderOpen, setQuickOrderOpen] = React.useState(false);
 />
 ```
 
-- [ ] **Step 1.4: TypeScript 타입 체크**
+- [x] **Step 1.4: TypeScript 타입 체크**
 
 ```bash
 cd /home/wl/workspace/projects/hereisorder/frontend && npx tsc --noEmit
@@ -404,7 +406,7 @@ cd /home/wl/workspace/projects/hereisorder/frontend && npx tsc --noEmit
 
 Expected: 출력 없음 (에러 없음)
 
-- [ ] **Step 1.5: 브라우저에서 동작 확인**
+- [x] **Step 1.5: 동작 검증**
 
 http://localhost:3000/dashboard 접속 후:
 1. 발주 필요 품목 카드에 "바로 발주" 버튼 노출 확인
@@ -414,7 +416,7 @@ http://localhost:3000/dashboard 접속 후:
 5. "발주서 생성" 클릭 → `/orders/{id}` 이동 확인
 6. 발주 필요 품목이 0개일 때 버튼 미표시 확인
 
-- [ ] **Step 1.6: 커밋**
+- [x] **Step 1.6: 커밋**
 
 ```bash
 git add frontend/app/\(app\)/dashboard/page.tsx

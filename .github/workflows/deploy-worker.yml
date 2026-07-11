@@ -1,33 +1,157 @@
-name: Deploy Cloudflare Worker
+name: Verify and deploy
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'db/**'
+      - 'frontend/**'
+      - 'migrations/**'
+      - 'scripts/**'
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - 'wrangler.toml'
   push:
     branches:
       - main
     paths:
+      - '.github/workflows/**'
+      - 'db/**'
+      - 'frontend/**'
+      - 'migrations/**'
+      - 'scripts/**'
       - 'src/**'
-      - 'wrangler.toml'
+      - 'test/**'
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - 'wrangler.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy Worker
+  verify:
+    name: Verify API, migrations, and web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Install API dependencies
+        run: npm ci
+
+      - name: Type-check API
+        run: npm exec -- tsc --noEmit
+
+      - name: Test API when configured
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
+            npm test
+          else
+            echo "No root test script configured; skipping."
+          fi
+
+      - name: Validate Worker bundle
+        run: npm run build
+
+      - name: Validate D1 migrations locally
+        run: npm exec -- wrangler d1 migrations apply hereisorder --local --persist-to /tmp/hereisorder-ci
+
+      - name: Install web dependencies
+        run: npm ci --prefix frontend
+
+      - name: Lint web
+        run: npm run lint --prefix frontend
+
+      - name: Test web when configured
+        run: |
+          if node -e "process.exit(require('./frontend/package.json').scripts?.test ? 0 : 1)"; then
+            npm test --prefix frontend
+          else
+            echo "No frontend test script configured; skipping."
+          fi
+
+      - name: Build web
+        run: npm run build --prefix frontend
+
+      - name: Validate Cloudflare web bundle
+        run: npm run build:cloudflare --prefix frontend
+
+  deploy-api:
+    name: Deploy API Worker
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Deploy to Cloudflare Workers
-        run: npx wrangler deploy
+      - name: Apply production D1 migrations
+        run: npm exec -- wrangler d1 migrations apply hereisorder --remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy API Worker
+        run: npm exec -- wrangler deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+  deploy-web:
+    name: Deploy web Worker
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs:
+      - verify
+      - deploy-api
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix frontend
+
+      - name: Validate production API proxy URL
+        run: node -e "const value = process.env.API_PROXY_URL; if (!value) throw new Error('PRODUCTION_API_PROXY_URL is required'); const url = new URL(value); if (url.protocol !== 'https:') throw new Error('PRODUCTION_API_PROXY_URL must use https'); if (url.username || url.password) throw new Error('PRODUCTION_API_PROXY_URL must not include credentials'); if (url.pathname !== '/') throw new Error('PRODUCTION_API_PROXY_URL must be an origin without a path'); if (url.search || url.hash) throw new Error('PRODUCTION_API_PROXY_URL must not include a query string or hash')"
+        env:
+          API_PROXY_URL: ${{ vars.PRODUCTION_API_PROXY_URL }}
+
+      - name: Deploy web Worker
+        run: npm run deploy --prefix frontend
+        env:
+          API_PROXY_URL: ${{ vars.PRODUCTION_API_PROXY_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

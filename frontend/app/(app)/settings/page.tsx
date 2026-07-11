@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
-import { AppUser } from '@/lib/types';
+import type { AppUser } from '@/lib/types';
 import { useSortable } from '@/lib/use-sortable';
 import { SortableHeader } from '@/components/sortable-header';
 
@@ -152,6 +152,7 @@ export default function SettingsPage() {
                       placeholder="6자 이상"
                     />
                   </div>
+                  <p className="text-xs text-muted-foreground">새 계정은 직원 권한으로 생성됩니다.</p>
                   {addError ? <p className="text-sm text-destructive">{addError}</p> : null}
                   <DialogFooter>
                     <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>취소</Button>
@@ -183,6 +184,7 @@ export default function SettingsPage() {
                 <TableRow>
                   <SortableHeader label="아이디" sortKey="username" sort={usersSort} onSort={usersToggle} />
                   <SortableHeader label="이름" sortKey="name" sort={usersSort} onSort={usersToggle} />
+                  <SortableHeader label="권한" sortKey="role" sort={usersSort} onSort={usersToggle} />
                   <TableHead>상태</TableHead>
                   <SortableHeader label="생성일" sortKey="created_at" sort={usersSort} onSort={usersToggle} />
                   <TableHead className="text-right">비밀번호</TableHead>
@@ -193,6 +195,11 @@ export default function SettingsPage() {
                   <TableRow key={u.id}>
                     <TableCell className="font-medium">{u.username}</TableCell>
                     <TableCell>{u.name}</TableCell>
+                    <TableCell>
+                      <Badge variant={u.role === 'admin' ? 'default' : 'outline'}>
+                        {u.role === 'admin' ? '관리자' : '직원'}
+                      </Badge>
+                    </TableCell>
                     <TableCell>
                       <Badge variant={u.is_active ? 'secondary' : 'outline'}>
                         {u.is_active ? '활성' : '비활성'}

@@ -8,9 +8,3 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "hereisorder"
 database_id = "6129977e-f5a1-41ee-96ce-7a7a1e260e6d"
-
-[env.production]
-[[env.production.d1_databases]]
-binding = "DB"
-database_name = "hereisorder"
-database_id = "6129977e-f5a1-41ee-96ce-7a7a1e260e6d"

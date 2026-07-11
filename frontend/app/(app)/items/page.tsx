@@ -175,20 +175,22 @@ export default function ItemsPage() {
     setFormSubmitting(true);
     resetSubmitMessage('');
     try {
-      const payload = {
+      const commonPayload = {
         name: form.name.trim(),
         category_id: form.categoryId ? Number(form.categoryId) : null,
         safety_stock: Number(form.safetyStock || 0),
         min_stock: Number(form.minStock || 0),
-        current_stock: Number(form.currentStock || 0),
         unit_price: Number(form.unitPrice || 0),
         memo: form.memo.trim() || null,
       };
 
       if (editingItem) {
-        await apiPatch<Item>(`/api/items/${editingItem.id}`, payload);
+        await apiPatch<Item>(`/api/items/${editingItem.id}`, commonPayload);
       } else {
-        await apiPost<Item>('/api/items', payload);
+        await apiPost<Item>('/api/items', {
+          ...commonPayload,
+          current_stock: Number(form.currentStock || 0),
+        });
       }
       closeForm();
       await loadSeed();
@@ -327,7 +329,7 @@ export default function ItemsPage() {
             <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
               <DialogHeader>
                 <DialogTitle>{editingItem ? '품목 수정' : '품목 추가'}</DialogTitle>
-                <DialogDescription>관리자 단일 사용자를 위한 품목 데이터입니다.</DialogDescription>
+                <DialogDescription>매장의 품목과 재고 기준을 관리합니다.</DialogDescription>
               </DialogHeader>
               <form onSubmit={onSubmitForm} className="space-y-3">
                 <div className="space-y-2">
@@ -386,8 +388,15 @@ export default function ItemsPage() {
                       type="number"
                       min="0"
                       value={form.currentStock}
+                      disabled={Boolean(editingItem)}
+                      aria-describedby={editingItem ? 'currentStockHelp' : undefined}
                       onChange={(event) => setForm((prev) => ({ ...prev, currentStock: event.target.value }))}
                     />
+                    {editingItem ? (
+                      <p id="currentStockHelp" className="text-xs text-muted-foreground">
+                        현재고 변경은 품목 목록의 재고 버튼에서 재고 조정을 사용하세요.
+                      </p>
+                    ) : null}
                   </div>
                 </div>
                 <div className="space-y-2">

@@ -10,8 +10,10 @@ type SessionUser = {
   id: number;
   username: string;
   name: string;
+  role: UserRole;
 };
 
+type UserRole = 'admin' | 'staff';
 type OrderStatus = 'draft' | 'ordered' | 'partially_received' | 'fully_received' | 'canceled';
 
 type AppVariables = {
@@ -34,7 +36,13 @@ const PASSWORD_HASH_ITERATIONS = 100_000;
 const PASSWORD_SALT_BYTES = 16;
 const PASSWORD_HASH_BITS = 256;
 const PUBLIC_API_PATHS = new Set(['/api/auth/login', '/health', '/login']);
+const USER_ROLES = ['admin', 'staff'] as const;
 const ORDER_STATUSES = ['draft', 'ordered', 'partially_received', 'fully_received', 'canceled'] as const;
+const ITEM_PUBLIC_COLUMNS = `i.id, i.category_id, i.name, i.spec, i.unit,
+  i.safety_stock, i.min_stock, i.current_stock, i.unit_price, i.memo,
+  i.is_deleted, i.deleted_at, i.created_at, i.updated_at`;
+const ORDER_PUBLIC_COLUMNS = `id, title, status, order_date, external_order_ref, note,
+  is_deleted, deleted_at, created_at, updated_at`;
 
 function apiOk<T>(data: T) {
   return { ok: true, data };
@@ -62,7 +70,10 @@ function parseCookie(cookieHeader: string | undefined) {
   return result;
 }
 
-function parseIntValue(raw: string | undefined, fallback?: number) {
+function parseIntValue(raw: string | undefined, fallback: null): number | null;
+function parseIntValue(raw: string | undefined, fallback: number): number;
+function parseIntValue(raw: string | undefined, fallback?: undefined): number | undefined;
+function parseIntValue(raw: string | undefined, fallback?: number | null): number | null | undefined {
   if (raw === undefined) return fallback;
   const n = Number(raw);
   return Number.isInteger(n) ? n : fallback;
@@ -176,7 +187,7 @@ async function getSessionUser(c: any): Promise<SessionUser | null> {
   if (!sid) return null;
 
   const row = await c.env.DB.prepare(
-    `SELECT u.id, u.username, u.name
+    `SELECT u.id, u.username, u.name, u.role
        FROM users u
        JOIN sessions s ON s.user_id = u.id
       WHERE s.token = ?
@@ -189,6 +200,14 @@ async function getSessionUser(c: any): Promise<SessionUser | null> {
 
   if (!row) return null;
   return row as SessionUser;
+}
+
+function requireAdmin(c: any) {
+  const user = c.get('user') as SessionUser;
+  if (user.role !== 'admin') {
+    return c.json(apiErr('FORBIDDEN', '관리자 권한이 필요합니다.'), 403);
+  }
+  return null;
 }
 
 async function requireAuth(c: any, next: () => Promise<void>) {
@@ -223,25 +242,38 @@ async function writeAudit(
   before?: unknown,
   after?: unknown,
 ) {
-  await db
-    .prepare(
-      `INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      actorUserId,
-      action,
-      entityType,
-      entityId,
-      before ? JSON.stringify(before) : null,
-      after ? JSON.stringify(after) : null
-    )
-    .run();
+  await auditStatement(db, actorUserId, action, entityType, entityId, before, after).run();
+}
+
+function auditStatement(
+  db: D1Database,
+  actorUserId: number | null,
+  action: string,
+  entityType: string,
+  entityId: number | null,
+  before?: unknown,
+  after?: unknown,
+) {
+  return db.prepare(
+    `INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(
+    actorUserId,
+    action,
+    entityType,
+    entityId,
+    before === undefined ? null : JSON.stringify(before),
+    after === undefined ? null : JSON.stringify(after),
+  );
 }
 
 function isOrderStatus(status: string): status is OrderStatus {
   return ORDER_STATUSES.includes(status as OrderStatus);
 }
+function isUserRole(role: string): role is UserRole {
+  return USER_ROLES.includes(role as UserRole);
+}
+
 
 app.use('/api/*', async (c, next) => {
   const path = c.req.path;
@@ -263,14 +295,14 @@ app.post('/api/auth/login', async (c) => {
   }
 
   const user = await c.env.DB.prepare(`
-    SELECT id, username, password_hash, name
+    SELECT id, username, password_hash, name, role
       FROM users
      WHERE username = ?
        AND is_active = 1
        AND is_deleted = 0
   `)
     .bind(username)
-    .first<{ id: number; username: string; password_hash: string; name: string }>();
+    .first<{ id: number; username: string; password_hash: string; name: string; role: UserRole }>();
 
   if (!user) {
     return c.json(apiErr('INVALID_CREDENTIALS', '계정이 존재하지 않거나 비활성입니다.'), 401);
@@ -290,20 +322,19 @@ app.post('/api/auth/login', async (c) => {
   const sid = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000).toISOString();
 
-  await c.env.DB.prepare(
-    `INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`
-  )
-    .bind(sid, user.id, expiresAt)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`
+    ).bind(sid, user.id, expiresAt),
+    auditStatement(c.env.DB, user.id, 'login', 'user', user.id, undefined, { username: user.username }),
+  ]);
 
   const [header, value] = authSetCookie(sid, new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
 
   void c.env.DB.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now')`).run().catch(() => {});
 
-  await writeAudit(c.env.DB, user.id, 'login', 'user', user.id, undefined, { username: user.username });
-
-  return c.json(apiOk({ user: { id: user.id, username: user.username, name: user.name } }));
+  return c.json(apiOk({ user: { id: user.id, username: user.username, name: user.name, role: user.role } }));
 });
 
 app.post('/api/auth/logout', async (c) => {
@@ -311,40 +342,49 @@ app.post('/api/auth/logout', async (c) => {
   const cookies = parseCookie(c.req.header('Cookie'));
   const sid = cookies[AUTH_COOKIE];
 
-  if (sid) {
-    await c.env.DB.prepare('DELETE FROM sessions WHERE token = ? AND user_id = ?')
-      .bind(sid, user.id)
-      .run();
-  }
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM sessions WHERE token = ? AND user_id = ?')
+      .bind(sid || '', user.id),
+    auditStatement(c.env.DB, user.id, 'logout', 'user', user.id),
+  ]);
 
   const [header, value] = authClearCookie(new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
 
   void c.env.DB.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now')`).run().catch(() => {});
 
-  await writeAudit(c.env.DB, user.id, 'logout', 'user', user.id);
   return c.json(apiOk({ loggedOut: true }));
 });
 
 app.get('/api/users', async (c) => {
+  const forbidden = requireAdmin(c);
+  if (forbidden) return forbidden;
+
   const rows = await c.env.DB.prepare(
-    `SELECT id, username, name, is_active, created_at FROM users WHERE is_deleted = 0 ORDER BY id ASC`
-  ).all<{ id: number; username: string; name: string; is_active: number; created_at: string }>();
+    `SELECT id, username, name, role, is_active, created_at FROM users WHERE is_deleted = 0 ORDER BY id ASC`
+  ).all<{ id: number; username: string; name: string; role: UserRole; is_active: number; created_at: string }>();
   return c.json(apiOk(rows.results));
 });
 
 app.post('/api/users', async (c) => {
   const actor = c.get('user') as SessionUser;
+  const forbidden = requireAdmin(c);
+  if (forbidden) return forbidden;
+
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const username = String(payload.username || '').trim();
   const name = String(payload.name || '').trim();
   const password = String(payload.password || '');
+  const role = payload.role == null ? 'staff' : String(payload.role).trim();
 
   if (!username || !password) {
     return c.json(apiErr('INVALID_INPUT', '아이디와 비밀번호는 필수입니다.'), 400);
   }
   if (password.length < 6) {
     return c.json(apiErr('INVALID_INPUT', '비밀번호는 6자 이상이어야 합니다.'), 400);
+  }
+  if (!isUserRole(role)) {
+    return c.json(apiErr('INVALID_INPUT', 'role은 admin 또는 staff여야 합니다.'), 400);
   }
 
   const existing = await c.env.DB.prepare(`SELECT id FROM users WHERE username = ? AND is_deleted = 0`).bind(username).first();
@@ -353,18 +393,25 @@ app.post('/api/users', async (c) => {
   }
 
   const hash = await hashPassword(password);
-  const result = await c.env.DB.prepare(
-    `INSERT INTO users (username, password_hash, name) VALUES (?, ?, ?)`
-  ).bind(username, hash, name || username).run();
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO users (username, password_hash, name, role) VALUES (?, ?, ?, ?)`
+    ).bind(username, hash, name || username, role),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       VALUES (?, 'create', 'user', last_insert_rowid(), NULL, ?)`
+    ).bind(actor.id, JSON.stringify({ username, role })),
+  ]);
 
-  const newUser = await c.env.DB.prepare(`SELECT id, username, name, is_active, created_at FROM users WHERE id = ?`).bind(result.meta.last_row_id).first();
-  await writeAudit(c.env.DB, actor.id, 'create', 'user', Number(result.meta.last_row_id), undefined, { username });
+  const userId = Number(batchResult[0].meta.last_row_id);
+  const newUser = await c.env.DB.prepare(`SELECT id, username, name, role, is_active, created_at FROM users WHERE id = ?`).bind(userId).first();
   return c.json(apiOk(newUser), 201);
 });
 
 app.get('/api/users/me', async (c) => {
   const user = c.get('user') as SessionUser;
-  return c.json(apiOk({ id: user.id, username: user.username, name: user.name }));
+  return c.json(apiOk({ id: user.id, username: user.username, name: user.name, role: user.role }));
 });
 
 app.patch('/api/users/me/password', async (c) => {
@@ -389,13 +436,24 @@ app.patch('/api/users/me/password', async (c) => {
   }
 
   const newHash = await hashPassword(newPassword);
-  await c.env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`).bind(newHash, user.id).run();
-  await writeAudit(c.env.DB, user.id, 'change_password', 'user', user.id);
+  const currentSession = parseCookie(c.req.header('Cookie'))[AUTH_COOKIE] || '';
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`
+    ).bind(newHash, user.id),
+    c.env.DB.prepare(
+      'DELETE FROM sessions WHERE user_id = ? AND token <> ?'
+    ).bind(user.id, currentSession),
+    auditStatement(c.env.DB, user.id, 'change_password', 'user', user.id),
+  ]);
   return c.json(apiOk({ ok: true }));
 });
 
 app.patch('/api/users/:id/password', async (c) => {
   const actor = c.get('user') as SessionUser;
+  const forbidden = requireAdmin(c);
+  if (forbidden) return forbidden;
+
   const targetId = parseIntValue(c.req.param('id'), null);
   if (!targetId) return c.json(apiErr('INVALID_INPUT', '유효하지 않은 사용자 ID입니다.'), 400);
 
@@ -410,8 +468,13 @@ app.patch('/api/users/:id/password', async (c) => {
   if (!target) return c.json(apiErr('NOT_FOUND', '사용자를 찾을 수 없습니다.'), 404);
 
   const newHash = await hashPassword(newPassword);
-  await c.env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`).bind(newHash, targetId).run();
-  await writeAudit(c.env.DB, actor.id, 'reset_password', 'user', targetId);
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(newHash, targetId),
+    c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetId),
+    auditStatement(c.env.DB, actor.id, 'reset_password', 'user', targetId),
+  ]);
   return c.json(apiOk({ ok: true }));
 });
 
@@ -447,9 +510,16 @@ app.post('/api/categories', async (c) => {
 
   let result;
   try {
-    result = await c.env.DB.prepare(
-      `INSERT INTO item_categories (name, description) VALUES (?, ?)`
-    ).bind(name, description).run();
+    result = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO item_categories (name, description) VALUES (?, ?)`
+      ).bind(name, description),
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         VALUES (?, 'create', 'category', last_insert_rowid(), NULL, ?)`
+      ).bind(user.id, JSON.stringify({ name, description })),
+    ]);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes('UNIQUE constraint failed')) {
@@ -458,12 +528,11 @@ app.post('/api/categories', async (c) => {
     throw e;
   }
 
-  const id = Number(result.meta.last_row_id);
+  const id = Number((result[0] as D1Result).meta.last_row_id);
   const row = await c.env.DB.prepare('SELECT id, name, description FROM item_categories WHERE id = ?')
     .bind(id)
     .first();
 
-  await writeAudit(c.env.DB, user.id, 'create', 'category', id, undefined, row);
   return c.json(apiOk(row), 201);
 });
 
@@ -493,19 +562,32 @@ app.patch('/api/categories/:id', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '수정할 데이터가 없습니다.'), 400);
   }
 
-  const before = await c.env.DB.prepare('SELECT id, name, description, is_deleted FROM item_categories WHERE id = ?')
+  const before = await c.env.DB.prepare('SELECT id, name, description, is_deleted FROM item_categories WHERE id = ? AND is_deleted = 0')
     .bind(id)
     .first();
   if (!before) return c.json(apiErr('NOT_FOUND', '카테고리를 찾지 못했습니다.'), 404);
 
-  const q = `UPDATE item_categories SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ?`;
-  await c.env.DB.prepare(q).bind(...params, id).run();
+  const q = `UPDATE item_categories SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`;
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(q).bind(...params, id),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'update', 'category', c.id, ?,
+              json_object('id', c.id, 'name', c.name, 'description', c.description,
+                          'is_deleted', c.is_deleted)
+         FROM item_categories c
+        WHERE c.id = ? AND changes() = 1`
+    ).bind(user.id, JSON.stringify(before), id),
+  ]);
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '카테고리 상태가 변경되어 수정할 수 없습니다.'), 409);
+  }
 
   const after = await c.env.DB.prepare('SELECT id, name, description, is_deleted FROM item_categories WHERE id = ?')
     .bind(id)
     .first();
 
-  await writeAudit(c.env.DB, user.id, 'update', 'category', id, before, after);
   return c.json(apiOk(after));
 });
 
@@ -514,7 +596,7 @@ app.delete('/api/categories/:id', async (c) => {
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '카테고리 ID가 유효하지 않습니다.'), 400);
 
-  const before = await c.env.DB.prepare('SELECT id, name, is_deleted FROM item_categories WHERE id = ?')
+  const before = await c.env.DB.prepare('SELECT id, name, is_deleted FROM item_categories WHERE id = ? AND is_deleted = 0')
     .bind(id)
     .first();
   if (!before) return c.json(apiErr('NOT_FOUND', '카테고리를 찾지 못했습니다.'), 404);
@@ -528,15 +610,26 @@ app.delete('/api/categories/:id', async (c) => {
     return c.json(apiErr('CONFLICT', '이 분류에 속한 품목이 있어 삭제할 수 없습니다.'), 409);
   }
 
-  await c.env.DB.prepare('UPDATE item_categories SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?')
-    .bind(id)
-    .run();
+  const after = { ...before, is_deleted: 1 };
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE item_categories
+          SET is_deleted = 1, deleted_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ? AND is_deleted = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM items WHERE category_id = ? AND is_deleted = 0
+          )`
+    ).bind(id, id),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'soft_delete', 'category', ?, ?, ? WHERE changes() = 1`
+    ).bind(user.id, id, JSON.stringify(before), JSON.stringify(after)),
+  ]);
 
-  const after = await c.env.DB.prepare('SELECT id, name, is_deleted FROM item_categories WHERE id = ?')
-    .bind(id)
-    .first();
-
-  await writeAudit(c.env.DB, user.id, 'soft_delete', 'category', id, before, after);
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '활성 품목이 추가되어 카테고리를 삭제할 수 없습니다.'), 409);
+  }
   return c.json(apiOk({ deleted: true }));
 });
 
@@ -610,8 +703,20 @@ app.post('/api/items', async (c) => {
   if (!name) {
     return c.json(apiErr('INVALID_INPUT', '품목명은 필수입니다.'), 400);
   }
-  if (safetyStock < 0 || minStock < 0 || currentStock < 0 || unitPrice < 0) {
+  if (
+    safetyStock == null || minStock == null || currentStock == null || unitPrice == null ||
+    safetyStock < 0 || minStock < 0 || currentStock < 0 || unitPrice < 0
+  ) {
     return c.json(apiErr('INVALID_INPUT', '수량/금액은 0 이상이어야 합니다.'), 400);
+  }
+  if (payload.category_id != null && (categoryId == null || categoryId <= 0)) {
+    return c.json(apiErr('INVALID_INPUT', '카테고리 ID가 유효하지 않습니다.'), 400);
+  }
+  if (categoryId !== null) {
+    const category = await c.env.DB.prepare(
+      'SELECT id FROM item_categories WHERE id = ? AND is_deleted = 0'
+    ).bind(categoryId).first();
+    if (!category) return c.json(apiErr('INVALID_INPUT', '활성 카테고리를 찾지 못했습니다.'), 400);
   }
 
   const existing = await c.env.DB.prepare(
@@ -623,12 +728,45 @@ app.post('/api/items', async (c) => {
     return c.json(apiErr('DUPLICATE', '이미 동일한 품목이 존재합니다.'), 409);
   }
 
-  let inserted;
+  const creationToken = crypto.randomUUID();
+  const operationToken = crypto.randomUUID();
+  let batchResult: D1Result[];
   try {
-    inserted = await c.env.DB.prepare(
-      `INSERT INTO items (category_id, name, spec, unit, safety_stock, min_stock, current_stock, unit_price, memo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(categoryId, name, spec || null, '개', safetyStock, minStock, currentStock, unitPrice, memo).run();
+    const statements = [
+      c.env.DB.prepare(
+        `INSERT INTO items
+           (category_id, name, spec, unit, safety_stock, min_stock, current_stock, unit_price, memo, creation_token)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(categoryId, name, spec || null, '개', safetyStock, minStock, currentStock, unitPrice, memo, creationToken),
+    ];
+
+    if (currentStock > 0) {
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO stock_transactions
+             (item_id, movement_type, quantity, reason, created_by, operation_token)
+           SELECT id, 'ADJUST', current_stock, '초기 재고', ?, ?
+             FROM items WHERE creation_token = ?`
+        ).bind(user.id, operationToken, creationToken),
+      );
+    }
+
+    statements.push(
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         SELECT ?, 'create', 'item', id, NULL, ?
+           FROM items WHERE creation_token = ?`
+      ).bind(
+        user.id,
+        JSON.stringify({ category_id: categoryId, name, spec: spec || null, current_stock: currentStock }),
+        creationToken,
+      ),
+    );
+    statements.push(
+      c.env.DB.prepare('UPDATE items SET creation_token = NULL WHERE creation_token = ?').bind(creationToken),
+    );
+    batchResult = await c.env.DB.batch(statements);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes('UNIQUE constraint failed')) {
@@ -637,14 +775,13 @@ app.post('/api/items', async (c) => {
     throw e;
   }
 
-  const id = Number(inserted.meta.last_row_id);
+  const id = Number(batchResult[0].meta.last_row_id);
   const row = await c.env.DB.prepare(
-    `SELECT i.*, c.name AS category_name FROM items i LEFT JOIN item_categories c ON c.id = i.category_id WHERE i.id = ?`
+    `SELECT ${ITEM_PUBLIC_COLUMNS}, c.name AS category_name FROM items i LEFT JOIN item_categories c ON c.id = i.category_id WHERE i.id = ?`
   )
     .bind(id)
     .first();
 
-  await writeAudit(c.env.DB, user.id, 'create', 'item', id, undefined, row);
   return c.json(apiOk(row), 201);
 });
 
@@ -654,7 +791,11 @@ app.patch('/api/items/:id', async (c) => {
   if (!id) return c.json(apiErr('INVALID_INPUT', '품목 ID가 유효하지 않습니다.'), 400);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
-  const allowed = ['category_id', 'name', 'spec', 'safety_stock', 'min_stock', 'current_stock', 'unit_price', 'memo'];
+  if ('current_stock' in payload) {
+    return c.json(apiErr('INVENTORY_LEDGER_REQUIRED', '현재고는 재고 조정 API를 통해서만 변경할 수 있습니다.'), 400);
+  }
+
+  const allowed = ['category_id', 'name', 'spec', 'safety_stock', 'min_stock', 'unit_price', 'memo'];
   const patches: string[] = [];
   const params: unknown[] = [];
 
@@ -672,7 +813,15 @@ app.patch('/api/items/:id', async (c) => {
 
     if (field === 'category_id') {
       const value = parseIntValue(raw == null ? undefined : String(raw), null);
-      if (value !== null && value <= 0) return c.json(apiErr('INVALID_INPUT', '카테고리 ID가 유효하지 않습니다.'), 400);
+      if (raw != null && (value === null || value <= 0)) {
+        return c.json(apiErr('INVALID_INPUT', '카테고리 ID가 유효하지 않습니다.'), 400);
+      }
+      if (value !== null) {
+        const category = await c.env.DB.prepare(
+          'SELECT id FROM item_categories WHERE id = ? AND is_deleted = 0'
+        ).bind(value).first();
+        if (!category) return c.json(apiErr('INVALID_INPUT', '활성 카테고리를 찾지 못했습니다.'), 400);
+      }
       patches.push('category_id = ?');
       params.push(value);
       continue;
@@ -684,7 +833,7 @@ app.patch('/api/items/:id', async (c) => {
       continue;
     }
 
-    if (field === 'safety_stock' || field === 'min_stock' || field === 'current_stock' || field === 'unit_price') {
+    if (field === 'safety_stock' || field === 'min_stock' || field === 'unit_price') {
       const value = parseIntValue(raw == null ? undefined : String(raw), null);
       if (value === null || value < 0) {
         return c.json(apiErr('INVALID_INPUT', `${field}는 0 이상 정수여야 합니다.`), 400);
@@ -696,18 +845,34 @@ app.patch('/api/items/:id', async (c) => {
 
   if (!patches.length) return c.json(apiErr('INVALID_INPUT', '수정할 데이터가 없습니다.'), 400);
 
-  const before = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
+  const before = await c.env.DB.prepare('SELECT * FROM items WHERE id = ? AND is_deleted = 0').bind(id).first();
   if (!before) return c.json(apiErr('NOT_FOUND', '품목을 찾지 못했습니다.'), 404);
 
-  if (patches.length) {
-    const sql = `UPDATE items SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ?`;
-    await c.env.DB.prepare(sql).bind(...params, id).run();
+  const sql = `UPDATE items SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`;
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(sql).bind(...params, id),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'update', 'item', i.id, ?,
+              json_object(
+                'id', i.id, 'category_id', i.category_id, 'name', i.name,
+                'spec', i.spec, 'unit', i.unit, 'safety_stock', i.safety_stock,
+                'min_stock', i.min_stock, 'current_stock', i.current_stock,
+                'unit_price', i.unit_price, 'memo', i.memo, 'is_deleted', i.is_deleted
+              )
+         FROM items i
+        WHERE i.id = ? AND changes() = 1`
+    ).bind(user.id, JSON.stringify(before), id),
+  ]);
+
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '품목 상태가 변경되어 수정할 수 없습니다.'), 409);
   }
 
   const after = await c.env.DB.prepare(
-    `SELECT i.*, c.name AS category_name FROM items i LEFT JOIN item_categories c ON c.id = i.category_id WHERE i.id = ?`
+    `SELECT ${ITEM_PUBLIC_COLUMNS}, c.name AS category_name FROM items i LEFT JOIN item_categories c ON c.id = i.category_id WHERE i.id = ?`
   ).bind(id).first();
-  await writeAudit(c.env.DB, user.id, 'update', 'item', id, before, after);
   return c.json(apiOk(after));
 });
 
@@ -716,7 +881,7 @@ app.delete('/api/items/:id', async (c) => {
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '품목 ID가 유효하지 않습니다.'), 400);
 
-  const before = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
+  const before = await c.env.DB.prepare('SELECT * FROM items WHERE id = ? AND is_deleted = 0').bind(id).first();
   if (!before) return c.json(apiErr('NOT_FOUND', '품목을 찾지 못했습니다.'), 404);
 
   const outstanding = await c.env.DB.prepare(
@@ -729,12 +894,31 @@ app.delete('/api/items/:id', async (c) => {
     return c.json(apiErr('CONFLICT', '미완료 발주서에 포함된 품목은 삭제할 수 없습니다.'), 409);
   }
 
-  await c.env.DB.prepare('UPDATE items SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?')
-    .bind(id)
-    .run();
+  const after = { ...before, is_deleted: 1 };
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE items
+          SET is_deleted = 1, deleted_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ? AND is_deleted = 0
+          AND NOT EXISTS (
+            SELECT 1
+              FROM order_items oi
+              JOIN purchase_orders po ON po.id = oi.order_id
+             WHERE oi.item_id = ? AND oi.is_deleted = 0
+               AND po.is_deleted = 0
+               AND po.status NOT IN ('fully_received', 'canceled')
+          )`
+    ).bind(id, id),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'soft_delete', 'item', ?, ?, ? WHERE changes() = 1`
+    ).bind(user.id, id, JSON.stringify(before), JSON.stringify(after)),
+  ]);
 
-  const after = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
-  await writeAudit(c.env.DB, user.id, 'soft_delete', 'item', id, before, after);
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '미완료 발주가 추가되어 품목을 삭제할 수 없습니다.'), 409);
+  }
   return c.json(apiOk({ deleted: true }));
 });
 
@@ -763,72 +947,97 @@ app.post('/api/stock/adjust', async (c) => {
   const movementType = String(payload.movement_type || '').toUpperCase();
   const quantity = parseIntValue(String(payload.quantity ?? ''), null);
   const reason = payload.reason == null ? null : String(payload.reason);
-  const orderItemId = payload.order_item_id == null ? null : parseIntValue(String(payload.order_item_id), null);
 
   if (!itemId) return c.json(apiErr('INVALID_INPUT', 'item_id가 유효하지 않습니다.'), 400);
   if (!['IN', 'OUT', 'ADJUST'].includes(movementType)) {
     return c.json(apiErr('INVALID_INPUT', 'movement_type은 IN/OUT/ADJUST만 허용됩니다.'), 400);
   }
+  if (payload.order_item_id != null) {
+    return c.json(apiErr('INVALID_INPUT', '발주 입고는 발주 항목 입고 API를 사용해주세요.'), 400);
+  }
   if (quantity === null || (quantity === 0 && movementType !== 'ADJUST')) {
     return c.json(apiErr('INVALID_INPUT', 'quantity는 0이 아닌 정수여야 합니다.'), 400);
   }
 
-  let delta = 0;
+  let requestedDelta = 0;
   if (movementType === 'IN') {
     if (!Number.isInteger(quantity) || quantity <= 0) {
       return c.json(apiErr('INVALID_INPUT', 'IN은 양수 수량만 허용됩니다.'), 400);
     }
-    delta = quantity;
+    requestedDelta = quantity;
   } else if (movementType === 'OUT') {
     if (!Number.isInteger(quantity) || quantity <= 0) {
       return c.json(apiErr('INVALID_INPUT', 'OUT은 양수 수량만 허용됩니다.'), 400);
     }
-    delta = -quantity;
+    requestedDelta = -quantity;
   } else {
     if (!Number.isInteger(quantity) || quantity < 0) {
       return c.json(apiErr('INVALID_INPUT', 'ADJUST 수량은 0 이상의 정수여야 합니다.'), 400);
     }
-    // delta는 item 조회 후 계산 (아래에서 처리)
   }
 
-  const item = await c.env.DB.prepare('SELECT id, current_stock, is_deleted, unit FROM items WHERE id = ?').bind(itemId).first<{ id: number; current_stock: number; is_deleted: number; unit: string }>();
+  const item = await c.env.DB.prepare(
+    'SELECT id, current_stock, is_deleted FROM items WHERE id = ?'
+  ).bind(itemId).first<{ id: number; current_stock: number; is_deleted: number }>();
   if (!item || item.is_deleted === 1) {
     return c.json(apiErr('NOT_FOUND', '품목이 존재하지 않거나 삭제되었습니다.'), 404);
   }
 
-  // ADJUST: 지정한 값으로 직접 설정 (delta = 목표값 - 현재값)
-  if (movementType === 'ADJUST') {
-    delta = quantity - item.current_stock;
-  }
-
-  const newStock = item.current_stock + delta;
-  if (newStock < 0) {
+  if (movementType !== 'ADJUST' && item.current_stock + requestedDelta < 0) {
     return c.json(apiErr('INVALID_INPUT', '재고가 음수가 됩니다. 현재고를 확인해주세요.'), 400);
   }
 
-  const updateStmt = c.env.DB.prepare(
-    `UPDATE items
-        SET current_stock = current_stock + ?,
-            updated_at = datetime('now')
-      WHERE id = ?
-        AND (current_stock + ? >= 0 OR ? > 0)`
-  ).bind(delta, itemId, delta, delta);
-
+  const operationToken = crypto.randomUUID();
   const batchResult = await c.env.DB.batch([
-    updateStmt,
     c.env.DB.prepare(
-      `INSERT INTO stock_transactions (item_id, movement_type, quantity, reason, order_item_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(itemId, movementType, delta, reason, orderItemId, user.id),
+      `INSERT INTO stock_transactions
+         (item_id, movement_type, quantity, reason, order_item_id, created_by, operation_token)
+       SELECT id, ?,
+              CASE WHEN ? = 'ADJUST' THEN ? - current_stock ELSE ? END,
+              ?, NULL, ?, ?
+         FROM items
+        WHERE id = ?
+          AND is_deleted = 0
+          AND CASE WHEN ? = 'ADJUST' THEN ? ELSE current_stock + ? END >= 0`
+    ).bind(
+      movementType,
+      movementType,
+      quantity,
+      requestedDelta,
+      reason,
+      user.id,
+      operationToken,
+      itemId,
+      movementType,
+      quantity,
+      requestedDelta,
+    ),
+    c.env.DB.prepare(
+      `UPDATE items
+          SET current_stock = current_stock + (
+                SELECT quantity FROM stock_transactions WHERE operation_token = ?
+              ),
+              updated_at = datetime('now')
+        WHERE id = ?
+          AND EXISTS (SELECT 1 FROM stock_transactions WHERE operation_token = ?)`
+    ).bind(operationToken, itemId, operationToken),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'stock_adjust', 'item', i.id,
+              json_object('current_stock', i.current_stock - st.quantity),
+              json_object('current_stock', i.current_stock)
+         FROM items i
+         JOIN stock_transactions st ON st.item_id = i.id
+        WHERE st.operation_token = ?`
+    ).bind(user.id, operationToken),
   ]);
 
   if ((batchResult[0] as D1Result).meta.changes === 0) {
     return c.json(apiErr('CONFLICT', '재고가 음수가 되어 조정할 수 없습니다. 현재 재고를 확인해주세요.'), 409);
   }
 
-  const after = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(itemId).first();
-  await writeAudit(c.env.DB, user.id, 'stock_adjust', 'item', itemId, { current_stock: item.current_stock }, after);
-
+  const after = await c.env.DB.prepare(`SELECT ${ITEM_PUBLIC_COLUMNS} FROM items i WHERE i.id = ?`).bind(itemId).first();
   return c.json(apiOk({ item: after }));
 });
 
@@ -871,6 +1080,7 @@ app.get('/api/dashboard', async (c) => {
          JOIN order_items oi ON oi.order_id = po.id
         WHERE po.is_deleted = 0
           AND po.order_date BETWEEN ? AND ?
+          AND po.status IN ('draft', 'ordered', 'partially_received')
           AND oi.is_deleted = 0) AS open_qty,
       (SELECT COALESCE(SUM(st.quantity), 0)
          FROM stock_transactions st
@@ -965,19 +1175,31 @@ app.post('/api/purchase-orders', async (c) => {
   const statusRaw = payload.status == null ? undefined : String(payload.status).trim();
   const status = statusRaw === undefined || statusRaw === '' ? 'draft' : statusRaw;
 
-  if (!isOrderStatus(status)) {
-    return c.json(apiErr('INVALID_STATUS', '발주 상태값이 올바르지 않습니다. 허용값: draft, ordered, partially_received, fully_received, canceled'), 400);
+  if (status !== 'draft') {
+    return c.json(apiErr('INVALID_STATUS_TRANSITION', '발주서는 초안 상태로만 생성할 수 있습니다.'), 400);
   }
 
   if (!title) return c.json(apiErr('INVALID_INPUT', '발주명은 필수입니다.'), 400);
 
-  const r = await c.env.DB.prepare(
-    `INSERT INTO purchase_orders (title, status, note) VALUES (?, ?, ?)`
-  ).bind(title, status, note).run();
+  const creationToken = crypto.randomUUID();
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status, note, creation_token)
+       VALUES (?, 'draft', ?, ?)`
+    ).bind(title, note, creationToken),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'create', 'purchase_order', id, NULL, ?
+         FROM purchase_orders WHERE creation_token = ?`
+    ).bind(user.id, JSON.stringify({ title, status: 'draft', note }), creationToken),
+    c.env.DB.prepare(
+      'UPDATE purchase_orders SET creation_token = NULL WHERE creation_token = ?'
+    ).bind(creationToken),
+  ]);
 
-  const id = Number(r.meta.last_row_id);
-  const row = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ?').bind(id).first();
-  await writeAudit(c.env.DB, user.id, 'create', 'purchase_order', id, undefined, row);
+  const id = Number((batchResult[0] as D1Result).meta.last_row_id);
+  const row = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ?`).bind(id).first();
   return c.json(apiOk(row), 201);
 });
 
@@ -989,80 +1211,108 @@ app.post('/api/purchase-orders/with-items', async (c) => {
 
   if (!title) return c.json(apiErr('INVALID_INPUT', '발주명은 필수입니다.'), 400);
 
-  const rawItems = Array.isArray(payload.items) ? (payload.items as Array<{ item_id?: unknown; ordered_qty?: unknown; memo?: unknown }>) : [];
-  if (!rawItems.length) return c.json(apiErr('INVALID_INPUT', '품목 목록은 비어있을 수 없습니다.'), 400);
-
-  const parsedItems = rawItems
-    .map((row) => {
-      const itemId = parseIntValue(row.item_id == null ? undefined : String(row.item_id), null);
-      const orderedQty = parseIntValue(row.ordered_qty == null ? undefined : String(row.ordered_qty), null);
-      const memo = row.memo == null ? null : String(row.memo);
-      if (itemId === null || orderedQty === null || orderedQty <= 0) return null;
-      return { itemId, orderedQty, memo };
-    })
-    .filter((v): v is { itemId: number; orderedQty: number; memo: string | null } => v !== null);
-
-  if (!parsedItems.length) return c.json(apiErr('INVALID_INPUT', '항목과 수량을 확인해주세요.'), 400);
-
-  // 발주서 생성
-  const r = await c.env.DB.prepare(
-    `INSERT INTO purchase_orders (title, status, note) VALUES (?, ?, ?)`
-  ).bind(title, 'draft', note).run();
-
-  const orderId = Number(r.meta.last_row_id);
-
-  // 품목 추가 (실패 시 보상 트랜잭션으로 발주서 삭제)
-  try {
-    for (const row of parsedItems) {
-      const item = await c.env.DB.prepare('SELECT id FROM items WHERE id = ? AND is_deleted = 0').bind(row.itemId).first();
-      if (!item) {
-        throw new Error(`존재하지 않는 품목입니다. (id=${row.itemId})`);
-      }
-    }
-
-    for (const row of parsedItems) {
-      const existing = await c.env.DB.prepare(
-        `SELECT id, ordered_qty, received_qty, memo FROM order_items WHERE order_id = ? AND item_id = ? AND is_deleted = 0`
-      ).bind(orderId, row.itemId).first<{ id: number; ordered_qty: number; received_qty: number; memo: string | null }>();
-
-      let orderItemId: number;
-      let action: 'create' | 'update';
-      let before: unknown = null;
-
-      if (existing) {
-        before = { id: existing.id, order_id: orderId, item_id: row.itemId, ordered_qty: existing.ordered_qty, received_qty: existing.received_qty, memo: existing.memo };
-        const nextQty = existing.ordered_qty + row.orderedQty;
-        await c.env.DB.prepare('UPDATE order_items SET ordered_qty = ?, memo = ?, updated_at = datetime("now") WHERE id = ?')
-          .bind(nextQty, row.memo, existing.id).run();
-        orderItemId = existing.id;
-        action = 'update';
-      } else {
-        const inserted = await c.env.DB.prepare(
-          `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo) VALUES (?, ?, ?, 0, ?)`
-        ).bind(orderId, row.itemId, row.orderedQty, row.memo).run();
-        orderItemId = Number(inserted.meta.last_row_id);
-        action = 'create';
-      }
-
-      const after = await c.env.DB.prepare(
-        `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo FROM order_items oi WHERE oi.id = ?`
-      ).bind(orderItemId).first();
-
-      if (after) {
-        await writeAudit(c.env.DB, user.id, action, 'order_item', Number(after.id), before ?? undefined, after);
-      }
-    }
-
-    await c.env.DB.prepare('UPDATE purchase_orders SET updated_at = datetime("now") WHERE id = ?').bind(orderId).run();
-  } catch (err) {
-    // 보상 트랜잭션: 생성된 발주서 삭제
-    await c.env.DB.prepare('UPDATE purchase_orders SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?').bind(orderId).run();
-    const message = err instanceof Error ? err.message : '품목 추가 중 오류가 발생했습니다.';
-    return c.json(apiErr('INVALID_INPUT', message), 400);
+  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+    return c.json(apiErr('INVALID_INPUT', '품목 목록은 비어있을 수 없습니다.'), 400);
   }
 
-  const orderRow = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0').bind(orderId).first();
-  await writeAudit(c.env.DB, user.id, 'create', 'purchase_order', orderId, undefined, orderRow);
+  const parsedItems: Array<{ itemId: number; orderedQty: number; memo: string | null }> = [];
+  for (let index = 0; index < payload.items.length; index += 1) {
+    const rawRow = payload.items[index];
+    if (rawRow == null || typeof rawRow !== 'object' || Array.isArray(rawRow)) {
+      return c.json(apiErr('INVALID_INPUT', `items[${index}] 형식이 올바르지 않습니다.`), 400);
+    }
+
+    const row = rawRow as { item_id?: unknown; ordered_qty?: unknown; memo?: unknown };
+    const itemId = parseIntValue(row.item_id == null ? undefined : String(row.item_id), null);
+    const orderedQty = parseIntValue(row.ordered_qty == null ? undefined : String(row.ordered_qty), null);
+    if (itemId === null || itemId <= 0 || orderedQty === null || orderedQty <= 0) {
+      return c.json(apiErr('INVALID_INPUT', `items[${index}]의 품목과 수량을 확인해주세요.`), 400);
+    }
+
+    parsedItems.push({
+      itemId,
+      orderedQty,
+      memo: row.memo == null ? null : String(row.memo),
+    });
+  }
+
+  const mergedItems = new Map<number, { itemId: number; orderedQty: number; memo: string | null }>();
+  for (const row of parsedItems) {
+    const current = mergedItems.get(row.itemId);
+    mergedItems.set(row.itemId, {
+      itemId: row.itemId,
+      orderedQty: (current?.orderedQty ?? 0) + row.orderedQty,
+      memo: row.memo ?? current?.memo ?? null,
+    });
+  }
+  const items = Array.from(mergedItems.values());
+
+  for (const row of items) {
+    const item = await c.env.DB.prepare(
+      'SELECT id FROM items WHERE id = ? AND is_deleted = 0'
+    ).bind(row.itemId).first();
+    if (!item) {
+      return c.json(apiErr('INVALID_INPUT', `존재하지 않는 품목입니다. (id=${row.itemId})`), 400);
+    }
+  }
+
+  const creationToken = crypto.randomUUID();
+  const statements = [
+    c.env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status, note, creation_token)
+       VALUES (?, 'draft', ?, ?)`
+    ).bind(title, note, creationToken),
+  ];
+
+  for (const row of items) {
+    statements.push(
+      c.env.DB.prepare(
+        `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
+         SELECT id, ?, ?, 0, ? FROM purchase_orders WHERE creation_token = ?`
+      ).bind(row.itemId, row.orderedQty, row.memo, creationToken),
+    );
+    statements.push(
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         SELECT ?, 'create', 'order_item', oi.id, NULL, ?
+           FROM order_items oi
+           JOIN purchase_orders po ON po.id = oi.order_id
+          WHERE po.creation_token = ? AND oi.item_id = ? AND oi.is_deleted = 0`
+      ).bind(
+        user.id,
+        JSON.stringify({ item_id: row.itemId, ordered_qty: row.orderedQty, received_qty: 0, memo: row.memo }),
+        creationToken,
+        row.itemId,
+      ),
+    );
+  }
+
+  statements.push(
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'create', 'purchase_order', id, NULL, ?
+         FROM purchase_orders WHERE creation_token = ?`
+    ).bind(user.id, JSON.stringify({ title, status: 'draft', note, items }), creationToken),
+  );
+  statements.push(
+    c.env.DB.prepare(
+      'UPDATE purchase_orders SET creation_token = NULL WHERE creation_token = ?'
+    ).bind(creationToken),
+  );
+
+  let batchResult: D1Result[];
+  try {
+    batchResult = await c.env.DB.batch(statements);
+  } catch {
+    return c.json(apiErr('CONFLICT', '발주서 생성 중 품목 상태가 변경되었습니다. 다시 시도해주세요.'), 409);
+  }
+
+  const orderId = Number(batchResult[0].meta.last_row_id);
+  const orderRow = await c.env.DB.prepare(
+    `SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ? AND is_deleted = 0`
+  ).bind(orderId).first();
   return c.json(apiOk(orderRow), 201);
 });
 
@@ -1070,7 +1320,7 @@ app.get('/api/purchase-orders/:id', async (c) => {
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
 
-  const order = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0').bind(id).first();
+  const order = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ? AND is_deleted = 0`).bind(id).first();
   if (!order) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
 
   const items = await c.env.DB.prepare(
@@ -1108,7 +1358,7 @@ app.patch('/api/purchase-orders/:id', async (c) => {
       return c.json(apiErr('INVALID_STATUS', '발주 상태값이 올바르지 않습니다. 허용값: draft, ordered, partially_received, fully_received, canceled'), 400);
     }
     if (status === 'partially_received' || status === 'fully_received') {
-      return c.json(apiErr('INVALID_STATUS_TRANSITION', '입고대기/입고완료 상태는 입고 처리에서 자동으로 변경됩니다.'), 400);
+      return c.json(apiErr('INVALID_STATUS_TRANSITION', '부분입고/입고완료 상태는 입고 처리에서 자동으로 변경됩니다.'), 400);
     }
 
     patches.push('status = ?');
@@ -1134,6 +1384,28 @@ app.patch('/api/purchase-orders/:id', async (c) => {
     .bind(id)
     .first();
   if (!before) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
+  const previousStatus = String((before as { status?: string }).status || '') as OrderStatus;
+  if (requestedStatus !== null && requestedStatus !== previousStatus) {
+    if (requestedStatus === 'draft') {
+      return c.json(apiErr('INVALID_STATUS_TRANSITION', '확정된 발주서는 초안으로 되돌릴 수 없습니다.'), 400);
+    }
+    if (requestedStatus === 'ordered' && previousStatus !== 'draft') {
+      return c.json(apiErr('INVALID_STATUS_TRANSITION', '초안 상태의 발주서만 확정할 수 있습니다.'), 400);
+    }
+    if (requestedStatus === 'canceled') {
+      if (previousStatus !== 'draft' && previousStatus !== 'ordered') {
+        return c.json(apiErr('INVALID_STATUS_TRANSITION', '입고가 시작되었거나 종료된 발주서는 취소할 수 없습니다.'), 400);
+      }
+      const receipt = await c.env.DB.prepare(
+        `SELECT COALESCE(SUM(received_qty), 0) AS received_qty
+           FROM order_items WHERE order_id = ? AND is_deleted = 0`
+      ).bind(id).first<{ received_qty: number }>();
+      if (Number(receipt?.received_qty || 0) > 0) {
+        return c.json(apiErr('INVALID_STATUS_TRANSITION', '입고가 시작된 발주서는 취소할 수 없습니다.'), 400);
+      }
+    }
+  }
+
 
   if (requestedStatus === 'ordered') {
     const row = await c.env.DB.prepare(
@@ -1150,14 +1422,50 @@ app.patch('/api/purchase-orders/:id', async (c) => {
     }
   }
 
-  const q = `UPDATE purchase_orders SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ?`;
-  await c.env.DB.prepare(q).bind(...params, id).run();
+  let q = `UPDATE purchase_orders SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`;
+  const updateParams: unknown[] = [...params, id];
+  if (requestedStatus !== null) {
+    q += ' AND status = ?';
+    updateParams.push(previousStatus);
+    if (requestedStatus === 'ordered') {
+      q += ` AND EXISTS (
+        SELECT 1 FROM order_items
+         WHERE order_id = purchase_orders.id AND is_deleted = 0
+      )`;
+    }
+    if (requestedStatus === 'canceled') {
+      q += ` AND NOT EXISTS (
+        SELECT 1 FROM order_items
+         WHERE order_id = purchase_orders.id AND is_deleted = 0 AND received_qty > 0
+      )`;
+    }
+  }
 
-  const after = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0')
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(q).bind(...updateParams),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'update', 'purchase_order', po.id, ?,
+              json_object(
+                'id', po.id, 'title', po.title, 'status', po.status,
+                'order_date', po.order_date, 'external_order_ref', po.external_order_ref,
+                'note', po.note, 'is_deleted', po.is_deleted,
+                'created_at', po.created_at, 'updated_at', po.updated_at
+              )
+         FROM purchase_orders po
+        WHERE po.id = ? AND changes() = 1`
+    ).bind(user.id, JSON.stringify(before), id),
+  ]);
+
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '발주 상태가 변경되어 수정할 수 없습니다.'), 409);
+  }
+
+  const after = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ? AND is_deleted = 0`)
     .bind(id)
     .first();
 
-  await writeAudit(c.env.DB, user.id, 'update', 'purchase_order', id, before, after);
   return c.json(apiOk(after));
 });
 
@@ -1168,17 +1476,52 @@ app.delete('/api/purchase-orders/:id', async (c) => {
 
   const before = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ?').bind(id).first();
   if (!before) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
+  if ((before as { is_deleted?: number }).is_deleted === 1) {
+    return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
+  }
+  if ((before as { status?: string }).status !== 'draft') {
+    return c.json(apiErr('ORDER_DELETE_CONFLICT', '확정되었거나 입고가 시작된 발주서는 삭제할 수 없습니다.'), 409);
+  }
 
-  await c.env.DB.prepare('UPDATE purchase_orders SET is_deleted = 1, deleted_at = datetime("now"), updated_at = datetime("now") WHERE id = ?')
-    .bind(id)
-    .run();
+  const after = { ...before, is_deleted: 1 };
+  const deleteToken = crypto.randomUUID();
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE order_items
+          SET is_deleted = 1, deleted_at = datetime('now'), updated_at = datetime('now')
+        WHERE order_id = ? AND is_deleted = 0
+          AND EXISTS (
+            SELECT 1 FROM purchase_orders po
+             WHERE po.id = ? AND po.is_deleted = 0 AND po.status = 'draft'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM order_items received
+             WHERE received.order_id = ? AND received.received_qty > 0
+          )`
+    ).bind(id, id, id),
+    c.env.DB.prepare(
+      `UPDATE purchase_orders
+          SET is_deleted = 1, deleted_at = datetime('now'), updated_at = datetime('now'),
+              creation_token = ?
+        WHERE id = ? AND is_deleted = 0 AND status = 'draft'
+          AND NOT EXISTS (
+            SELECT 1 FROM order_items WHERE order_id = ? AND received_qty > 0
+          )`
+    ).bind(deleteToken, id, id),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'soft_delete', 'purchase_order', id, ?, ?
+         FROM purchase_orders WHERE creation_token = ?`
+    ).bind(user.id, JSON.stringify(before), JSON.stringify(after), deleteToken),
+    c.env.DB.prepare(
+      'UPDATE purchase_orders SET creation_token = NULL WHERE creation_token = ?'
+    ).bind(deleteToken),
+  ]);
 
-  await c.env.DB.prepare('UPDATE order_items SET is_deleted = 1, deleted_at = datetime("now") WHERE order_id = ?')
-    .bind(id)
-    .run();
-
-  const after = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ?').bind(id).first();
-  await writeAudit(c.env.DB, user.id, 'soft_delete', 'purchase_order', id, before, after);
+  if ((batchResult[1] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('ORDER_DELETE_CONFLICT', '발주 상태가 변경되어 삭제할 수 없습니다.'), 409);
+  }
   return c.json(apiOk({ deleted: true }));
 });
 
@@ -1234,7 +1577,7 @@ app.post('/api/purchase-orders/:id/items', async (c) => {
     })
     .filter((value): value is { itemId: number; orderedQty: number; memo: string | null } => value !== null);
 
-  if (!rows.length) {
+  if (!rows.length || rows.length !== rawRows.length) {
     return c.json(apiErr('INVALID_INPUT', '항목과 수량을 확인해주세요.'), 400);
   }
 
@@ -1260,54 +1603,107 @@ app.post('/api/purchase-orders/:id/items', async (c) => {
     }
   }
 
+  const existingRows = new Map<number, {
+    id: number;
+    ordered_qty: number;
+    received_qty: number;
+    memo: string | null;
+  }>();
   for (const row of groupedRows) {
     const existing = await c.env.DB.prepare(
-      `SELECT id, ordered_qty, received_qty, memo FROM order_items WHERE order_id = ? AND item_id = ? AND is_deleted = 0`
-    )
-      .bind(orderId, row.itemId)
-      .first<{ id: number; ordered_qty: number; received_qty: number; memo: string | null }>();
-    let orderItemId: number;
-    let action: 'create' | 'update';
-    let before: unknown = null;
-
-    if (existing) {
-      before = {
-        id: existing.id,
-        order_id: orderId,
-        item_id: row.itemId,
-        ordered_qty: existing.ordered_qty,
-        received_qty: existing.received_qty,
-        memo: existing.memo,
-      };
-      const nextQty = existing.ordered_qty + row.orderedQty;
-      await c.env.DB.prepare(
-        'UPDATE order_items SET ordered_qty = ?, memo = ?, updated_at = datetime("now") WHERE id = ?'
-      )
-        .bind(nextQty, row.memo, existing.id)
-        .run();
-      orderItemId = existing.id;
-      action = 'update';
-    } else {
-      const inserted = await c.env.DB.prepare(
-        `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
-       VALUES (?, ?, ?, 0, ?)`
-      ).bind(orderId, row.itemId, row.orderedQty, row.memo).run();
-      orderItemId = Number(inserted.meta.last_row_id);
-      action = 'create';
-    }
-
-    const after = await c.env.DB.prepare(
-      `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
-         FROM order_items oi
-        WHERE oi.id = ?`
-    ).bind(orderItemId).first();
-
-    if (after) {
-      await writeAudit(c.env.DB, user.id, action, 'order_item', Number(after.id), before ?? undefined, after);
-    }
+      `SELECT id, ordered_qty, received_qty, memo
+         FROM order_items
+        WHERE order_id = ? AND item_id = ? AND is_deleted = 0`
+    ).bind(orderId, row.itemId).first<{
+      id: number;
+      ordered_qty: number;
+      received_qty: number;
+      memo: string | null;
+    }>();
+    if (existing) existingRows.set(row.itemId, existing);
   }
 
-  await c.env.DB.prepare('UPDATE purchase_orders SET updated_at = datetime("now") WHERE id = ?').bind(orderId).run();
+  const mutationToken = crypto.randomUUID();
+  const statements = [
+    c.env.DB.prepare(
+      `UPDATE purchase_orders SET creation_token = ?
+        WHERE id = ? AND is_deleted = 0 AND status = 'draft'`
+    ).bind(mutationToken, orderId),
+  ];
+
+  for (const row of groupedRows) {
+    const existing = existingRows.get(row.itemId);
+    if (existing) {
+      statements.push(
+        c.env.DB.prepare(
+          `UPDATE order_items
+              SET ordered_qty = ordered_qty + ?, memo = ?, updated_at = datetime('now')
+            WHERE id = ? AND order_id = ?
+              AND EXISTS (
+                SELECT 1 FROM purchase_orders WHERE creation_token = ?
+              )`
+        ).bind(row.orderedQty, row.memo, existing.id, orderId, mutationToken),
+      );
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO audit_logs
+             (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+           SELECT ?, 'update', 'order_item', oi.id,
+                  json_object(
+                    'order_id', oi.order_id, 'item_id', oi.item_id,
+                    'ordered_qty', oi.ordered_qty - ?, 'received_qty', oi.received_qty
+                  ),
+                  json_object(
+                    'order_id', oi.order_id, 'item_id', oi.item_id,
+                    'ordered_qty', oi.ordered_qty, 'received_qty', oi.received_qty,
+                    'memo', oi.memo
+                  )
+             FROM order_items oi
+             JOIN purchase_orders po ON po.id = oi.order_id
+            WHERE po.creation_token = ? AND oi.id = ?`
+        ).bind(user.id, row.orderedQty, mutationToken, existing.id),
+      );
+    } else {
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
+           SELECT id, ?, ?, 0, ? FROM purchase_orders WHERE creation_token = ?`
+        ).bind(row.itemId, row.orderedQty, row.memo, mutationToken),
+      );
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO audit_logs
+             (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+           SELECT ?, 'create', 'order_item', oi.id, NULL, ?
+             FROM order_items oi
+             JOIN purchase_orders po ON po.id = oi.order_id
+            WHERE po.creation_token = ? AND oi.item_id = ? AND oi.is_deleted = 0`
+        ).bind(
+          user.id,
+          JSON.stringify({ order_id: orderId, item_id: row.itemId, ordered_qty: row.orderedQty, received_qty: 0, memo: row.memo }),
+          mutationToken,
+          row.itemId,
+        ),
+      );
+    }
+  }
+  statements.push(
+    c.env.DB.prepare(
+      `UPDATE purchase_orders
+          SET creation_token = NULL, updated_at = datetime('now')
+        WHERE creation_token = ?`
+    ).bind(mutationToken),
+  );
+
+  let batchResult: D1Result[];
+  try {
+    batchResult = await c.env.DB.batch(statements);
+  } catch {
+    return c.json(apiErr('CONFLICT', '발주 상태 또는 항목이 변경되었습니다. 다시 시도해주세요.'), 409);
+  }
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '초안 상태에서만 발주 항목을 추가할 수 있습니다.'), 409);
+  }
 
   const targets = await c.env.DB.prepare(
     `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
@@ -1371,8 +1767,44 @@ app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
     }
   }
 
-  const sql = `UPDATE order_items SET ${patch.join(', ')}, updated_at = datetime('now') WHERE id = ?`;
-  await c.env.DB.prepare(sql).bind(...params, orderItemId).run();
+  const mutationToken = crypto.randomUUID();
+  const sql = `UPDATE order_items SET ${patch.join(', ')}, updated_at = datetime('now')
+    WHERE id = ? AND order_id = ? AND is_deleted = 0
+      AND EXISTS (SELECT 1 FROM purchase_orders WHERE creation_token = ?)`;
+  const batchResult = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE purchase_orders SET creation_token = ?
+        WHERE id = ? AND is_deleted = 0 AND status = 'draft'`
+    ).bind(mutationToken, orderId),
+    c.env.DB.prepare(sql).bind(...params, orderItemId, orderId, mutationToken),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'update', 'order_item', oi.id, ?,
+              json_object(
+                'id', oi.id, 'order_id', oi.order_id, 'item_id', oi.item_id,
+                'ordered_qty', oi.ordered_qty, 'received_qty', oi.received_qty,
+                'memo', oi.memo
+              )
+         FROM order_items oi
+         JOIN purchase_orders po ON po.id = oi.order_id
+        WHERE oi.id = ? AND po.creation_token = ? AND changes() = 1`
+    ).bind(
+      user.id,
+      JSON.stringify(before),
+      orderItemId,
+      mutationToken,
+    ),
+    c.env.DB.prepare(
+      `UPDATE purchase_orders
+          SET creation_token = NULL, updated_at = datetime('now')
+        WHERE creation_token = ?`
+    ).bind(mutationToken),
+  ]);
+
+  if ((batchResult[0] as D1Result).meta.changes === 0 || (batchResult[1] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('CONFLICT', '발주 상태 또는 항목이 변경되었습니다.'), 409);
+  }
 
   const after = await c.env.DB.prepare(
     `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
@@ -1380,7 +1812,6 @@ app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
       WHERE oi.id = ?`
   ).bind(orderItemId).first();
 
-  await writeAudit(c.env.DB, user.id, 'update', 'order_item', orderItemId, before, after);
   return c.json(apiOk(after));
 });
 
@@ -1410,6 +1841,9 @@ app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
   if (order.status === 'canceled') {
     return c.json(apiErr('INVALID_STATUS', '취소된 발주서는 입고 처리할 수 없습니다.'), 400);
   }
+  if (order.status === 'fully_received') {
+    return c.json(apiErr('INVALID_STATUS', '이미 입고 완료된 발주서입니다.'), 400);
+  }
 
   const target = await c.env.DB.prepare(
     `SELECT oi.id, oi.item_id, oi.ordered_qty, oi.received_qty
@@ -1420,61 +1854,104 @@ app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
 
   const remain = target.ordered_qty - target.received_qty;
   if (remain <= 0) {
-    return c.json(apiErr('INVALID_INPUT', '이미 입고 완료된 항목입니다.'), 400);
+    return c.json(apiErr('RECEIVE_CONFLICT', '이미 입고 완료된 항목입니다.'), 409);
   }
   if (qty > remain) {
-    return c.json(apiErr('INVALID_INPUT', `최대 ${remain}개까지 입고 가능합니다.`), 400);
+    return c.json(apiErr('RECEIVE_CONFLICT', `현재 최대 ${remain}개까지 입고 가능합니다.`), 409);
   }
 
-  const newReceived = target.received_qty + qty;
-  const item = await c.env.DB.prepare('SELECT current_stock FROM items WHERE id = ?').bind(target.item_id).first<{ current_stock: number }>();
-  if (!item) return c.json(apiErr('INVALID_INPUT', '품목을 찾지 못했습니다.'), 404);
-
-  await c.env.DB.batch([
-    c.env.DB.prepare('UPDATE order_items SET received_qty = ?, updated_at = datetime("now") WHERE id = ?')
-      .bind(newReceived, orderItemId),
-    c.env.DB.prepare('INSERT INTO stock_transactions (item_id, movement_type, quantity, order_item_id, reason, created_by) VALUES (?, "IN", ?, ?, ?, ?)')
-      .bind(target.item_id, qty, orderItemId, payload.note == null ? '부분입고 처리' : String(payload.note), user.id),
-    c.env.DB.prepare('UPDATE items SET current_stock = current_stock + ?, updated_at = datetime("now") WHERE id = ?')
-      .bind(qty, target.item_id),
-  ]);
-
-  const sum = await c.env.DB.prepare(
-    `SELECT
-       SUM(ordered_qty - received_qty) AS remaining_qty,
-       SUM(ordered_qty) AS ordered_qty,
-       SUM(received_qty) AS received_qty
-      FROM order_items
-     WHERE order_id = ? AND is_deleted = 0`
-  ).bind(orderId).first<{ remaining_qty: number; ordered_qty: number; received_qty: number }>();
-
-  if (order.status !== 'canceled') {
-    let nextStatus: OrderStatus = 'ordered';
-    if (sum) {
-      const rem = Number(sum.remaining_qty || 0);
-      const recv = Number(sum.received_qty || 0);
-      const ord = Number(sum.ordered_qty || 0);
-
-      if (rem <= 0 || recv >= ord) nextStatus = 'fully_received';
-      else if (recv > 0) nextStatus = 'partially_received';
-      else nextStatus = 'ordered';
-    }
-    await c.env.DB.prepare('UPDATE purchase_orders SET status = ?, updated_at = datetime("now") WHERE id = ?')
-      .bind(nextStatus, orderId)
-      .run();
+  const operationToken = crypto.randomUUID();
+  const reason = payload.note == null ? '부분입고 처리' : String(payload.note);
+  let batchResult: D1Result[];
+  try {
+    batchResult = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO stock_transactions
+           (item_id, movement_type, quantity, order_item_id, reason, created_by, operation_token)
+         SELECT oi.item_id, 'IN', ?, oi.id, ?, ?, ?
+           FROM order_items oi
+           JOIN purchase_orders po ON po.id = oi.order_id
+           JOIN items i ON i.id = oi.item_id
+          WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0
+            AND po.is_deleted = 0 AND po.status IN ('ordered', 'partially_received')
+            AND i.is_deleted = 0
+            AND oi.received_qty + ? <= oi.ordered_qty`
+      ).bind(qty, reason, user.id, operationToken, orderItemId, orderId, qty),
+      c.env.DB.prepare(
+        `UPDATE order_items
+            SET received_qty = received_qty + ?, updated_at = datetime('now')
+          WHERE id = ? AND order_id = ?
+            AND EXISTS (
+              SELECT 1 FROM stock_transactions WHERE operation_token = ?
+            )`
+      ).bind(qty, orderItemId, orderId, operationToken),
+      c.env.DB.prepare(
+        `UPDATE items
+            SET current_stock = current_stock + ?, updated_at = datetime('now')
+          WHERE id = ?
+            AND EXISTS (
+              SELECT 1 FROM stock_transactions WHERE operation_token = ?
+            )`
+      ).bind(qty, target.item_id, operationToken),
+      c.env.DB.prepare(
+        `UPDATE purchase_orders
+            SET status = (
+                  SELECT CASE
+                    WHEN SUM(received_qty) >= SUM(ordered_qty) THEN 'fully_received'
+                    WHEN SUM(received_qty) > 0 THEN 'partially_received'
+                    ELSE 'ordered'
+                  END
+                    FROM order_items
+                   WHERE order_id = ? AND is_deleted = 0
+                ),
+                updated_at = datetime('now')
+          WHERE id = ? AND status IN ('ordered', 'partially_received')
+            AND EXISTS (
+              SELECT 1 FROM stock_transactions WHERE operation_token = ?
+            )`
+      ).bind(orderId, orderId, operationToken),
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         SELECT ?, 'receive', 'order_item', oi.id,
+                json_object(
+                  'id', oi.id,
+                  'item_id', oi.item_id,
+                  'ordered_qty', oi.ordered_qty,
+                  'received_qty', oi.received_qty - st.quantity
+                ),
+                json_object(
+                  'id', oi.id,
+                  'item_id', oi.item_id,
+                  'ordered_qty', oi.ordered_qty,
+                  'received_qty', oi.received_qty
+                )
+           FROM order_items oi
+           JOIN stock_transactions st ON st.order_item_id = oi.id
+          WHERE st.operation_token = ?`
+      ).bind(user.id, operationToken),
+    ]);
+  } catch {
+    return c.json(apiErr('RECEIVE_CONFLICT', '입고 처리 중 상태가 변경되었습니다. 다시 시도해주세요.'), 409);
   }
 
-  const updatedOrder = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ?').bind(orderId).first();
+  if ((batchResult[0] as D1Result).meta.changes === 0) {
+    return c.json(apiErr('RECEIVE_CONFLICT', '남은 입고 수량 또는 발주 상태가 변경되었습니다.'), 409);
+  }
+
+  const updatedOrder = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ?`).bind(orderId).first();
   const updatedItem = await c.env.DB.prepare(
     `SELECT oi.id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
        FROM order_items oi WHERE oi.id = ?`
   ).bind(orderItemId).first();
 
-  await writeAudit(c.env.DB, user.id, 'receive', 'order_item', orderItemId, { ...target }, updatedItem);
   return c.json(apiOk({ order: updatedOrder, order_item: updatedItem }));
 });
 
 app.get('/api/audit-logs', async (c) => {
+  const forbidden = requireAdmin(c);
+  if (forbidden) return forbidden;
+
   const action = c.req.query('action')?.trim();
   const entityType = c.req.query('entity_type')?.trim();
   const actor = parseIntValue(c.req.query('actor'), null);

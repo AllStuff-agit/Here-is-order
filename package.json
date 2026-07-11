@@ -7,32 +7,38 @@
     "dev": "wrangler dev",
     "dev:api": "wrangler dev",
     "web:dev": "npm --prefix frontend run dev",
-    "web:dev:local": "NEXT_PUBLIC_API_PROXY=http://127.0.0.1:8787 npm --prefix frontend run dev",
+    "web:dev:local": "API_PROXY_URL=http://127.0.0.1:8787 npm --prefix frontend run dev",
     "web:build": "npm --prefix frontend run build",
     "web:start": "npm --prefix frontend run start",
     "web:lint": "npm --prefix frontend run lint",
+    "test": "node --test scripts/*.test.mjs && vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
     "build": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "db:migrate": "wrangler d1 migrations apply hereisorder --local",
     "db:migrate:remote": "wrangler d1 migrations apply hereisorder --remote",
-    "db:init": "wrangler d1 execute hereisorder --local --file=db/schema.sql",
-    "db:init:remote": "wrangler d1 execute hereisorder --remote --file=db/schema.sql",
+    "db:init": "npm run db:migrate",
+    "db:init:remote": "npm run db:migrate:remote",
     "db:seed": "wrangler d1 execute hereisorder --local --file=data/seed_categories_items.sql",
-    "db:seed:admin": "wrangler d1 execute hereisorder --local --file=data/seed_admin.sql",
+    "db:generate:admin-seed": "node scripts/generate-admin-seed.mjs",
+    "db:seed:admin": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --local --file=data/seed_admin.sql",
     "db:seed:remote": "wrangler d1 execute hereisorder --remote --file=data/seed_categories_items.sql",
-    "db:seed:admin:remote": "wrangler d1 execute hereisorder --remote --file=data/seed_admin.sql",
+    "db:seed:admin:remote": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --remote --file=data/seed_admin.sql",
     "import:notion": "node scripts/import-notion-export.mjs notion-export",
-    "db:bootstrap": "npm run db:init && npm run db:seed && npm run db:seed:admin",
-    "db:bootstrap:from-notion": "npm run import:notion && npm run db:bootstrap",
-    "db:bootstrap:remote": "npm run db:init:remote && npm run db:seed:remote && npm run db:seed:admin:remote",
-    "db:bootstrap:remote:from-notion": "npm run import:notion && npm run db:bootstrap:remote"
+    "db:bootstrap": "npm run db:migrate && npm run db:seed:admin",
+    "db:bootstrap:from-notion": "npm run import:notion && npm run db:migrate && npm run db:seed && npm run db:seed:admin",
+    "db:bootstrap:remote": "npm run db:migrate:remote && npm run db:seed:admin:remote",
+    "db:bootstrap:remote:from-notion": "npm run import:notion && npm run db:migrate:remote && npm run db:seed:remote && npm run db:seed:admin:remote"
   },
   "dependencies": {
     "hono": "^4.12.4"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
     "@cloudflare/workers-types": "^4.20260302.0",
     "typescript": "^5.6.3",
+    "vitest": "^4.1.10",
     "wrangler": "^4.107.0"
   }
 }
