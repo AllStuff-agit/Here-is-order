@@ -1,5 +1,6 @@
 import { env, exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { withTestTrigger } from './helpers/test-trigger';
 
 const TABLES_IN_DELETE_ORDER = [
   'stock_transactions',
@@ -542,7 +543,9 @@ describe('발주 부분입고', () => {
     };
 
     const removedItem = await createFixture('removed item readback');
-    await env.DB.prepare(
+    const removedItemResponse = await withTestTrigger(
+      env.DB,
+      'test_api_remove_received_item_before_readback',
       `CREATE TRIGGER test_api_remove_received_item_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'receive'
@@ -551,19 +554,12 @@ describe('발주 부분입고', () => {
        BEGIN
          DELETE FROM order_items WHERE id = NEW.entity_id;
        END`,
-    ).run();
-    let removedItemResponse: Response;
-    try {
-      removedItemResponse = await apiRequest(
+      async () => apiRequest(
         `/api/purchase-orders/${removedItem.orderId}/items/${removedItem.orderItemId}/receive`,
         sessionToken,
         { method: 'POST', body: JSON.stringify({ qty: 1 }) },
-      );
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_api_remove_received_item_before_readback',
-      ).run();
-    }
+      ),
+    );
     expect(removedItemResponse.status).toBe(200);
     await expect(removedItemResponse.json()).resolves.toEqual({
       ok: true,
@@ -580,7 +576,9 @@ describe('발주 부분입고', () => {
     const holdingOrder = await env.DB.prepare(
       `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
     ).bind('receipt API readback holding order').run();
-    await env.DB.prepare(
+    const removedOrderResponse = await withTestTrigger(
+      env.DB,
+      'test_api_remove_received_order_before_readback',
       `CREATE TRIGGER test_api_remove_received_order_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'receive'
@@ -592,19 +590,12 @@ describe('발주 부분입고', () => {
           WHERE id = NEW.entity_id;
          DELETE FROM purchase_orders WHERE id = ${removedOrder.orderId};
        END`,
-    ).run();
-    let removedOrderResponse: Response;
-    try {
-      removedOrderResponse = await apiRequest(
+      async () => apiRequest(
         `/api/purchase-orders/${removedOrder.orderId}/items/${removedOrder.orderItemId}/receive`,
         sessionToken,
         { method: 'POST', body: JSON.stringify({ qty: 1, note: '' }) },
-      );
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_api_remove_received_order_before_readback',
-      ).run();
-    }
+      ),
+    );
     expect(removedOrderResponse.status).toBe(200);
     await expect(removedOrderResponse.json()).resolves.toEqual({
       ok: true,
@@ -831,36 +822,32 @@ describe('핵심 변경과 감사로그 원자성', () => {
       .bind('변경 전 이름')
       .run();
 
-    await env.DB.prepare(
+    const { patchStatus, items } = await withTestTrigger(
+      env.DB,
+      'test_fail_audit_insert',
       `CREATE TRIGGER test_fail_audit_insert
        BEFORE INSERT ON audit_logs
        BEGIN
          SELECT RAISE(ABORT, 'TEST_AUDIT_FAILURE');
-       END`
-    ).run();
+       END`,
+      async () => {
+        const patchResponse = await apiRequest(
+          `/api/items/${item.meta.last_row_id}`,
+          sessionToken,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ name: '변경 후 이름' }),
+          },
+        );
 
-    let patchStatus = 0;
-    let items: Array<{ id: number; name: string }> = [];
-    try {
-      const patchResponse = await apiRequest(
-        `/api/items/${item.meta.last_row_id}`,
-        sessionToken,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({ name: '변경 후 이름' }),
-        },
-      );
-      patchStatus = patchResponse.status;
-
-      const itemsResponse = await apiRequest('/api/items', sessionToken);
-      const body = await itemsResponse.json() as {
-        ok: true;
-        data: Array<{ id: number; name: string }>;
-      };
-      items = body.data;
-    } finally {
-      await env.DB.prepare('DROP TRIGGER IF EXISTS test_fail_audit_insert').run();
-    }
+        const itemsResponse = await apiRequest('/api/items', sessionToken);
+        const body = await itemsResponse.json() as {
+          ok: true;
+          data: Array<{ id: number; name: string }>;
+        };
+        return { patchStatus: patchResponse.status, items: body.data };
+      },
+    );
 
     expect(patchStatus).toBe(500);
     expect(items).toEqual([
@@ -1571,52 +1558,51 @@ describe('발주 compatibility characterization', () => {
        VALUES (?, ?, 1, 0)`,
     ).bind(editOrder.meta.last_row_id, item.meta.last_row_id).run();
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_fail_order_item_audit',
       `CREATE TRIGGER test_fail_order_item_audit
        BEFORE INSERT ON audit_logs
        WHEN NEW.entity_type = 'order_item'
        BEGIN
          SELECT RAISE(ABORT, 'TEST_ORDER_ITEM_AUDIT_FAILURE');
        END`,
-    ).run();
+      async () => {
+        const addResponse = await apiRequest(
+          `/api/purchase-orders/${addOrder.meta.last_row_id}/items`,
+          sessionToken,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              item_id: item.meta.last_row_id,
+              ordered_qty: 1,
+            }),
+          },
+        );
+        expect(addResponse.status).toBe(409);
+        await expect(addResponse.json()).resolves.toEqual({
+          ok: false,
+          error: {
+            code: 'CONFLICT',
+            message: '발주 상태 또는 항목이 변경되었습니다. 다시 시도해주세요.',
+          },
+        });
 
-    try {
-      const addResponse = await apiRequest(
-        `/api/purchase-orders/${addOrder.meta.last_row_id}/items`,
-        sessionToken,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            item_id: item.meta.last_row_id,
-            ordered_qty: 1,
-          }),
-        },
-      );
-      expect(addResponse.status).toBe(409);
-      await expect(addResponse.json()).resolves.toEqual({
-        ok: false,
-        error: {
-          code: 'CONFLICT',
-          message: '발주 상태 또는 항목이 변경되었습니다. 다시 시도해주세요.',
-        },
-      });
-
-      const editResponse = await apiRequest(
-        `/api/purchase-orders/${editOrder.meta.last_row_id}/items/${orderItem.meta.last_row_id}`,
-        sessionToken,
-        { method: 'PATCH', body: JSON.stringify({ ordered_qty: 2 }) },
-      );
-      expect(editResponse.status).toBe(500);
-      await expect(editResponse.json()).resolves.toEqual({
-        ok: false,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message: '서버 오류가 발생했습니다.',
-        },
-      });
-    } finally {
-      await env.DB.prepare('DROP TRIGGER IF EXISTS test_fail_order_item_audit').run();
-    }
+        const editResponse = await apiRequest(
+          `/api/purchase-orders/${editOrder.meta.last_row_id}/items/${orderItem.meta.last_row_id}`,
+          sessionToken,
+          { method: 'PATCH', body: JSON.stringify({ ordered_qty: 2 }) },
+        );
+        expect(editResponse.status).toBe(500);
+        await expect(editResponse.json()).resolves.toEqual({
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: '서버 오류가 발생했습니다.',
+          },
+        });
+      },
+    );
 
     const rows = await env.DB.prepare(
       `SELECT order_id, ordered_qty FROM order_items ORDER BY id ASC`,
@@ -1645,72 +1631,68 @@ describe('발주 compatibility characterization', () => {
     const orderId = Number(order.meta.last_row_id);
     const orderItemId = Number(orderItem.meta.last_row_id);
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_ignore_item_mutation_token',
       `CREATE TRIGGER test_ignore_item_mutation_token
        BEFORE UPDATE OF creation_token ON purchase_orders
        WHEN NEW.creation_token IS NOT NULL
        BEGIN
          SELECT RAISE(IGNORE);
        END`,
-    ).run();
+      async () => {
+        const addResponse = await apiRequest(
+          `/api/purchase-orders/${orderId}/items`,
+          sessionToken,
+          {
+            method: 'POST',
+            body: JSON.stringify({ item_id: item.meta.last_row_id, ordered_qty: 1 }),
+          },
+        );
+        expect(addResponse.status).toBe(409);
+        await expect(addResponse.json()).resolves.toEqual({
+          ok: false,
+          error: {
+            code: 'CONFLICT',
+            message: '초안 상태에서만 발주 항목을 추가할 수 있습니다.',
+          },
+        });
 
-    try {
-      const addResponse = await apiRequest(
-        `/api/purchase-orders/${orderId}/items`,
-        sessionToken,
-        {
-          method: 'POST',
-          body: JSON.stringify({ item_id: item.meta.last_row_id, ordered_qty: 1 }),
-        },
-      );
-      expect(addResponse.status).toBe(409);
-      await expect(addResponse.json()).resolves.toEqual({
-        ok: false,
-        error: {
-          code: 'CONFLICT',
-          message: '초안 상태에서만 발주 항목을 추가할 수 있습니다.',
-        },
-      });
+        const editResponse = await apiRequest(
+          `/api/purchase-orders/${orderId}/items/${orderItemId}`,
+          sessionToken,
+          { method: 'PATCH', body: JSON.stringify({ ordered_qty: 2 }) },
+        );
+        expect(editResponse.status).toBe(409);
+        await expect(editResponse.json()).resolves.toEqual({
+          ok: false,
+          error: {
+            code: 'CONFLICT',
+            message: '발주 상태 또는 항목이 변경되었습니다.',
+          },
+        });
+      },
+    );
 
-      const editResponse = await apiRequest(
-        `/api/purchase-orders/${orderId}/items/${orderItemId}`,
-        sessionToken,
-        { method: 'PATCH', body: JSON.stringify({ ordered_qty: 2 }) },
-      );
-      expect(editResponse.status).toBe(409);
-      await expect(editResponse.json()).resolves.toEqual({
-        ok: false,
-        error: {
-          code: 'CONFLICT',
-          message: '발주 상태 또는 항목이 변경되었습니다.',
-        },
-      });
-    } finally {
-      await env.DB.prepare('DROP TRIGGER IF EXISTS test_ignore_item_mutation_token').run();
-    }
-
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_remove_api_revised_item_before_readback',
       `CREATE TRIGGER test_remove_api_revised_item_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'update' AND NEW.entity_type = 'order_item'
        BEGIN
          DELETE FROM order_items WHERE id = NEW.entity_id;
        END`,
-    ).run();
-
-    try {
-      const response = await apiRequest(
-        `/api/purchase-orders/${orderId}/items/${orderItemId}`,
-        sessionToken,
-        { method: 'PATCH', body: JSON.stringify({ memo: 'deleted on audit' }) },
-      );
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ ok: true, data: null });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_remove_api_revised_item_before_readback',
-      ).run();
-    }
+      async () => {
+        const response = await apiRequest(
+          `/api/purchase-orders/${orderId}/items/${orderItemId}`,
+          sessionToken,
+          { method: 'PATCH', body: JSON.stringify({ memo: 'deleted on audit' }) },
+        );
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ ok: true, data: null });
+      },
+    );
   });
 
   it('maps Purchase Order invalid, not-found, and conflict results to existing envelopes', async () => {
@@ -1756,36 +1738,30 @@ describe('발주 compatibility characterization', () => {
       `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
     ).bind('unexpected failure').run();
 
-    await env.DB.prepare(
-      'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
-    ).run();
-    try {
-      await env.DB.prepare(
-        `CREATE TRIGGER test_fail_purchase_order_update
-         BEFORE UPDATE ON purchase_orders
-         WHEN NEW.title = 'trigger-500'
-         BEGIN
-           SELECT RAISE(ABORT, 'TEST_PURCHASE_ORDER_UPDATE_FAILURE');
-         END`,
-      ).run();
-
-      const response = await apiRequest(
-        `/api/purchase-orders/${order.meta.last_row_id}`,
-        sessionToken,
-        { method: 'PATCH', body: JSON.stringify({ title: 'trigger-500' }) },
-      );
-      expect(response.status).toBe(500);
-      await expect(response.json()).resolves.toEqual({
-        ok: false,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message: '서버 오류가 발생했습니다.',
-        },
-      });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
-      ).run();
-    }
+    await withTestTrigger(
+      env.DB,
+      'test_fail_purchase_order_update',
+      `CREATE TRIGGER test_fail_purchase_order_update
+       BEFORE UPDATE ON purchase_orders
+       WHEN NEW.title = 'trigger-500'
+       BEGIN
+         SELECT RAISE(ABORT, 'TEST_PURCHASE_ORDER_UPDATE_FAILURE');
+       END`,
+      async () => {
+        const response = await apiRequest(
+          `/api/purchase-orders/${order.meta.last_row_id}`,
+          sessionToken,
+          { method: 'PATCH', body: JSON.stringify({ title: 'trigger-500' }) },
+        );
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toEqual({
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: '서버 오류가 발생했습니다.',
+          },
+        });
+      },
+    );
   });
 });

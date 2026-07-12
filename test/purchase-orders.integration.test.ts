@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { purchaseOrders } from '../src/purchase-orders';
+import { withTestTrigger } from './helpers/test-trigger';
 
 const TABLES_IN_DELETE_ORDER = [
   'stock_transactions',
@@ -36,6 +37,41 @@ async function createInventoryItem(name: string) {
   return Number(result.meta.last_row_id);
 }
 
+describe('test trigger helper', () => {
+  it('rejects trigger names outside the controlled test namespace', async () => {
+    await expect(withTestTrigger(
+      env.DB,
+      'unsafe_trigger',
+      'CREATE TRIGGER unsafe_trigger AFTER INSERT ON users BEGIN SELECT 1; END',
+      async () => undefined,
+    )).rejects.toThrow('test_');
+  });
+
+  it('replaces stale fixtures and drops the trigger after callback failure', async () => {
+    const triggerName = 'test_helper_cleanup';
+    const triggerSql = `CREATE TRIGGER ${triggerName}
+      AFTER INSERT ON users
+      BEGIN
+        SELECT 1;
+      END`;
+    await env.DB.prepare(triggerSql).run();
+
+    await expect(withTestTrigger(
+      env.DB,
+      triggerName,
+      triggerSql,
+      async () => {
+        throw new Error('expected callback failure');
+      },
+    )).rejects.toThrow('expected callback failure');
+
+    const trigger = await env.DB.prepare(
+      `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = ?`,
+    ).bind(triggerName).first();
+    expect(trigger).toBeNull();
+  });
+});
+
 describe('Purchase Order module draft creation', () => {
   it('creates and reads a plain draft through the module interface', async () => {
     const { module } = await createActor();
@@ -62,7 +98,9 @@ describe('Purchase Order module draft creation', () => {
   });
 
   it('returns the plain draft row when it is deleted before readback', async () => {
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_delete_plain_draft_before_readback',
       `CREATE TRIGGER test_delete_plain_draft_before_readback
        AFTER UPDATE OF creation_token ON purchase_orders
        WHEN OLD.creation_token IS NOT NULL AND NEW.creation_token IS NULL
@@ -71,52 +109,44 @@ describe('Purchase Order module draft creation', () => {
             SET is_deleted = 1, deleted_at = datetime('now')
           WHERE id = NEW.id;
        END`,
-    ).run();
-
-    try {
-      const { module } = await createActor();
-      const created = await module.createDraft({
-        title: 'readback 초안',
-        note: null,
-      });
-
-      expect(created).toEqual({
-        ok: true,
-        value: expect.objectContaining({
+      async () => {
+        const { module } = await createActor();
+        const created = await module.createDraft({
           title: 'readback 초안',
-          is_deleted: 1,
-        }),
-      });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_delete_plain_draft_before_readback',
-      ).run();
-    }
+          note: null,
+        });
+
+        expect(created).toEqual({
+          ok: true,
+          value: expect.objectContaining({
+            title: 'readback 초안',
+            is_deleted: 1,
+          }),
+        });
+      },
+    );
   });
 
   it('returns null when a plain draft disappears before readback', async () => {
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_remove_plain_draft_before_readback',
       `CREATE TRIGGER test_remove_plain_draft_before_readback
        AFTER UPDATE OF creation_token ON purchase_orders
        WHEN OLD.creation_token IS NOT NULL AND NEW.creation_token IS NULL
        BEGIN
          DELETE FROM purchase_orders WHERE id = NEW.id;
        END`,
-    ).run();
+      async () => {
+        const { module } = await createActor();
+        const created = await module.createDraft({
+          title: 'null plain readback 초안',
+          note: null,
+        });
 
-    try {
-      const { module } = await createActor();
-      const created = await module.createDraft({
-        title: 'null plain readback 초안',
-        note: null,
-      });
-
-      expect(created).toEqual({ ok: true, value: null });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_remove_plain_draft_before_readback',
-      ).run();
-    }
+        expect(created).toEqual({ ok: true, value: null });
+      },
+    );
   });
 
   it('atomically merges populated draft rows and preserves create memo precedence', async () => {
@@ -180,7 +210,9 @@ describe('Purchase Order module draft creation', () => {
   it('returns null when a populated draft is deleted before active readback', async () => {
     const { module } = await createActor();
     const itemId = await createInventoryItem('null readback 원두');
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_delete_populated_draft_before_readback',
       `CREATE TRIGGER test_delete_populated_draft_before_readback
        AFTER UPDATE OF creation_token ON purchase_orders
        WHEN OLD.creation_token IS NOT NULL AND NEW.creation_token IS NULL
@@ -189,21 +221,16 @@ describe('Purchase Order module draft creation', () => {
             SET is_deleted = 1, deleted_at = datetime('now')
           WHERE id = NEW.id;
        END`,
-    ).run();
+      async () => {
+        const created = await module.createDraftWithItems({
+          title: 'null readback 초안',
+          note: null,
+          items: [{ itemId, orderedQty: 1, memo: null }],
+        });
 
-    try {
-      const created = await module.createDraftWithItems({
-        title: 'null readback 초안',
-        note: null,
-        items: [{ itemId, orderedQty: 1, memo: null }],
-      });
-
-      expect(created).toEqual({ ok: true, value: null });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_delete_populated_draft_before_readback',
-      ).run();
-    }
+        expect(created).toEqual({ ok: true, value: null });
+      },
+    );
   });
 
   it('rejects every row when one populated draft item is invalid', async () => {
@@ -274,7 +301,9 @@ describe('Purchase Order module revision and deletion', () => {
     });
     if (!created.ok || !created.value) throw new Error('expected creation success');
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_delete_revised_order_before_readback',
       `CREATE TRIGGER test_delete_revised_order_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'update' AND NEW.entity_type = 'purchase_order'
@@ -283,18 +312,13 @@ describe('Purchase Order module revision and deletion', () => {
             SET is_deleted = 1, deleted_at = datetime('now')
           WHERE id = NEW.entity_id;
        END`,
-    ).run();
-
-    try {
-      const revised = await module.revise(created.value.id, {
-        title: 'revision readback 수정',
-      });
-      expect(revised).toEqual({ ok: true, value: null });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_delete_revised_order_before_readback',
-      ).run();
-    }
+      async () => {
+        const revised = await module.revise(created.value.id, {
+          title: 'revision readback 수정',
+        });
+        expect(revised).toEqual({ ok: true, value: null });
+      },
+    );
   });
 
   it('deletes only an unreceived draft and rejects received rows even when deleted', async () => {
@@ -409,25 +433,22 @@ describe('Purchase Order module draft items', () => {
     if (!detail.ok) throw new Error('expected detail success');
     const orderItemId = detail.value.items[0].id;
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_remove_revised_item_before_readback',
       `CREATE TRIGGER test_remove_revised_item_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'update' AND NEW.entity_type = 'order_item'
        BEGIN
          DELETE FROM order_items WHERE id = NEW.entity_id;
        END`,
-    ).run();
-
-    try {
-      const revised = await module.editDraftItem(draft.value.id, orderItemId, {
-        memo: 'readback memo',
-      });
-      expect(revised).toEqual({ ok: true, value: null });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_remove_revised_item_before_readback',
-      ).run();
-    }
+      async () => {
+        const revised = await module.editDraftItem(draft.value.id, orderItemId, {
+          memo: 'readback memo',
+        });
+        expect(revised).toEqual({ ok: true, value: null });
+      },
+    );
   });
 });
 
@@ -542,32 +563,30 @@ describe('Purchase Order module partial receipt', () => {
       value: expect.objectContaining({ status: 'ordered' }),
     });
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_fail_receive_audit',
       `CREATE TRIGGER test_fail_receive_audit
        BEFORE INSERT ON audit_logs
        WHEN NEW.action = 'receive'
        BEGIN
          SELECT RAISE(ABORT, 'TEST_RECEIVE_AUDIT_FAILURE');
        END`,
-    ).run();
-    try {
-      const received = await module.receive(
-        draft.value.id,
-        detail.value.items[0].id,
-        { quantity: 1, note: '' },
-      );
-      expect(received).toEqual({
-        ok: false,
-        error: expect.objectContaining({
-          kind: 'conflict',
-          code: 'RECEIVE_CONFLICT',
-        }),
-      });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_fail_receive_audit',
-      ).run();
-    }
+      async () => {
+        const received = await module.receive(
+          draft.value.id,
+          detail.value.items[0].id,
+          { quantity: 1, note: '' },
+        );
+        expect(received).toEqual({
+          ok: false,
+          error: expect.objectContaining({
+            kind: 'conflict',
+            code: 'RECEIVE_CONFLICT',
+          }),
+        });
+      },
+    );
 
     const item = await env.DB.prepare(
       `SELECT current_stock FROM items WHERE id = ?`,
@@ -682,7 +701,9 @@ describe('Purchase Order module partial receipt', () => {
       value: expect.objectContaining({ status: 'ordered' }),
     });
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_remove_received_item_before_readback',
       `CREATE TRIGGER test_remove_received_item_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'receive'
@@ -691,28 +712,24 @@ describe('Purchase Order module partial receipt', () => {
        BEGIN
          DELETE FROM order_items WHERE id = NEW.entity_id;
        END`,
-    ).run();
-    try {
-      const received = await module.receive(
-        removedItemDraft.value.id,
-        removedOrderItemId,
-        { quantity: 1, note: null },
-      );
-      expect(received).toEqual({
-        ok: true,
-        value: {
-          order: expect.objectContaining({
-            id: removedItemDraft.value.id,
-            status: 'fully_received',
-          }),
-          order_item: null,
-        },
-      });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_remove_received_item_before_readback',
-      ).run();
-    }
+      async () => {
+        const received = await module.receive(
+          removedItemDraft.value.id,
+          removedOrderItemId,
+          { quantity: 1, note: null },
+        );
+        expect(received).toEqual({
+          ok: true,
+          value: {
+            order: expect.objectContaining({
+              id: removedItemDraft.value.id,
+              status: 'fully_received',
+            }),
+            order_item: null,
+          },
+        });
+      },
+    );
 
     const removedOrderItemInventoryId = await createInventoryItem(
       'removed receipt order 원두',
@@ -748,7 +765,9 @@ describe('Purchase Order module partial receipt', () => {
       throw new Error('expected holding order creation success');
     }
 
-    await env.DB.prepare(
+    await withTestTrigger(
+      env.DB,
+      'test_remove_received_order_before_readback',
       `CREATE TRIGGER test_remove_received_order_before_readback
        AFTER INSERT ON audit_logs
        WHEN NEW.action = 'receive'
@@ -760,30 +779,26 @@ describe('Purchase Order module partial receipt', () => {
           WHERE id = NEW.entity_id;
          DELETE FROM purchase_orders WHERE id = ${removedOrderDraft.value.id};
        END`,
-    ).run();
-    try {
-      const received = await module.receive(
-        removedOrderDraft.value.id,
-        retainedOrderItemId,
-        { quantity: 1, note: '' },
-      );
-      expect(received).toEqual({
-        ok: true,
-        value: {
-          order: null,
-          order_item: {
-            id: retainedOrderItemId,
-            item_id: removedOrderItemInventoryId,
-            ordered_qty: 1,
-            received_qty: 1,
-            memo: 'order memo',
+      async () => {
+        const received = await module.receive(
+          removedOrderDraft.value.id,
+          retainedOrderItemId,
+          { quantity: 1, note: '' },
+        );
+        expect(received).toEqual({
+          ok: true,
+          value: {
+            order: null,
+            order_item: {
+              id: retainedOrderItemId,
+              item_id: removedOrderItemInventoryId,
+              ordered_qty: 1,
+              received_qty: 1,
+              memo: 'order memo',
+            },
           },
-        },
-      });
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_remove_received_order_before_readback',
-      ).run();
-    }
+        });
+      },
+    );
   });
 });
