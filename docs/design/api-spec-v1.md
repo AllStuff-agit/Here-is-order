@@ -279,13 +279,17 @@ draft | ordered | partially_received | fully_received | canceled
 | Method | Path | 요청/Query | 성공 `data` |
 | --- | --- | --- | --- |
 | GET | `/api/purchase-orders` | `status?, from?, to?, q?` | `PurchaseOrderSummary[]` |
-| POST | `/api/purchase-orders` | `{ title, note?, status?: "draft" }` | 생성된 초안 |
-| POST | `/api/purchase-orders/with-items` | `{ title, note?, items: OrderItemInput[] }` | 생성된 초안 |
-| GET | `/api/purchase-orders/:id` | - | 발주서 + `items` |
-| PATCH | `/api/purchase-orders/:id` | `{ title?, note?, external_order_ref?, status? }` | 수정된 발주서 |
+| POST | `/api/purchase-orders` | `{ title, note?, status?: "draft" }` | `PurchaseOrderRow \| null` |
+| POST | `/api/purchase-orders/with-items` | `{ title, note?, status?: unknown, items: OrderItemInput[] }` | `PurchaseOrderRow \| null` |
+| GET | `/api/purchase-orders/:id` | - | 발주서 + `items` (`PurchaseOrderDetail`) |
+| PATCH | `/api/purchase-orders/:id` | `{ title?, note?, external_order_ref?, status? }` | `PurchaseOrderRow \| null` |
 | DELETE | `/api/purchase-orders/:id` | - | `{ deleted: true }` |
 
 생성/상세/수정/입고 응답의 공개 발주서 row는 `{ id, title, status, order_date, external_order_ref, note, is_deleted, deleted_at, created_at, updated_at }`입니다.
+
+- `GET /api/purchase-orders/:id`는 200일 때 항상 non-null `PurchaseOrderDetail`을 반환하고, 활성 발주서가 없으면 404를 반환합니다.
+- 생성과 PATCH는 DB 변경 성공 후 legacy 순차 재조회 사이에 대상 row가 사라지는 race를 보존하므로 드물게 200/201의 `data`가 `null`일 수 있습니다. 일반적인 미존재 성공을 뜻하지 않습니다.
+- `POST /api/purchase-orders/with-items`의 `status`는 어떤 JSON 값이든 선택적으로 받을 수 있지만 무시하며, 발주서는 항상 `draft`로 생성합니다.
 
 목록의 `PurchaseOrderSummary`:
 
@@ -343,8 +347,8 @@ draft | ordered | partially_received | fully_received | canceled
 | Method | Path | 요청 | 성공 `data` |
 | --- | --- | --- | --- |
 | POST | `/api/purchase-orders/:id/items` | 단일 `OrderItemInput`, 배열, 또는 `{ items: OrderItemInput[] }` | `{ items: OrderItem[] }` |
-| PATCH | `/api/purchase-orders/:id/items/:itemId` | `{ ordered_qty?, memo? }` | 수정된 `OrderItem` |
-| POST | `/api/purchase-orders/:id/items/:itemId/receive` | `{ qty, note? }` | `{ order, order_item }` |
+| PATCH | `/api/purchase-orders/:id/items/:itemId` | `{ ordered_qty?, memo? }` | `OrderItem \| null` |
+| POST | `/api/purchase-orders/:id/items/:itemId/receive` | `{ qty, note? }` | `{ order: PurchaseOrderRow \| null, order_item: ReceivedOrderItem \| null }` |
 
 `OrderItemInput`:
 
@@ -352,7 +356,7 @@ draft | ordered | partially_received | fully_received | canceled
 { "item_id": 3, "ordered_qty": 10, "memo": null }
 ```
 
-`POST .../items`와 `PATCH .../items/:itemId`가 반환하는 `OrderItem` row는 `{ id, order_id, item_id, ordered_qty, received_qty, memo }`입니다. 일괄 추가 응답의 `items`에는 해당 발주서의 활성 항목 전체가 들어갑니다.
+`POST .../items`와 `PATCH .../items/:itemId`가 반환하는 `OrderItem` row는 `{ id, order_id, item_id, ordered_qty, received_qty, memo }`입니다. 일괄 추가 응답의 `items`에는 해당 발주서의 활성 항목 전체가 들어갑니다. 항목 PATCH도 변경 성공 후 legacy 순차 재조회 사이에 row가 사라지는 race에서는 200의 `data`가 `null`일 수 있습니다.
 
 > 중요: 두 URL의 `:itemId`는 재고 품목의 `items.id`가 아니라 발주 상세 응답에 있는 `order_items.id`입니다.
 
@@ -362,8 +366,9 @@ receive 규칙:
 - `qty`는 1 이상이며 해당 발주 항목의 `remaining_qty`를 넘을 수 없습니다.
 - 누적 입고량, 현재고, IN 원장, 발주 상태, 감사로그가 하나의 D1 batch에서 갱신됩니다.
 - 동시에 다른 입고가 남은 수량을 먼저 사용한 경우 `409 RECEIVE_CONFLICT`로 전체 요청을 거부합니다.
-- 성공 `data.order_item`은 `{ id, item_id, ordered_qty, received_qty, memo }`입니다.
-- 성공 `data.order`는 갱신된 발주서입니다.
+- 성공 `data.order_item`의 `ReceivedOrderItem`은 `{ id, item_id, ordered_qty, received_qty, memo }`입니다.
+- 입고 DB 변경 후 legacy 순차 재조회 사이의 race를 보존하므로 성공 `data.order`와 `data.order_item`은 서로 독립적으로 `null`일 수 있습니다. 이는 일반적인 미존재 성공이 아닙니다.
+- 성공 `data.order`가 `null`이 아니면 갱신된 발주서 row입니다.
 
 ## 7. 감사로그
 
