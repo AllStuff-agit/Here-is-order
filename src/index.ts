@@ -1,4 +1,8 @@
 import { Hono } from 'hono';
+import {
+  purchaseOrders,
+  type PurchaseOrderResult,
+} from './purchase-orders';
 
 type Env = {
   Bindings: {
@@ -53,6 +57,20 @@ function apiErr(code: string, message: string, status = 400) {
     ok: false,
     error: { code, message },
   } as const;
+}
+
+function purchaseOrderResponse<T>(
+  c: any,
+  result: PurchaseOrderResult<T>,
+  successStatus: 200 | 201 = 200,
+) {
+  if (result.ok) return c.json(apiOk(result.value), successStatus);
+  const status = result.error.kind === 'invalid'
+    ? 400
+    : result.error.kind === 'not_found'
+      ? 404
+      : 409;
+  return c.json(apiErr(result.error.code, result.error.message), status);
 }
 
 function parseCookie(cookieHeader: string | undefined) {
@@ -1168,48 +1186,29 @@ app.get('/api/purchase-orders', async (c) => {
 });
 
 app.post('/api/purchase-orders', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
-  const title = String(payload.title || '').trim();
+  const title = String(payload.title || '');
   const note = payload.note == null ? null : String(payload.note);
-  const statusRaw = payload.status == null ? undefined : String(payload.status).trim();
-  const status = statusRaw === undefined || statusRaw === '' ? 'draft' : statusRaw;
-
-  if (status !== 'draft') {
-    return c.json(apiErr('INVALID_STATUS_TRANSITION', '발주서는 초안 상태로만 생성할 수 있습니다.'), 400);
-  }
-
-  if (!title) return c.json(apiErr('INVALID_INPUT', '발주명은 필수입니다.'), 400);
-
-  const creationToken = crypto.randomUUID();
-  const batchResult = await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT INTO purchase_orders (title, status, note, creation_token)
-       VALUES (?, 'draft', ?, ?)`
-    ).bind(title, note, creationToken),
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       SELECT ?, 'create', 'purchase_order', id, NULL, ?
-         FROM purchase_orders WHERE creation_token = ?`
-    ).bind(user.id, JSON.stringify({ title, status: 'draft', note }), creationToken),
-    c.env.DB.prepare(
-      'UPDATE purchase_orders SET creation_token = NULL WHERE creation_token = ?'
-    ).bind(creationToken),
-  ]);
-
-  const id = Number((batchResult[0] as D1Result).meta.last_row_id);
-  const row = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ?`).bind(id).first();
-  return c.json(apiOk(row), 201);
+  const requestedStatus = payload.status == null ? undefined : String(payload.status);
+  return purchaseOrderResponse(
+    c,
+    await purchaseOrders(c.env.DB, actor.id).createDraft({
+      title,
+      note,
+      ...(requestedStatus === undefined ? {} : { requestedStatus }),
+    }),
+    201,
+  );
 });
 
 app.post('/api/purchase-orders/with-items', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
-  const title = String(payload.title || '').trim();
+  const title = String(payload.title || '');
   const note = payload.note == null ? null : String(payload.note);
 
-  if (!title) return c.json(apiErr('INVALID_INPUT', '발주명은 필수입니다.'), 400);
+  if (!title.trim()) return c.json(apiErr('INVALID_INPUT', '발주명은 필수입니다.'), 400);
 
   if (!Array.isArray(payload.items) || payload.items.length === 0) {
     return c.json(apiErr('INVALID_INPUT', '품목 목록은 비어있을 수 없습니다.'), 400);
@@ -1236,103 +1235,25 @@ app.post('/api/purchase-orders/with-items', async (c) => {
     });
   }
 
-  const mergedItems = new Map<number, { itemId: number; orderedQty: number; memo: string | null }>();
-  for (const row of parsedItems) {
-    const current = mergedItems.get(row.itemId);
-    mergedItems.set(row.itemId, {
-      itemId: row.itemId,
-      orderedQty: (current?.orderedQty ?? 0) + row.orderedQty,
-      memo: row.memo ?? current?.memo ?? null,
-    });
-  }
-  const items = Array.from(mergedItems.values());
-
-  for (const row of items) {
-    const item = await c.env.DB.prepare(
-      'SELECT id FROM items WHERE id = ? AND is_deleted = 0'
-    ).bind(row.itemId).first();
-    if (!item) {
-      return c.json(apiErr('INVALID_INPUT', `존재하지 않는 품목입니다. (id=${row.itemId})`), 400);
-    }
-  }
-
-  const creationToken = crypto.randomUUID();
-  const statements = [
-    c.env.DB.prepare(
-      `INSERT INTO purchase_orders (title, status, note, creation_token)
-       VALUES (?, 'draft', ?, ?)`
-    ).bind(title, note, creationToken),
-  ];
-
-  for (const row of items) {
-    statements.push(
-      c.env.DB.prepare(
-        `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
-         SELECT id, ?, ?, 0, ? FROM purchase_orders WHERE creation_token = ?`
-      ).bind(row.itemId, row.orderedQty, row.memo, creationToken),
-    );
-    statements.push(
-      c.env.DB.prepare(
-        `INSERT INTO audit_logs
-           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-         SELECT ?, 'create', 'order_item', oi.id, NULL, ?
-           FROM order_items oi
-           JOIN purchase_orders po ON po.id = oi.order_id
-          WHERE po.creation_token = ? AND oi.item_id = ? AND oi.is_deleted = 0`
-      ).bind(
-        user.id,
-        JSON.stringify({ item_id: row.itemId, ordered_qty: row.orderedQty, received_qty: 0, memo: row.memo }),
-        creationToken,
-        row.itemId,
-      ),
-    );
-  }
-
-  statements.push(
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       SELECT ?, 'create', 'purchase_order', id, NULL, ?
-         FROM purchase_orders WHERE creation_token = ?`
-    ).bind(user.id, JSON.stringify({ title, status: 'draft', note, items }), creationToken),
+  return purchaseOrderResponse(
+    c,
+    await purchaseOrders(c.env.DB, actor.id).createDraftWithItems({
+      title,
+      note,
+      items: parsedItems,
+    }),
+    201,
   );
-  statements.push(
-    c.env.DB.prepare(
-      'UPDATE purchase_orders SET creation_token = NULL WHERE creation_token = ?'
-    ).bind(creationToken),
-  );
-
-  let batchResult: D1Result[];
-  try {
-    batchResult = await c.env.DB.batch(statements);
-  } catch {
-    return c.json(apiErr('CONFLICT', '발주서 생성 중 품목 상태가 변경되었습니다. 다시 시도해주세요.'), 409);
-  }
-
-  const orderId = Number(batchResult[0].meta.last_row_id);
-  const orderRow = await c.env.DB.prepare(
-    `SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ? AND is_deleted = 0`
-  ).bind(orderId).first();
-  return c.json(apiOk(orderRow), 201);
 });
 
 app.get('/api/purchase-orders/:id', async (c) => {
-  const id = parseIntValue(c.req.param('id'), null);
-  if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
-
-  const order = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ? AND is_deleted = 0`).bind(id).first();
-  if (!order) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
-
-  const items = await c.env.DB.prepare(
-    `SELECT oi.id, oi.item_id, i.name AS item_name, i.spec,
-            oi.ordered_qty, oi.received_qty, (oi.ordered_qty - oi.received_qty) AS remaining_qty, oi.memo
-       FROM order_items oi
-       LEFT JOIN items i ON i.id = oi.item_id
-      WHERE oi.order_id = ? AND oi.is_deleted = 0
-      ORDER BY oi.id DESC`
-  ).bind(id).all();
-
-  return c.json(apiOk({ ...order, items: items.results }));
+  const actor = c.get('user') as SessionUser;
+  const orderId = parseIntValue(c.req.param('id'), null);
+  if (!orderId) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
+  return purchaseOrderResponse(
+    c,
+    await purchaseOrders(c.env.DB, actor.id).getDetail(orderId),
+  );
 });
 
 app.patch('/api/purchase-orders/:id', async (c) => {
