@@ -875,4 +875,413 @@ describe('발주 compatibility characterization', () => {
     );
     await expect(itemDeleteAuditResponse.json()).resolves.toEqual({ ok: true, data: [] });
   });
+
+  it('preflights missing and non-draft orders before malformed item bodies', async () => {
+    const sessionToken = await createSession();
+    const ordered = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'ordered')`,
+    ).bind('preflight 발주').run();
+    const orderedId = Number(ordered.meta.last_row_id);
+
+    const cases = [
+      {
+        path: '/api/purchase-orders/999999999/items',
+        method: 'POST',
+        status: 404,
+        code: 'NOT_FOUND',
+        message: '발주서를 찾지 못했습니다.',
+      },
+      {
+        path: '/api/purchase-orders/999999999/items/1',
+        method: 'PATCH',
+        status: 404,
+        code: 'NOT_FOUND',
+        message: '발주서를 찾지 못했습니다.',
+      },
+      {
+        path: `/api/purchase-orders/${orderedId}/items`,
+        method: 'POST',
+        status: 400,
+        code: 'INVALID_STATUS',
+        message: '초안 상태에서만 발주 항목을 추가할 수 있습니다.',
+      },
+      {
+        path: `/api/purchase-orders/${orderedId}/items/1`,
+        method: 'PATCH',
+        status: 400,
+        code: 'INVALID_STATUS',
+        message: '초안 상태에서만 발주 항목을 수정할 수 있습니다.',
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const response = await apiRequest(testCase.path, sessionToken, {
+        method: testCase.method,
+        body: '{malformed',
+      });
+      expect(response.status).toBe(testCase.status);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: { code: testCase.code, message: testCase.message },
+      });
+    }
+  });
+
+  it('preserves add container precedence and null-versus-primitive failures', async () => {
+    const sessionToken = await createSession();
+    const firstItem = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('container 원두').run();
+    const secondItem = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('container 우유').run();
+    const order = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('container 초안').run();
+    const path = `/api/purchase-orders/${order.meta.last_row_id}/items`;
+
+    const precedenceResponse = await apiRequest(path, sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        item_id: firstItem.meta.last_row_id,
+        ordered_qty: 1,
+        items: [{ item_id: secondItem.meta.last_row_id, ordered_qty: 9 }],
+      }),
+    });
+    expect(precedenceResponse.status).toBe(200);
+    await expect(precedenceResponse.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        items: [expect.objectContaining({
+          item_id: Number(firstItem.meta.last_row_id),
+          ordered_qty: 1,
+        })],
+      },
+    });
+
+    for (const body of ['{malformed', '7', '[7]']) {
+      const response = await apiRequest(path, sessionToken, { method: 'POST', body });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: '항목과 수량을 확인해주세요.',
+        },
+      });
+    }
+
+    for (const body of ['null', '[null]']) {
+      const response = await apiRequest(path, sessionToken, { method: 'POST', body });
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: '서버 오류가 발생했습니다.',
+        },
+      });
+    }
+  });
+
+  it('preserves add numeric coercion and item-before-quantity validation outcomes', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('coercion 원두').run();
+    const order = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('coercion 초안').run();
+    const path = `/api/purchase-orders/${order.meta.last_row_id}/items`;
+    const itemId = Number(item.meta.last_row_id);
+
+    const hexadecimal = await apiRequest(path, sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({ item_id: `  ${itemId}  `, ordered_qty: '0x2' }),
+    });
+    expect(hexadecimal.status).toBe(200);
+    await expect(hexadecimal.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        items: [expect.objectContaining({ item_id: itemId, ordered_qty: 2 })],
+      },
+    });
+
+    const exponent = await apiRequest(path, sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({ item_id: itemId, ordered_qty: '1e1' }),
+    });
+    expect(exponent.status).toBe(200);
+    await expect(exponent.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        items: [expect.objectContaining({ item_id: itemId, ordered_qty: 12 })],
+      },
+    });
+
+    for (const missingItemId of [0, -7]) {
+      const response = await apiRequest(path, sessionToken, {
+        method: 'POST',
+        body: JSON.stringify({ item_id: missingItemId, ordered_qty: 1 }),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'INVALID_INPUT',
+          message: `존재하지 않는 품목입니다. (id=${missingItemId})`,
+        },
+      });
+    }
+
+    const invalidQuantity = await apiRequest(path, sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({ item_id: -9, ordered_qty: 0 }),
+    });
+    expect(invalidQuantity.status).toBe(400);
+    await expect(invalidQuantity.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: '항목과 수량을 확인해주세요.',
+      },
+    });
+  });
+
+  it('preserves edit validation order and array numeric coercion', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('edit coercion 원두').run();
+    const order = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('edit coercion 초안').run();
+    const orderItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 3, 2)`,
+    ).bind(order.meta.last_row_id, item.meta.last_row_id).run();
+    const orderId = Number(order.meta.last_row_id);
+    const orderItemId = Number(orderItem.meta.last_row_id);
+    const path = `/api/purchase-orders/${orderId}/items/${orderItemId}`;
+
+    const arrayQuantity = await apiRequest(path, sessionToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ ordered_qty: [3] }),
+    });
+    expect(arrayQuantity.status).toBe(200);
+    await expect(arrayQuantity.json()).resolves.toEqual({
+      ok: true,
+      data: expect.objectContaining({ id: orderItemId, ordered_qty: 3 }),
+    });
+
+    const belowReceived = await apiRequest(path, sessionToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ ordered_qty: [1] }),
+    });
+    expect(belowReceived.status).toBe(400);
+    await expect(belowReceived.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: '수정하려는 수량이 이미 입고된 수량보다 작을 수 없습니다.',
+      },
+    });
+
+    const missingItemPath = `/api/purchase-orders/${orderId}/items/999999999`;
+    const invalidQuantity = await apiRequest(missingItemPath, sessionToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ ordered_qty: 0, memo: 'ignored' }),
+    });
+    expect(invalidQuantity.status).toBe(400);
+    await expect(invalidQuantity.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: 'ordered_qty는 1 이상의 정수여야 합니다.',
+      },
+    });
+
+    const emptyPatch = await apiRequest(missingItemPath, sessionToken, {
+      method: 'PATCH',
+      body: JSON.stringify({}),
+    });
+    expect(emptyPatch.status).toBe(400);
+    await expect(emptyPatch.json()).resolves.toEqual({
+      ok: false,
+      error: { code: 'INVALID_INPUT', message: '수정할 데이터가 없습니다.' },
+    });
+
+    const missingItem = await apiRequest(missingItemPath, sessionToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ memo: 'missing' }),
+    });
+    expect(missingItem.status).toBe(404);
+    await expect(missingItem.json()).resolves.toEqual({
+      ok: false,
+      error: { code: 'NOT_FOUND', message: '발주 항목을 찾지 못했습니다.' },
+    });
+  });
+
+  it('preserves add conflict mapping and uncaught edit batch failures', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('batch failure 원두').run();
+    const addOrder = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('add batch failure').run();
+    const editOrder = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('edit batch failure').run();
+    const orderItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 1, 0)`,
+    ).bind(editOrder.meta.last_row_id, item.meta.last_row_id).run();
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_fail_order_item_audit
+       BEFORE INSERT ON audit_logs
+       WHEN NEW.entity_type = 'order_item'
+       BEGIN
+         SELECT RAISE(ABORT, 'TEST_ORDER_ITEM_AUDIT_FAILURE');
+       END`,
+    ).run();
+
+    try {
+      const addResponse = await apiRequest(
+        `/api/purchase-orders/${addOrder.meta.last_row_id}/items`,
+        sessionToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            item_id: item.meta.last_row_id,
+            ordered_qty: 1,
+          }),
+        },
+      );
+      expect(addResponse.status).toBe(409);
+      await expect(addResponse.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: '발주 상태 또는 항목이 변경되었습니다. 다시 시도해주세요.',
+        },
+      });
+
+      const editResponse = await apiRequest(
+        `/api/purchase-orders/${editOrder.meta.last_row_id}/items/${orderItem.meta.last_row_id}`,
+        sessionToken,
+        { method: 'PATCH', body: JSON.stringify({ ordered_qty: 2 }) },
+      );
+      expect(editResponse.status).toBe(500);
+      await expect(editResponse.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: '서버 오류가 발생했습니다.',
+        },
+      });
+    } finally {
+      await env.DB.prepare('DROP TRIGGER IF EXISTS test_fail_order_item_audit').run();
+    }
+
+    const rows = await env.DB.prepare(
+      `SELECT order_id, ordered_qty FROM order_items ORDER BY id ASC`,
+    ).all<{ order_id: number; ordered_qty: number }>();
+    expect(rows.results).toEqual([
+      {
+        order_id: Number(editOrder.meta.last_row_id),
+        ordered_qty: 1,
+      },
+    ]);
+  });
+
+  it('preserves conditional-token conflict messages and nullable edit readback', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('conditional conflict 원두').run();
+    const order = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('conditional conflict 초안').run();
+    const orderItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 1, 0)`,
+    ).bind(order.meta.last_row_id, item.meta.last_row_id).run();
+    const orderId = Number(order.meta.last_row_id);
+    const orderItemId = Number(orderItem.meta.last_row_id);
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_ignore_item_mutation_token
+       BEFORE UPDATE OF creation_token ON purchase_orders
+       WHEN NEW.creation_token IS NOT NULL
+       BEGIN
+         SELECT RAISE(IGNORE);
+       END`,
+    ).run();
+
+    try {
+      const addResponse = await apiRequest(
+        `/api/purchase-orders/${orderId}/items`,
+        sessionToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({ item_id: item.meta.last_row_id, ordered_qty: 1 }),
+        },
+      );
+      expect(addResponse.status).toBe(409);
+      await expect(addResponse.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: '초안 상태에서만 발주 항목을 추가할 수 있습니다.',
+        },
+      });
+
+      const editResponse = await apiRequest(
+        `/api/purchase-orders/${orderId}/items/${orderItemId}`,
+        sessionToken,
+        { method: 'PATCH', body: JSON.stringify({ ordered_qty: 2 }) },
+      );
+      expect(editResponse.status).toBe(409);
+      await expect(editResponse.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: '발주 상태 또는 항목이 변경되었습니다.',
+        },
+      });
+    } finally {
+      await env.DB.prepare('DROP TRIGGER IF EXISTS test_ignore_item_mutation_token').run();
+    }
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_remove_api_revised_item_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'update' AND NEW.entity_type = 'order_item'
+       BEGIN
+         DELETE FROM order_items WHERE id = NEW.entity_id;
+       END`,
+    ).run();
+
+    try {
+      const response = await apiRequest(
+        `/api/purchase-orders/${orderId}/items/${orderItemId}`,
+        sessionToken,
+        { method: 'PATCH', body: JSON.stringify({ memo: 'deleted on audit' }) },
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true, data: null });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_remove_api_revised_item_before_readback',
+      ).run();
+    }
+  });
 });

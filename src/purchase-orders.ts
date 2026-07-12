@@ -86,6 +86,30 @@ export type PurchaseOrderRevision = {
   requestedStatus?: string;
 };
 
+export type OrderItemRevision = {
+  orderedQty?: number;
+  memo?: string | null;
+};
+
+export type AddItemsToDraftResult = {
+  items: OrderItemRow[];
+};
+
+// These stages preserve the legacy order-before-body preflight for HTTP callers.
+// Their executors rely on the conditional token write instead of re-reading status.
+export type AddItemsToDraftStage = {
+  execute(
+    items: readonly OrderItemInput[],
+  ): Promise<PurchaseOrderResult<AddItemsToDraftResult>>;
+};
+
+export type EditDraftItemStage = {
+  execute(
+    orderItemId: number,
+    change: OrderItemRevision,
+  ): Promise<PurchaseOrderResult<OrderItemRow | null>>;
+};
+
 export interface PurchaseOrderModule {
   createDraft(
     input: CreateDraftInput,
@@ -101,6 +125,21 @@ export interface PurchaseOrderModule {
   deleteDraft(
     orderId: number,
   ): Promise<PurchaseOrderResult<{ deleted: true }>>;
+  stageAddItemsToDraft(
+    orderId: number,
+  ): Promise<PurchaseOrderResult<AddItemsToDraftStage>>;
+  addItemsToDraft(
+    orderId: number,
+    items: readonly OrderItemInput[],
+  ): Promise<PurchaseOrderResult<AddItemsToDraftResult>>;
+  stageEditDraftItem(
+    orderId: number,
+  ): Promise<PurchaseOrderResult<EditDraftItemStage>>;
+  editDraftItem(
+    orderId: number,
+    orderItemId: number,
+    change: OrderItemRevision,
+  ): Promise<PurchaseOrderResult<OrderItemRow | null>>;
 }
 
 export function purchaseOrders(
@@ -113,6 +152,10 @@ export function purchaseOrders(
     getDetail,
     revise,
     deleteDraft,
+    stageAddItemsToDraft,
+    addItemsToDraft,
+    stageEditDraftItem,
+    editDraftItem,
   };
 
   async function createDraft(
@@ -287,6 +330,344 @@ export function purchaseOrders(
     ).bind(orderId).all<PurchaseOrderDetail['items'][number]>();
 
     return success({ ...order, items: items.results });
+  }
+
+  async function stageAddItemsToDraft(
+    orderId: number,
+  ): Promise<PurchaseOrderResult<AddItemsToDraftStage>> {
+    const order = await db.prepare(
+      'SELECT id, status FROM purchase_orders WHERE id = ? AND is_deleted = 0',
+    ).bind(orderId).first<{ id: number; status: string }>();
+    if (!order) return notFound('발주서를 찾지 못했습니다.');
+    if (order.status !== 'draft') {
+      return invalid(
+        'INVALID_STATUS',
+        '초안 상태에서만 발주 항목을 추가할 수 있습니다.',
+      );
+    }
+
+    return success({
+      execute(items) {
+        return addItemsToStagedDraft(orderId, items);
+      },
+    });
+  }
+
+  async function addItemsToDraft(
+    orderId: number,
+    items: readonly OrderItemInput[],
+  ): Promise<PurchaseOrderResult<AddItemsToDraftResult>> {
+    const stage = await stageAddItemsToDraft(orderId);
+    if (!stage.ok) return stage;
+    return stage.value.execute(items);
+  }
+
+  async function addItemsToStagedDraft(
+    orderId: number,
+    items: readonly OrderItemInput[],
+  ): Promise<PurchaseOrderResult<AddItemsToDraftResult>> {
+    if (!Array.isArray(items) || items.length === 0) {
+      return invalid('INVALID_INPUT', '항목과 수량을 확인해주세요.');
+    }
+
+    const rows: OrderItemInput[] = [];
+    for (const row of items) {
+      const itemId = row.itemId;
+      const orderedQty = row.orderedQty;
+      const memo = row.memo == null ? null : String(row.memo);
+      if (
+        !Number.isInteger(itemId)
+        || !Number.isInteger(orderedQty)
+        || orderedQty <= 0
+      ) {
+        return invalid('INVALID_INPUT', '항목과 수량을 확인해주세요.');
+      }
+      rows.push({ itemId, orderedQty, memo });
+    }
+
+    const mergedRows = rows.reduce<Map<
+      number,
+      { orderedQty: number; memo: string | null }
+    >>((acc, row) => {
+      const current = acc.get(row.itemId);
+      acc.set(row.itemId, {
+        orderedQty: (current?.orderedQty ?? 0) + row.orderedQty,
+        memo: row.memo || current?.memo || null,
+      });
+      return acc;
+    }, new Map());
+
+    const groupedRows = Array.from(mergedRows.entries()).map(([itemId, row]) => ({
+      itemId,
+      orderedQty: row.orderedQty,
+      memo: row.memo,
+    }));
+
+    for (const row of groupedRows) {
+      const item = await db.prepare(
+        'SELECT id FROM items WHERE id = ? AND is_deleted = 0',
+      ).bind(row.itemId).first();
+      if (!item) {
+        return invalid(
+          'INVALID_INPUT',
+          `존재하지 않는 품목입니다. (id=${row.itemId})`,
+        );
+      }
+    }
+
+    const existingRows = new Map<number, {
+      id: number;
+      ordered_qty: number;
+      received_qty: number;
+      memo: string | null;
+    }>();
+    for (const row of groupedRows) {
+      const existing = await db.prepare(
+        `SELECT id, ordered_qty, received_qty, memo
+           FROM order_items
+          WHERE order_id = ? AND item_id = ? AND is_deleted = 0`,
+      ).bind(orderId, row.itemId).first<{
+        id: number;
+        ordered_qty: number;
+        received_qty: number;
+        memo: string | null;
+      }>();
+      if (existing) existingRows.set(row.itemId, existing);
+    }
+
+    const mutationToken = crypto.randomUUID();
+    const statements = [
+      db.prepare(
+        `UPDATE purchase_orders SET creation_token = ?
+          WHERE id = ? AND is_deleted = 0 AND status = 'draft'`,
+      ).bind(mutationToken, orderId),
+    ];
+
+    for (const row of groupedRows) {
+      const existing = existingRows.get(row.itemId);
+      if (existing) {
+        statements.push(
+          db.prepare(
+            `UPDATE order_items
+                SET ordered_qty = ordered_qty + ?, memo = ?, updated_at = datetime('now')
+              WHERE id = ? AND order_id = ?
+                AND EXISTS (
+                  SELECT 1 FROM purchase_orders WHERE creation_token = ?
+                )`,
+          ).bind(row.orderedQty, row.memo, existing.id, orderId, mutationToken),
+        );
+        statements.push(
+          db.prepare(
+            `INSERT INTO audit_logs
+               (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+             SELECT ?, 'update', 'order_item', oi.id,
+                    json_object(
+                      'order_id', oi.order_id, 'item_id', oi.item_id,
+                      'ordered_qty', oi.ordered_qty - ?, 'received_qty', oi.received_qty
+                    ),
+                    json_object(
+                      'order_id', oi.order_id, 'item_id', oi.item_id,
+                      'ordered_qty', oi.ordered_qty, 'received_qty', oi.received_qty,
+                      'memo', oi.memo
+                    )
+               FROM order_items oi
+               JOIN purchase_orders po ON po.id = oi.order_id
+              WHERE po.creation_token = ? AND oi.id = ?`,
+          ).bind(actorUserId, row.orderedQty, mutationToken, existing.id),
+        );
+      } else {
+        statements.push(
+          db.prepare(
+            `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
+             SELECT id, ?, ?, 0, ? FROM purchase_orders WHERE creation_token = ?`,
+          ).bind(row.itemId, row.orderedQty, row.memo, mutationToken),
+        );
+        statements.push(
+          db.prepare(
+            `INSERT INTO audit_logs
+               (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+             SELECT ?, 'create', 'order_item', oi.id, NULL, ?
+               FROM order_items oi
+               JOIN purchase_orders po ON po.id = oi.order_id
+              WHERE po.creation_token = ? AND oi.item_id = ? AND oi.is_deleted = 0`,
+          ).bind(
+            actorUserId,
+            JSON.stringify({
+              order_id: orderId,
+              item_id: row.itemId,
+              ordered_qty: row.orderedQty,
+              received_qty: 0,
+              memo: row.memo,
+            }),
+            mutationToken,
+            row.itemId,
+          ),
+        );
+      }
+    }
+    statements.push(
+      db.prepare(
+        `UPDATE purchase_orders
+            SET creation_token = NULL, updated_at = datetime('now')
+          WHERE creation_token = ?`,
+      ).bind(mutationToken),
+    );
+
+    let batchResult: D1Result[];
+    try {
+      batchResult = await db.batch(statements);
+    } catch {
+      return conflict(
+        'CONFLICT',
+        '발주 상태 또는 항목이 변경되었습니다. 다시 시도해주세요.',
+      );
+    }
+    if (batchResult[0].meta.changes === 0) {
+      return conflict(
+        'CONFLICT',
+        '초안 상태에서만 발주 항목을 추가할 수 있습니다.',
+      );
+    }
+
+    const targets = await db.prepare(
+      `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
+         FROM order_items oi
+        WHERE oi.order_id = ? AND oi.is_deleted = 0`,
+    ).bind(orderId).all<OrderItemRow>();
+
+    return success({ items: targets.results });
+  }
+
+  async function stageEditDraftItem(
+    orderId: number,
+  ): Promise<PurchaseOrderResult<EditDraftItemStage>> {
+    const order = await db.prepare(
+      'SELECT id, status FROM purchase_orders WHERE id = ? AND is_deleted = 0',
+    ).bind(orderId).first<{ id: number; status: string }>();
+    if (!order) return notFound('발주서를 찾지 못했습니다.');
+    if (order.status !== 'draft') {
+      return invalid(
+        'INVALID_STATUS',
+        '초안 상태에서만 발주 항목을 수정할 수 있습니다.',
+      );
+    }
+
+    return success({
+      execute(orderItemId, change) {
+        return editStagedDraftItem(orderId, orderItemId, change);
+      },
+    });
+  }
+
+  async function editDraftItem(
+    orderId: number,
+    orderItemId: number,
+    change: OrderItemRevision,
+  ): Promise<PurchaseOrderResult<OrderItemRow | null>> {
+    const stage = await stageEditDraftItem(orderId);
+    if (!stage.ok) return stage;
+    return stage.value.execute(orderItemId, change);
+  }
+
+  async function editStagedDraftItem(
+    orderId: number,
+    orderItemId: number,
+    change: OrderItemRevision,
+  ): Promise<PurchaseOrderResult<OrderItemRow | null>> {
+    const patches: string[] = [];
+    const params: unknown[] = [];
+    let orderedQty: number | undefined;
+
+    if ('orderedQty' in change) {
+      orderedQty = change.orderedQty;
+      if (!Number.isInteger(orderedQty) || (orderedQty ?? 0) <= 0) {
+        return invalid(
+          'INVALID_INPUT',
+          'ordered_qty는 1 이상의 정수여야 합니다.',
+        );
+      }
+      patches.push('ordered_qty = ?');
+      params.push(orderedQty);
+    }
+
+    if ('memo' in change) {
+      patches.push('memo = ?');
+      params.push(change.memo == null ? null : String(change.memo));
+    }
+
+    if (!patches.length) {
+      return invalid('INVALID_INPUT', '수정할 데이터가 없습니다.');
+    }
+
+    const before = await db.prepare(
+      `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
+         FROM order_items oi
+        WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0`,
+    ).bind(orderItemId, orderId).first<OrderItemRow>();
+    if (!before) return notFound('발주 항목을 찾지 못했습니다.');
+
+    if (orderedQty !== undefined) {
+      const currentReceived = Number(before.received_qty || 0);
+      if (currentReceived > orderedQty) {
+        return invalid(
+          'INVALID_INPUT',
+          '수정하려는 수량이 이미 입고된 수량보다 작을 수 없습니다.',
+        );
+      }
+    }
+
+    const mutationToken = crypto.randomUUID();
+    const sql = `UPDATE order_items SET ${patches.join(', ')}, updated_at = datetime('now')
+      WHERE id = ? AND order_id = ? AND is_deleted = 0
+        AND EXISTS (SELECT 1 FROM purchase_orders WHERE creation_token = ?)`;
+    const batchResult = await db.batch([
+      db.prepare(
+        `UPDATE purchase_orders SET creation_token = ?
+          WHERE id = ? AND is_deleted = 0 AND status = 'draft'`,
+      ).bind(mutationToken, orderId),
+      db.prepare(sql).bind(...params, orderItemId, orderId, mutationToken),
+      db.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         SELECT ?, 'update', 'order_item', oi.id, ?,
+                json_object(
+                  'id', oi.id, 'order_id', oi.order_id, 'item_id', oi.item_id,
+                  'ordered_qty', oi.ordered_qty, 'received_qty', oi.received_qty,
+                  'memo', oi.memo
+                )
+           FROM order_items oi
+           JOIN purchase_orders po ON po.id = oi.order_id
+          WHERE oi.id = ? AND po.creation_token = ? AND changes() = 1`,
+      ).bind(
+        actorUserId,
+        JSON.stringify(before),
+        orderItemId,
+        mutationToken,
+      ),
+      db.prepare(
+        `UPDATE purchase_orders
+            SET creation_token = NULL, updated_at = datetime('now')
+          WHERE creation_token = ?`,
+      ).bind(mutationToken),
+    ]);
+
+    if (
+      batchResult[0].meta.changes === 0
+      || batchResult[1].meta.changes === 0
+    ) {
+      return conflict(
+        'CONFLICT',
+        '발주 상태 또는 항목이 변경되었습니다.',
+      );
+    }
+
+    const after = await db.prepare(
+      `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
+         FROM order_items oi
+        WHERE oi.id = ?`,
+    ).bind(orderItemId).first<OrderItemRow>();
+
+    return success(after);
   }
 
   async function revise(

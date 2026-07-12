@@ -327,3 +327,106 @@ describe('Purchase Order module revision and deletion', () => {
     });
   });
 });
+
+describe('Purchase Order module draft items', () => {
+  it('adds, merges, returns all active rows, clears existing memo, and revises an item', async () => {
+    const { module } = await createActor();
+    const firstItemId = await createInventoryItem('item 원두');
+    const secondItemId = await createInventoryItem('item 우유');
+    const draft = await module.createDraft({ title: 'item 초안', note: null });
+    if (!draft.ok || !draft.value) throw new Error('expected creation success');
+
+    const added = await module.addItemsToDraft(draft.value.id, [
+      { itemId: firstItemId, orderedQty: 1, memo: '첫 memo' },
+      { itemId: firstItemId, orderedQty: 2, memo: '' },
+      { itemId: secondItemId, orderedQty: 1, memo: '우유 memo' },
+    ]);
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error('expected add success');
+    expect(added.value.items).toHaveLength(2);
+    const first = added.value.items.find((row) => row.item_id === firstItemId);
+    expect(first).toEqual(expect.objectContaining({ ordered_qty: 3, memo: '첫 memo' }));
+
+    const cleared = await module.addItemsToDraft(draft.value.id, [
+      { itemId: firstItemId, orderedQty: 1, memo: null },
+    ]);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) throw new Error('expected clear memo success');
+    const clearedFirst = cleared.value.items.find((row) => row.item_id === firstItemId);
+    expect(clearedFirst).toEqual(expect.objectContaining({ ordered_qty: 4, memo: null }));
+
+    const revised = await module.editDraftItem(draft.value.id, first!.id, {
+      orderedQty: 5,
+      memo: '수정 memo',
+    });
+    expect(revised).toEqual({
+      ok: true,
+      value: expect.objectContaining({ ordered_qty: 5, memo: '수정 memo' }),
+    });
+  });
+
+  it('rejects item changes after confirmation', async () => {
+    const { module } = await createActor();
+    const itemId = await createInventoryItem('confirmed 원두');
+    const draft = await module.createDraftWithItems({
+      title: 'confirmed 발주',
+      note: null,
+      items: [{ itemId, orderedQty: 1, memo: null }],
+    });
+    if (!draft.ok || !draft.value) throw new Error('expected creation success');
+    const detail = await module.getDetail(draft.value.id);
+    if (!detail.ok) throw new Error('expected detail success');
+    await module.revise(draft.value.id, { requestedStatus: 'ordered' });
+
+    const added = await module.addItemsToDraft(draft.value.id, [
+      { itemId, orderedQty: 1, memo: null },
+    ]);
+    expect(added).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: 'invalid', code: 'INVALID_STATUS' }),
+    });
+    const edited = await module.editDraftItem(
+      draft.value.id,
+      detail.value.items[0].id,
+      { orderedQty: 2 },
+    );
+    expect(edited).toEqual({
+      ok: false,
+      error: expect.objectContaining({ kind: 'invalid', code: 'INVALID_STATUS' }),
+    });
+  });
+
+  it('returns null when a revised item disappears before readback', async () => {
+    const { module } = await createActor();
+    const itemId = await createInventoryItem('item readback 원두');
+    const draft = await module.createDraftWithItems({
+      title: 'item readback 초안',
+      note: null,
+      items: [{ itemId, orderedQty: 1, memo: null }],
+    });
+    if (!draft.ok || !draft.value) throw new Error('expected creation success');
+    const detail = await module.getDetail(draft.value.id);
+    if (!detail.ok) throw new Error('expected detail success');
+    const orderItemId = detail.value.items[0].id;
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_remove_revised_item_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'update' AND NEW.entity_type = 'order_item'
+       BEGIN
+         DELETE FROM order_items WHERE id = NEW.entity_id;
+       END`,
+    ).run();
+
+    try {
+      const revised = await module.editDraftItem(draft.value.id, orderItemId, {
+        memo: 'readback memo',
+      });
+      expect(revised).toEqual({ ok: true, value: null });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_remove_revised_item_before_readback',
+      ).run();
+    }
+  });
+});

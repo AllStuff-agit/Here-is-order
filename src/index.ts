@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import {
   purchaseOrders,
+  type OrderItemRevision,
   type PurchaseOrderRevision,
   type PurchaseOrderResult,
 } from './purchase-orders';
@@ -1311,17 +1312,12 @@ app.delete('/api/purchase-orders/:id', async (c) => {
 });
 
 app.post('/api/purchase-orders/:id/items', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   if (!orderId) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
 
-  const order = await c.env.DB.prepare('SELECT id, status FROM purchase_orders WHERE id = ? AND is_deleted = 0')
-    .bind(orderId)
-    .first<{ id: number; status: string }>();
-  if (!order) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
-  if (order.status !== 'draft') {
-    return c.json(apiErr('INVALID_STATUS', '초안 상태에서만 발주 항목을 추가할 수 있습니다.'), 400);
-  }
+  const stage = await purchaseOrders(c.env.DB, actor.id).stageAddItemsToDraft(orderId);
+  if (!stage.ok) return purchaseOrderResponse(c, stage);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const rawRows: Array<{ item_id?: unknown; ordered_qty?: unknown; memo?: unknown }> = (() => {
@@ -1366,141 +1362,11 @@ app.post('/api/purchase-orders/:id/items', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '항목과 수량을 확인해주세요.'), 400);
   }
 
-  const mergedRows = rows.reduce<Map<number, { orderedQty: number; memo: string | null }>>((acc, row) => {
-    const current = acc.get(row.itemId);
-    acc.set(row.itemId, {
-      orderedQty: (current?.orderedQty ?? 0) + row.orderedQty,
-      memo: row.memo || current?.memo || null,
-    });
-    return acc;
-  }, new Map());
-
-  const groupedRows = Array.from(mergedRows.entries()).map(([itemId, row]) => ({
-    itemId,
-    orderedQty: row.orderedQty,
-    memo: row.memo,
-  }));
-
-  for (const row of groupedRows) {
-    const item = await c.env.DB.prepare('SELECT id FROM items WHERE id = ? AND is_deleted = 0').bind(row.itemId).first();
-    if (!item) {
-      return c.json(apiErr('INVALID_INPUT', `존재하지 않는 품목입니다. (id=${row.itemId})`), 400);
-    }
-  }
-
-  const existingRows = new Map<number, {
-    id: number;
-    ordered_qty: number;
-    received_qty: number;
-    memo: string | null;
-  }>();
-  for (const row of groupedRows) {
-    const existing = await c.env.DB.prepare(
-      `SELECT id, ordered_qty, received_qty, memo
-         FROM order_items
-        WHERE order_id = ? AND item_id = ? AND is_deleted = 0`
-    ).bind(orderId, row.itemId).first<{
-      id: number;
-      ordered_qty: number;
-      received_qty: number;
-      memo: string | null;
-    }>();
-    if (existing) existingRows.set(row.itemId, existing);
-  }
-
-  const mutationToken = crypto.randomUUID();
-  const statements = [
-    c.env.DB.prepare(
-      `UPDATE purchase_orders SET creation_token = ?
-        WHERE id = ? AND is_deleted = 0 AND status = 'draft'`
-    ).bind(mutationToken, orderId),
-  ];
-
-  for (const row of groupedRows) {
-    const existing = existingRows.get(row.itemId);
-    if (existing) {
-      statements.push(
-        c.env.DB.prepare(
-          `UPDATE order_items
-              SET ordered_qty = ordered_qty + ?, memo = ?, updated_at = datetime('now')
-            WHERE id = ? AND order_id = ?
-              AND EXISTS (
-                SELECT 1 FROM purchase_orders WHERE creation_token = ?
-              )`
-        ).bind(row.orderedQty, row.memo, existing.id, orderId, mutationToken),
-      );
-      statements.push(
-        c.env.DB.prepare(
-          `INSERT INTO audit_logs
-             (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-           SELECT ?, 'update', 'order_item', oi.id,
-                  json_object(
-                    'order_id', oi.order_id, 'item_id', oi.item_id,
-                    'ordered_qty', oi.ordered_qty - ?, 'received_qty', oi.received_qty
-                  ),
-                  json_object(
-                    'order_id', oi.order_id, 'item_id', oi.item_id,
-                    'ordered_qty', oi.ordered_qty, 'received_qty', oi.received_qty,
-                    'memo', oi.memo
-                  )
-             FROM order_items oi
-             JOIN purchase_orders po ON po.id = oi.order_id
-            WHERE po.creation_token = ? AND oi.id = ?`
-        ).bind(user.id, row.orderedQty, mutationToken, existing.id),
-      );
-    } else {
-      statements.push(
-        c.env.DB.prepare(
-          `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
-           SELECT id, ?, ?, 0, ? FROM purchase_orders WHERE creation_token = ?`
-        ).bind(row.itemId, row.orderedQty, row.memo, mutationToken),
-      );
-      statements.push(
-        c.env.DB.prepare(
-          `INSERT INTO audit_logs
-             (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-           SELECT ?, 'create', 'order_item', oi.id, NULL, ?
-             FROM order_items oi
-             JOIN purchase_orders po ON po.id = oi.order_id
-            WHERE po.creation_token = ? AND oi.item_id = ? AND oi.is_deleted = 0`
-        ).bind(
-          user.id,
-          JSON.stringify({ order_id: orderId, item_id: row.itemId, ordered_qty: row.orderedQty, received_qty: 0, memo: row.memo }),
-          mutationToken,
-          row.itemId,
-        ),
-      );
-    }
-  }
-  statements.push(
-    c.env.DB.prepare(
-      `UPDATE purchase_orders
-          SET creation_token = NULL, updated_at = datetime('now')
-        WHERE creation_token = ?`
-    ).bind(mutationToken),
-  );
-
-  let batchResult: D1Result[];
-  try {
-    batchResult = await c.env.DB.batch(statements);
-  } catch {
-    return c.json(apiErr('CONFLICT', '발주 상태 또는 항목이 변경되었습니다. 다시 시도해주세요.'), 409);
-  }
-  if ((batchResult[0] as D1Result).meta.changes === 0) {
-    return c.json(apiErr('CONFLICT', '초안 상태에서만 발주 항목을 추가할 수 있습니다.'), 409);
-  }
-
-  const targets = await c.env.DB.prepare(
-    `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
-       FROM order_items oi
-      WHERE oi.order_id = ? AND oi.is_deleted = 0`
-  ).bind(orderId).all();
-
-  return c.json(apiOk({ items: targets.results }));
+  return purchaseOrderResponse(c, await stage.value.execute(rows));
 });
 
 app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   const orderItemId = parseIntValue(c.req.param('itemId'), null);
 
@@ -1508,96 +1374,28 @@ app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '발주 ID 또는 항목 ID가 유효하지 않습니다.'), 400);
   }
 
-  const order = await c.env.DB.prepare(
-    'SELECT id, status FROM purchase_orders WHERE id = ? AND is_deleted = 0'
-  ).bind(orderId).first<{ id: number; status: string }>();
-  if (!order) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
-  if (order.status !== 'draft') {
-    return c.json(apiErr('INVALID_STATUS', '초안 상태에서만 발주 항목을 수정할 수 있습니다.'), 400);
-  }
+  const stage = await purchaseOrders(c.env.DB, actor.id).stageEditDraftItem(orderId);
+  if (!stage.ok) return purchaseOrderResponse(c, stage);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
-  const patch: string[] = [];
-  const params: unknown[] = [];
+  const change: OrderItemRevision = {};
 
   if ('ordered_qty' in payload) {
     const orderedQty = parseIntValue(String(payload.ordered_qty ?? ''), null);
     if (orderedQty === null || orderedQty <= 0) {
       return c.json(apiErr('INVALID_INPUT', 'ordered_qty는 1 이상의 정수여야 합니다.'), 400);
     }
-    patch.push('ordered_qty = ?');
-    params.push(orderedQty);
+    change.orderedQty = orderedQty;
   }
 
   if ('memo' in payload) {
-    patch.push('memo = ?');
-    params.push(payload.memo == null ? null : String(payload.memo));
+    change.memo = payload.memo == null ? null : String(payload.memo);
   }
 
-  if (!patch.length) {
-    return c.json(apiErr('INVALID_INPUT', '수정할 데이터가 없습니다.'), 400);
-  }
-
-  const before = await c.env.DB.prepare(
-    `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
-       FROM order_items oi
-      WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0`
-  ).bind(orderItemId, orderId).first();
-  if (!before) return c.json(apiErr('NOT_FOUND', '발주 항목을 찾지 못했습니다.'), 404);
-
-  if ('ordered_qty' in payload) {
-    const currentReceived = Number((before as any).received_qty || 0);
-    if (currentReceived > Number((payload as any).ordered_qty)) {
-      return c.json(apiErr('INVALID_INPUT', '수정하려는 수량이 이미 입고된 수량보다 작을 수 없습니다.'), 400);
-    }
-  }
-
-  const mutationToken = crypto.randomUUID();
-  const sql = `UPDATE order_items SET ${patch.join(', ')}, updated_at = datetime('now')
-    WHERE id = ? AND order_id = ? AND is_deleted = 0
-      AND EXISTS (SELECT 1 FROM purchase_orders WHERE creation_token = ?)`;
-  const batchResult = await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE purchase_orders SET creation_token = ?
-        WHERE id = ? AND is_deleted = 0 AND status = 'draft'`
-    ).bind(mutationToken, orderId),
-    c.env.DB.prepare(sql).bind(...params, orderItemId, orderId, mutationToken),
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       SELECT ?, 'update', 'order_item', oi.id, ?,
-              json_object(
-                'id', oi.id, 'order_id', oi.order_id, 'item_id', oi.item_id,
-                'ordered_qty', oi.ordered_qty, 'received_qty', oi.received_qty,
-                'memo', oi.memo
-              )
-         FROM order_items oi
-         JOIN purchase_orders po ON po.id = oi.order_id
-        WHERE oi.id = ? AND po.creation_token = ? AND changes() = 1`
-    ).bind(
-      user.id,
-      JSON.stringify(before),
-      orderItemId,
-      mutationToken,
-    ),
-    c.env.DB.prepare(
-      `UPDATE purchase_orders
-          SET creation_token = NULL, updated_at = datetime('now')
-        WHERE creation_token = ?`
-    ).bind(mutationToken),
-  ]);
-
-  if ((batchResult[0] as D1Result).meta.changes === 0 || (batchResult[1] as D1Result).meta.changes === 0) {
-    return c.json(apiErr('CONFLICT', '발주 상태 또는 항목이 변경되었습니다.'), 409);
-  }
-
-  const after = await c.env.DB.prepare(
-    `SELECT oi.id, oi.order_id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
-       FROM order_items oi
-      WHERE oi.id = ?`
-  ).bind(orderItemId).first();
-
-  return c.json(apiOk(after));
+  return purchaseOrderResponse(
+    c,
+    await stage.value.execute(orderItemId, change),
+  );
 });
 
 app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
