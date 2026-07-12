@@ -4,7 +4,13 @@ import * as React from 'react';
 import { ChevronDown, Minus, TrendingDown, TrendingUp } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { apiGet, apiPost, apiPatch, ApiError } from '@/lib/api';
+import {
+  purchaseOrderPaths,
+  purchaseOrderRowResultSchema,
+  type CreatePurchaseOrderWithItemsRequest,
+  type RevisePurchaseOrderRequest,
+} from '@here-is-order/http-contract/purchase-orders';
+import { apiGet, apiPatchDecoded, apiPostDecoded, ApiError } from '@/lib/api';
 import type { DashboardData } from '@/lib/types';
 import { getStockStatus, stockStatusLabel } from '@/lib/format';
 import { useSortable } from '@/lib/use-sortable';
@@ -137,12 +143,27 @@ function QuickOrderDialog({
     setSubmitting(true);
     setError('');
     try {
-      const order = await apiPost<{ id: number; title: string }>('/api/purchase-orders/with-items', {
-        title: title.trim(),
-        items: selectedItems,
-      });
+      const order = await apiPostDecoded(
+        purchaseOrderPaths.withItems,
+        purchaseOrderRowResultSchema,
+        {
+          title: title.trim(),
+          items: selectedItems,
+        } satisfies CreatePurchaseOrderWithItemsRequest,
+      );
+      if (order === null) {
+        throw new ApiError(
+          '생성된 발주서를 확인할 수 없습니다. 목록을 새로고침해주세요.',
+          502,
+          'INVALID_RESPONSE',
+        );
+      }
       if (confirm) {
-        await apiPatch(`/api/purchase-orders/${order.id}`, { status: 'ordered' });
+        await apiPatchDecoded(
+          purchaseOrderPaths.detail(order.id),
+          purchaseOrderRowResultSchema,
+          { status: 'ordered' } satisfies RevisePurchaseOrderRequest,
+        );
       }
       onSuccess(order.id);
     } catch (err) {

@@ -1,4 +1,5 @@
 import { env, exports } from 'cloudflare:workers';
+import { purchaseOrderDetailSchema } from '@here-is-order/http-contract/purchase-orders';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { withTestTrigger } from './helpers/test-trigger';
 
@@ -975,6 +976,11 @@ describe('발주 compatibility characterization', () => {
       ok: true;
       data: { items: Array<{ ordered_qty: number; memo: string | null }> };
     };
+    const decodedDetail = purchaseOrderDetailSchema.parse(populatedDetail.data);
+    expect(decodedDetail).toEqual(expect.objectContaining({
+      ordered_qty: 3,
+      received_qty: 0,
+    }));
     expect(populatedDetail.data.items).toEqual([
       expect.objectContaining({ ordered_qty: 3, memo: '' }),
     ]);

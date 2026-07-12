@@ -1,4 +1,15 @@
 import { Hono } from 'hono';
+import type { RuntimeSchema } from '@here-is-order/http-contract/envelope';
+import {
+  addPurchaseOrderItemsResultSchema,
+  deletePurchaseOrderResultSchema,
+  editPurchaseOrderItemResultSchema,
+  purchaseOrderDetailSchema,
+  purchaseOrderRoutePatterns,
+  purchaseOrderRowResultSchema,
+  purchaseOrderSummaryListSchema,
+  receivePurchaseOrderItemResultSchema,
+} from '@here-is-order/http-contract/purchase-orders';
 import {
   isPurchaseOrderStatus,
   purchaseOrders,
@@ -61,9 +72,10 @@ function apiErr(code: string, message: string, status = 400) {
 function purchaseOrderResponse<T>(
   c: any,
   result: PurchaseOrderResult<T>,
+  schema: RuntimeSchema<T>,
   successStatus: 200 | 201 = 200,
 ) {
-  if (result.ok) return c.json(apiOk(result.value), successStatus);
+  if (result.ok) return c.json(apiOk(schema.parse(result.value)), successStatus);
   const status = result.error.kind === 'invalid'
     ? 400
     : result.error.kind === 'not_found'
@@ -1118,7 +1130,7 @@ app.get('/api/dashboard', async (c) => {
   }));
 });
 
-app.get('/api/purchase-orders', async (c) => {
+app.get(purchaseOrderRoutePatterns.collection, async (c) => {
   const status = c.req.query('status');
   const q = c.req.query('q')?.trim() || '';
   const from = c.req.query('from');
@@ -1166,10 +1178,10 @@ app.get('/api/purchase-orders', async (c) => {
                ORDER BY po.id DESC`;
 
   const rows = await c.env.DB.prepare(sql).bind(...params).all();
-  return c.json(apiOk(rows.results));
+  return c.json(apiOk(purchaseOrderSummaryListSchema.parse(rows.results)));
 });
 
-app.post('/api/purchase-orders', async (c) => {
+app.post(purchaseOrderRoutePatterns.collection, async (c) => {
   const actor = c.get('user') as SessionUser;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const title = String(payload.title || '');
@@ -1182,11 +1194,12 @@ app.post('/api/purchase-orders', async (c) => {
       note,
       ...(requestedStatus === undefined ? {} : { requestedStatus }),
     }),
+    purchaseOrderRowResultSchema,
     201,
   );
 });
 
-app.post('/api/purchase-orders/with-items', async (c) => {
+app.post(purchaseOrderRoutePatterns.withItems, async (c) => {
   const actor = c.get('user') as SessionUser;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const title = String(payload.title || '');
@@ -1226,21 +1239,23 @@ app.post('/api/purchase-orders/with-items', async (c) => {
       note,
       items: parsedItems,
     }),
+    purchaseOrderRowResultSchema,
     201,
   );
 });
 
-app.get('/api/purchase-orders/:id', async (c) => {
+app.get(purchaseOrderRoutePatterns.detail, async (c) => {
   const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   if (!orderId) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
   return purchaseOrderResponse(
     c,
     await purchaseOrders(c.env.DB, actor.id).getDetail(orderId),
+    purchaseOrderDetailSchema,
   );
 });
 
-app.patch('/api/purchase-orders/:id', async (c) => {
+app.patch(purchaseOrderRoutePatterns.detail, async (c) => {
   const actor = c.get('user') as SessionUser;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
@@ -1280,26 +1295,28 @@ app.patch('/api/purchase-orders/:id', async (c) => {
   return purchaseOrderResponse(
     c,
     await purchaseOrders(c.env.DB, actor.id).revise(id, change),
+    purchaseOrderRowResultSchema,
   );
 });
 
-app.delete('/api/purchase-orders/:id', async (c) => {
+app.delete(purchaseOrderRoutePatterns.detail, async (c) => {
   const actor = c.get('user') as SessionUser;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
   return purchaseOrderResponse(
     c,
     await purchaseOrders(c.env.DB, actor.id).deleteDraft(id),
+    deletePurchaseOrderResultSchema,
   );
 });
 
-app.post('/api/purchase-orders/:id/items', async (c) => {
+app.post(purchaseOrderRoutePatterns.items, async (c) => {
   const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   if (!orderId) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
 
   const stage = await purchaseOrders(c.env.DB, actor.id).stageAddItemsToDraft(orderId);
-  if (!stage.ok) return purchaseOrderResponse(c, stage);
+  if (!stage.ok) return purchaseOrderResponse(c, stage, addPurchaseOrderItemsResultSchema);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const rawRows: Array<{ item_id?: unknown; ordered_qty?: unknown; memo?: unknown }> = (() => {
@@ -1344,10 +1361,14 @@ app.post('/api/purchase-orders/:id/items', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '항목과 수량을 확인해주세요.'), 400);
   }
 
-  return purchaseOrderResponse(c, await stage.value.execute(rows));
+  return purchaseOrderResponse(
+    c,
+    await stage.value.execute(rows),
+    addPurchaseOrderItemsResultSchema,
+  );
 });
 
-app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
+app.patch(purchaseOrderRoutePatterns.item, async (c) => {
   const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   const orderItemId = parseIntValue(c.req.param('itemId'), null);
@@ -1357,7 +1378,7 @@ app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
   }
 
   const stage = await purchaseOrders(c.env.DB, actor.id).stageEditDraftItem(orderId);
-  if (!stage.ok) return purchaseOrderResponse(c, stage);
+  if (!stage.ok) return purchaseOrderResponse(c, stage, editPurchaseOrderItemResultSchema);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const change: OrderItemRevision = {};
@@ -1377,10 +1398,11 @@ app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
   return purchaseOrderResponse(
     c,
     await stage.value.execute(orderItemId, change),
+    editPurchaseOrderItemResultSchema,
   );
 });
 
-app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
+app.post(purchaseOrderRoutePatterns.receive, async (c) => {
   const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   const orderItemId = parseIntValue(c.req.param('itemId'), null);
@@ -1400,10 +1422,14 @@ app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
     orderItemId,
     qty,
   );
-  if (!stage.ok) return purchaseOrderResponse(c, stage);
+  if (!stage.ok) return purchaseOrderResponse(c, stage, receivePurchaseOrderItemResultSchema);
 
   const note = payload.note == null ? null : String(payload.note);
-  return purchaseOrderResponse(c, await stage.value.execute(note));
+  return purchaseOrderResponse(
+    c,
+    await stage.value.execute(note),
+    receivePurchaseOrderItemResultSchema,
+  );
 });
 
 app.get('/api/audit-logs', async (c) => {
