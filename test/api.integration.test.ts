@@ -47,6 +47,19 @@ function apiRequest(path: string, sessionToken: string, init: RequestInit = {}) 
   );
 }
 
+async function expectApiError(
+  response: Response,
+  status: number,
+  code: string,
+  message: string,
+) {
+  expect(response.status).toBe(status);
+  await expect(response.json()).resolves.toEqual({
+    ok: false,
+    error: { code, message },
+  });
+}
+
 describe('사용자 관리 권한', () => {
   it('staff 사용자의 사용자 목록과 감사로그 조회를 거부한다', async () => {
     const sessionToken = 'staff-session-token';
@@ -191,6 +204,421 @@ describe('발주 부분입고', () => {
         current_stock: 4,
       }),
     ]);
+  });
+
+  it('preserves path falsiness, quantity coercion, malformed JSON, and top-level null handling', async () => {
+    const sessionToken = await createSession();
+
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/0/items/1/receive', sessionToken, {
+        method: 'POST',
+        body: 'null',
+      }),
+      400,
+      'INVALID_INPUT',
+      '발주 ID 또는 항목 ID가 유효하지 않습니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/1/items/0/receive', sessionToken, {
+        method: 'POST',
+        body: JSON.stringify({ qty: 1 }),
+      }),
+      400,
+      'INVALID_INPUT',
+      '발주 ID 또는 항목 ID가 유효하지 않습니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/999999/items/999999/receive', sessionToken, {
+        method: 'POST',
+        body: '{',
+      }),
+      400,
+      'INVALID_INPUT',
+      'qty는 1 이상의 정수여야 합니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/999999/items/999999/receive', sessionToken, {
+        method: 'POST',
+        body: JSON.stringify({ qty: '1.5' }),
+      }),
+      400,
+      'INVALID_INPUT',
+      'qty는 1 이상의 정수여야 합니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/999999/items/999999/receive', sessionToken, {
+        method: 'POST',
+        body: JSON.stringify({ qty: [1] }),
+      }),
+      404,
+      'NOT_FOUND',
+      '발주서를 찾지 못했습니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/-1/items/-2/receive', sessionToken, {
+        method: 'POST',
+        body: JSON.stringify({ qty: ' 1 ' }),
+      }),
+      404,
+      'NOT_FOUND',
+      '발주서를 찾지 못했습니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/purchase-orders/999999/items/999999/receive', sessionToken, {
+        method: 'POST',
+        body: 'null',
+      }),
+      500,
+      'INTERNAL_ERROR',
+      '서버 오류가 발생했습니다.',
+    );
+  });
+
+  it('keeps receipt preflight order and messages ahead of throwing note conversion', async () => {
+    const sessionToken = await createSession();
+    const throwingNote = { toString: null, valueOf: null };
+    const request = (orderId: number, orderItemId: number, qty = 1) => apiRequest(
+      `/api/purchase-orders/${orderId}/items/${orderItemId}/receive`,
+      sessionToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({ qty, note: throwingNote }),
+      },
+    );
+    const createOrder = async (title: string, status: string) => {
+      const result = await env.DB.prepare(
+        'INSERT INTO purchase_orders (title, status) VALUES (?, ?)',
+      ).bind(title, status).run();
+      return Number(result.meta.last_row_id);
+    };
+
+    await expectApiError(
+      await request(999999, 999999),
+      404,
+      'NOT_FOUND',
+      '발주서를 찾지 못했습니다.',
+    );
+
+    const draftOrderId = await createOrder('receipt draft preflight', 'draft');
+    await expectApiError(
+      await request(draftOrderId, 999999),
+      400,
+      'INVALID_STATUS',
+      '초안 상태에서는 입고 처리할 수 없습니다.',
+    );
+
+    const canceledOrderId = await createOrder('receipt canceled preflight', 'canceled');
+    await expectApiError(
+      await request(canceledOrderId, 999999),
+      400,
+      'INVALID_STATUS',
+      '취소된 발주서는 입고 처리할 수 없습니다.',
+    );
+
+    const fullOrderId = await createOrder('receipt full preflight', 'fully_received');
+    await expectApiError(
+      await request(fullOrderId, 999999),
+      400,
+      'INVALID_STATUS',
+      '이미 입고 완료된 발주서입니다.',
+    );
+
+    const missingItemOrderId = await createOrder('receipt missing item', 'ordered');
+    await expectApiError(
+      await request(missingItemOrderId, 999999),
+      404,
+      'NOT_FOUND',
+      '발주 항목을 찾지 못했습니다.',
+    );
+
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('receipt preflight 원두').run();
+    const itemId = Number(item.meta.last_row_id);
+
+    const completedItemOrderId = await createOrder('receipt completed item', 'ordered');
+    const completedItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 1, 1)`,
+    ).bind(completedItemOrderId, itemId).run();
+    await expectApiError(
+      await request(completedItemOrderId, Number(completedItem.meta.last_row_id)),
+      409,
+      'RECEIVE_CONFLICT',
+      '이미 입고 완료된 항목입니다.',
+    );
+
+    const limitedOrderId = await createOrder('receipt limited item', 'ordered');
+    const limitedItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 3, 1)`,
+    ).bind(limitedOrderId, itemId).run();
+    await expectApiError(
+      await request(limitedOrderId, Number(limitedItem.meta.last_row_id), 3),
+      409,
+      'RECEIVE_CONFLICT',
+      '현재 최대 2개까지 입고 가능합니다.',
+    );
+
+    const validOrderId = await createOrder('receipt throwing note', 'ordered');
+    const validItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 1, 0)`,
+    ).bind(validOrderId, itemId).run();
+    await expectApiError(
+      await request(validOrderId, Number(validItem.meta.last_row_id)),
+      500,
+      'INTERNAL_ERROR',
+      '서버 오류가 발생했습니다.',
+    );
+  });
+
+  it('leaves inactive inventory and unexpected statuses to the first receipt statement', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('receipt batch eligibility 원두').run();
+    const itemId = Number(item.meta.last_row_id);
+    const inactiveOrder = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'ordered')`,
+    ).bind('inactive inventory receipt').run();
+    const inactiveOrderId = Number(inactiveOrder.meta.last_row_id);
+    const inactiveOrderItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 2, 0)`,
+    ).bind(inactiveOrderId, itemId).run();
+    const inactiveOrderItemId = Number(inactiveOrderItem.meta.last_row_id);
+    await env.DB.prepare(
+      `UPDATE items SET is_deleted = 1, deleted_at = datetime('now') WHERE id = ?`,
+    ).bind(itemId).run();
+
+    await expectApiError(
+      await apiRequest(
+        `/api/purchase-orders/${inactiveOrderId}/items/${inactiveOrderItemId}/receive`,
+        sessionToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({ qty: 1 }),
+        },
+      ),
+      409,
+      'RECEIVE_CONFLICT',
+      '남은 입고 수량 또는 발주 상태가 변경되었습니다.',
+    );
+    await expectApiError(
+      await apiRequest(
+        `/api/purchase-orders/${inactiveOrderId}/items/${inactiveOrderItemId}/receive`,
+        sessionToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            qty: 1,
+            note: { toString: null, valueOf: null },
+          }),
+        },
+      ),
+      500,
+      'INTERNAL_ERROR',
+      '서버 오류가 발생했습니다.',
+    );
+
+    const unexpectedItem = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('unexpected status receipt 원두').run();
+    const unexpectedOrder = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'ordered')`,
+    ).bind('unexpected status receipt').run();
+    const unexpectedOrderId = Number(unexpectedOrder.meta.last_row_id);
+    const unexpectedOrderItem = await env.DB.prepare(
+      `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+       VALUES (?, ?, 1, 0)`,
+    ).bind(unexpectedOrderId, unexpectedItem.meta.last_row_id).run();
+
+    await env.DB.prepare(
+      'DROP TRIGGER IF EXISTS trg_purchase_orders_status_transition',
+    ).run();
+    try {
+      await env.DB.exec('PRAGMA ignore_check_constraints = ON');
+      await env.DB.prepare(
+        `UPDATE purchase_orders SET status = 'unexpected' WHERE id = ?`,
+      ).bind(unexpectedOrderId).run();
+    } finally {
+      try {
+        await env.DB.exec('PRAGMA ignore_check_constraints = OFF');
+      } finally {
+        await env.DB.prepare(
+          `CREATE TRIGGER IF NOT EXISTS trg_purchase_orders_status_transition
+           BEFORE UPDATE OF status ON purchase_orders
+           WHEN NEW.status <> OLD.status
+            AND NOT (
+              (OLD.status = 'draft' AND NEW.status IN ('ordered', 'canceled'))
+              OR (OLD.status = 'ordered' AND NEW.status IN ('partially_received', 'fully_received', 'canceled'))
+              OR (OLD.status = 'partially_received' AND NEW.status = 'fully_received')
+            )
+           BEGIN
+             SELECT RAISE(ABORT, 'INVALID_ORDER_STATUS_TRANSITION');
+           END`,
+        ).run();
+      }
+    }
+
+    await expectApiError(
+      await apiRequest(
+        `/api/purchase-orders/${unexpectedOrderId}/items/${unexpectedOrderItem.meta.last_row_id}/receive`,
+        sessionToken,
+        { method: 'POST', body: JSON.stringify({ qty: 1 }) },
+      ),
+      409,
+      'RECEIVE_CONFLICT',
+      '남은 입고 수량 또는 발주 상태가 변경되었습니다.',
+    );
+  });
+
+  it('preserves omitted, null, and empty receipt reasons', async () => {
+    const sessionToken = await createSession();
+    const cases = [
+      { label: 'omitted', includeNote: false, note: null, reason: '부분입고 처리' },
+      { label: 'null', includeNote: true, note: null, reason: '부분입고 처리' },
+      { label: 'empty', includeNote: true, note: '', reason: '' },
+    ] as const;
+
+    for (const testCase of cases) {
+      const item = await env.DB.prepare(
+        `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+         VALUES (?, '개', 0, 0, 0, 0)`,
+      ).bind(`receipt reason ${testCase.label}`).run();
+      const order = await env.DB.prepare(
+        `INSERT INTO purchase_orders (title, status) VALUES (?, 'ordered')`,
+      ).bind(`receipt reason ${testCase.label}`).run();
+      const orderItem = await env.DB.prepare(
+        `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty)
+         VALUES (?, ?, 1, 0)`,
+      ).bind(order.meta.last_row_id, item.meta.last_row_id).run();
+      const payload: { qty: number; note?: string | null } = { qty: 1 };
+      if (testCase.includeNote) payload.note = testCase.note;
+
+      const response = await apiRequest(
+        `/api/purchase-orders/${order.meta.last_row_id}/items/${orderItem.meta.last_row_id}/receive`,
+        sessionToken,
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
+      expect(response.status).toBe(200);
+      const ledger = await env.DB.prepare(
+        `SELECT reason, operation_token
+           FROM stock_transactions WHERE order_item_id = ?`,
+      ).bind(orderItem.meta.last_row_id).first<{
+        reason: string | null;
+        operation_token: string | null;
+      }>();
+      expect(ledger).toEqual({
+        reason: testCase.reason,
+        operation_token: expect.any(String),
+      });
+    }
+  });
+
+  it('returns 200 when receipt order and order-item readbacks independently disappear', async () => {
+    const sessionToken = await createSession();
+    const createFixture = async (label: string) => {
+      const item = await env.DB.prepare(
+        `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+         VALUES (?, '개', 0, 0, 0, 0)`,
+      ).bind(`${label} 원두`).run();
+      const order = await env.DB.prepare(
+        `INSERT INTO purchase_orders (title, status) VALUES (?, 'ordered')`,
+      ).bind(`${label} 발주`).run();
+      const orderItem = await env.DB.prepare(
+        `INSERT INTO order_items (order_id, item_id, ordered_qty, received_qty, memo)
+         VALUES (?, ?, 1, 0, ?)`,
+      ).bind(order.meta.last_row_id, item.meta.last_row_id, `${label} memo`).run();
+      return {
+        itemId: Number(item.meta.last_row_id),
+        orderId: Number(order.meta.last_row_id),
+        orderItemId: Number(orderItem.meta.last_row_id),
+      };
+    };
+
+    const removedItem = await createFixture('removed item readback');
+    await env.DB.prepare(
+      `CREATE TRIGGER test_api_remove_received_item_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'receive'
+         AND NEW.entity_type = 'order_item'
+         AND NEW.entity_id = ${removedItem.orderItemId}
+       BEGIN
+         DELETE FROM order_items WHERE id = NEW.entity_id;
+       END`,
+    ).run();
+    let removedItemResponse: Response;
+    try {
+      removedItemResponse = await apiRequest(
+        `/api/purchase-orders/${removedItem.orderId}/items/${removedItem.orderItemId}/receive`,
+        sessionToken,
+        { method: 'POST', body: JSON.stringify({ qty: 1 }) },
+      );
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_api_remove_received_item_before_readback',
+      ).run();
+    }
+    expect(removedItemResponse.status).toBe(200);
+    await expect(removedItemResponse.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        order: expect.objectContaining({
+          id: removedItem.orderId,
+          status: 'fully_received',
+        }),
+        order_item: null,
+      },
+    });
+
+    const removedOrder = await createFixture('removed order readback');
+    const holdingOrder = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('receipt API readback holding order').run();
+    await env.DB.prepare(
+      `CREATE TRIGGER test_api_remove_received_order_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'receive'
+         AND NEW.entity_type = 'order_item'
+         AND NEW.entity_id = ${removedOrder.orderItemId}
+       BEGIN
+         UPDATE order_items
+            SET order_id = ${Number(holdingOrder.meta.last_row_id)}
+          WHERE id = NEW.entity_id;
+         DELETE FROM purchase_orders WHERE id = ${removedOrder.orderId};
+       END`,
+    ).run();
+    let removedOrderResponse: Response;
+    try {
+      removedOrderResponse = await apiRequest(
+        `/api/purchase-orders/${removedOrder.orderId}/items/${removedOrder.orderItemId}/receive`,
+        sessionToken,
+        { method: 'POST', body: JSON.stringify({ qty: 1, note: '' }) },
+      );
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_api_remove_received_order_before_readback',
+      ).run();
+    }
+    expect(removedOrderResponse.status).toBe(200);
+    await expect(removedOrderResponse.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        order: null,
+        order_item: {
+          id: removedOrder.orderItemId,
+          item_id: removedOrder.itemId,
+          ordered_qty: 1,
+          received_qty: 1,
+          memo: 'removed order readback memo',
+        },
+      },
+    });
   });
 });
 

@@ -430,3 +430,360 @@ describe('Purchase Order module draft items', () => {
     }
   });
 });
+
+describe('Purchase Order module partial receipt', () => {
+  it('allows one concurrent receipt and keeps stock, ledger, status, and audit aligned', async () => {
+    const { actorUserId, module } = await createActor();
+    const itemId = await createInventoryItem('receive 원두');
+    const draft = await module.createDraftWithItems({
+      title: 'receive 발주',
+      note: null,
+      items: [{ itemId, orderedQty: 5, memo: null }],
+    });
+    if (!draft.ok || !draft.value) throw new Error('expected creation success');
+    const detail = await module.getDetail(draft.value.id);
+    if (!detail.ok) throw new Error('expected detail success');
+    const orderItemId = detail.value.items[0].id;
+    const confirmed = await module.revise(draft.value.id, {
+      requestedStatus: 'ordered',
+    });
+    expect(confirmed).toEqual({
+      ok: true,
+      value: expect.objectContaining({ status: 'ordered' }),
+    });
+
+    const receive = () => module.receive(draft.value.id, orderItemId, {
+      quantity: 4,
+      note: null,
+    });
+    const results = await Promise.all([receive(), receive()]);
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok)).toEqual([
+      {
+        ok: false,
+        error: {
+          kind: 'conflict',
+          code: 'RECEIVE_CONFLICT',
+          message: '남은 입고 수량 또는 발주 상태가 변경되었습니다.',
+        },
+      },
+    ]);
+
+    const item = await env.DB.prepare(
+      `SELECT current_stock FROM items WHERE id = ?`,
+    ).bind(itemId).first<{ current_stock: number }>();
+    expect(item?.current_stock).toBe(4);
+    const ledger = await env.DB.prepare(
+      `SELECT quantity, reason, order_item_id, operation_token
+         FROM stock_transactions WHERE item_id = ?`,
+    ).bind(itemId).all<{
+      quantity: number;
+      reason: string;
+      order_item_id: number;
+      operation_token: string | null;
+    }>();
+    expect(ledger.results).toEqual([
+      expect.objectContaining({
+        quantity: 4,
+        reason: '부분입고 처리',
+        order_item_id: orderItemId,
+      }),
+    ]);
+    expect(ledger.results[0].operation_token).not.toBeNull();
+
+    const after = await module.getDetail(draft.value.id);
+    expect(after).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        status: 'partially_received',
+        items: [expect.objectContaining({ received_qty: 4, remaining_qty: 1 })],
+      }),
+    });
+    const audit = await env.DB.prepare(
+      `SELECT action, entity_type, actor_user_id, before_json, after_json
+         FROM audit_logs
+        WHERE action = 'receive' AND entity_type = 'order_item' AND entity_id = ?`,
+    ).bind(orderItemId).all();
+    expect(audit.results).toEqual([
+      expect.objectContaining({
+        actor_user_id: actorUserId,
+        before_json: JSON.stringify({
+          id: orderItemId,
+          item_id: itemId,
+          ordered_qty: 5,
+          received_qty: 0,
+        }),
+        after_json: JSON.stringify({
+          id: orderItemId,
+          item_id: itemId,
+          ordered_qty: 5,
+          received_qty: 4,
+        }),
+      }),
+    ]);
+  });
+
+  it('rolls back receipt stock and quantities when receive audit insertion fails', async () => {
+    const { module } = await createActor();
+    const itemId = await createInventoryItem('rollback receive 원두');
+    const draft = await module.createDraftWithItems({
+      title: 'rollback receive 발주',
+      note: null,
+      items: [{ itemId, orderedQty: 2, memo: null }],
+    });
+    if (!draft.ok || !draft.value) throw new Error('expected creation success');
+    const detail = await module.getDetail(draft.value.id);
+    if (!detail.ok) throw new Error('expected detail success');
+    const confirmed = await module.revise(draft.value.id, {
+      requestedStatus: 'ordered',
+    });
+    expect(confirmed).toEqual({
+      ok: true,
+      value: expect.objectContaining({ status: 'ordered' }),
+    });
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_fail_receive_audit
+       BEFORE INSERT ON audit_logs
+       WHEN NEW.action = 'receive'
+       BEGIN
+         SELECT RAISE(ABORT, 'TEST_RECEIVE_AUDIT_FAILURE');
+       END`,
+    ).run();
+    try {
+      const received = await module.receive(
+        draft.value.id,
+        detail.value.items[0].id,
+        { quantity: 1, note: '' },
+      );
+      expect(received).toEqual({
+        ok: false,
+        error: expect.objectContaining({
+          kind: 'conflict',
+          code: 'RECEIVE_CONFLICT',
+        }),
+      });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_fail_receive_audit',
+      ).run();
+    }
+
+    const item = await env.DB.prepare(
+      `SELECT current_stock FROM items WHERE id = ?`,
+    ).bind(itemId).first<{ current_stock: number }>();
+    expect(item?.current_stock).toBe(0);
+    const orderItem = await env.DB.prepare(
+      `SELECT received_qty FROM order_items WHERE id = ?`,
+    ).bind(detail.value.items[0].id).first<{ received_qty: number }>();
+    expect(orderItem?.received_qty).toBe(0);
+    const ledgerCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM stock_transactions WHERE item_id = ?`,
+    ).bind(itemId).first<{ count: number }>();
+    expect(Number(ledgerCount?.count ?? 0)).toBe(0);
+  });
+
+  it('retains greater-than-or-equal status aggregation for legacy over-received rows', async () => {
+    const { module } = await createActor();
+    const legacyItemId = await createInventoryItem('legacy over-received 원두');
+    const targetItemId = await createInventoryItem('legacy receipt target 원두');
+    const draft = await module.createDraftWithItems({
+      title: 'legacy aggregation 발주',
+      note: null,
+      items: [
+        { itemId: legacyItemId, orderedQty: 1, memo: null },
+        { itemId: targetItemId, orderedQty: 2, memo: null },
+      ],
+    });
+    if (!draft.ok || !draft.value) throw new Error('expected creation success');
+    const detail = await module.getDetail(draft.value.id);
+    if (!detail.ok) throw new Error('expected detail success');
+    const legacyOrderItem = detail.value.items.find(
+      (row) => row.item_id === legacyItemId,
+    );
+    const targetOrderItem = detail.value.items.find(
+      (row) => row.item_id === targetItemId,
+    );
+    if (!legacyOrderItem || !targetOrderItem) {
+      throw new Error('expected both order items');
+    }
+    const confirmed = await module.revise(draft.value.id, {
+      requestedStatus: 'ordered',
+    });
+    expect(confirmed).toEqual({
+      ok: true,
+      value: expect.objectContaining({ status: 'ordered' }),
+    });
+
+    await env.DB.prepare(
+      'DROP TRIGGER IF EXISTS trg_order_items_validate_update',
+    ).run();
+    try {
+      await env.DB.prepare(
+        `UPDATE order_items SET received_qty = 3 WHERE id = ?`,
+      ).bind(legacyOrderItem.id).run();
+    } finally {
+      await env.DB.prepare(
+        `CREATE TRIGGER IF NOT EXISTS trg_order_items_validate_update
+         BEFORE UPDATE OF order_id, item_id, ordered_qty, received_qty, is_deleted ON order_items
+         WHEN NEW.ordered_qty <= 0 OR NEW.received_qty < 0 OR NEW.received_qty > NEW.ordered_qty
+           OR NEW.is_deleted NOT IN (0, 1)
+           OR (NEW.is_deleted = 0 AND (
+             NOT EXISTS (SELECT 1 FROM items i WHERE i.id = NEW.item_id AND i.is_deleted = 0)
+             OR NOT EXISTS (
+               SELECT 1 FROM purchase_orders po
+                WHERE po.id = NEW.order_id AND po.is_deleted = 0
+             )
+           ))
+         BEGIN
+           SELECT RAISE(ABORT, 'INVALID_ORDER_ITEM');
+         END`,
+      ).run();
+    }
+
+    const received = await module.receive(
+      draft.value.id,
+      targetOrderItem.id,
+      { quantity: 1, note: null },
+    );
+    expect(received).toEqual({
+      ok: true,
+      value: {
+        order: expect.objectContaining({ status: 'fully_received' }),
+        order_item: expect.objectContaining({
+          id: targetOrderItem.id,
+          received_qty: 1,
+        }),
+      },
+    });
+  });
+
+  it('returns independently nullable order and order-item receipt readbacks', async () => {
+    const { module } = await createActor();
+
+    const removedItemId = await createInventoryItem('removed receipt item 원두');
+    const removedItemDraft = await module.createDraftWithItems({
+      title: 'removed receipt item 발주',
+      note: null,
+      items: [{ itemId: removedItemId, orderedQty: 1, memo: 'item memo' }],
+    });
+    if (!removedItemDraft.ok || !removedItemDraft.value) {
+      throw new Error('expected creation success');
+    }
+    const removedItemDetail = await module.getDetail(removedItemDraft.value.id);
+    if (!removedItemDetail.ok) throw new Error('expected detail success');
+    const removedOrderItemId = removedItemDetail.value.items[0].id;
+    const removedItemConfirmed = await module.revise(
+      removedItemDraft.value.id,
+      { requestedStatus: 'ordered' },
+    );
+    expect(removedItemConfirmed).toEqual({
+      ok: true,
+      value: expect.objectContaining({ status: 'ordered' }),
+    });
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_remove_received_item_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'receive'
+         AND NEW.entity_type = 'order_item'
+         AND NEW.entity_id = ${removedOrderItemId}
+       BEGIN
+         DELETE FROM order_items WHERE id = NEW.entity_id;
+       END`,
+    ).run();
+    try {
+      const received = await module.receive(
+        removedItemDraft.value.id,
+        removedOrderItemId,
+        { quantity: 1, note: null },
+      );
+      expect(received).toEqual({
+        ok: true,
+        value: {
+          order: expect.objectContaining({
+            id: removedItemDraft.value.id,
+            status: 'fully_received',
+          }),
+          order_item: null,
+        },
+      });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_remove_received_item_before_readback',
+      ).run();
+    }
+
+    const removedOrderItemInventoryId = await createInventoryItem(
+      'removed receipt order 원두',
+    );
+    const removedOrderDraft = await module.createDraftWithItems({
+      title: 'removed receipt order 발주',
+      note: null,
+      items: [{
+        itemId: removedOrderItemInventoryId,
+        orderedQty: 1,
+        memo: 'order memo',
+      }],
+    });
+    if (!removedOrderDraft.ok || !removedOrderDraft.value) {
+      throw new Error('expected creation success');
+    }
+    const removedOrderDetail = await module.getDetail(removedOrderDraft.value.id);
+    if (!removedOrderDetail.ok) throw new Error('expected detail success');
+    const retainedOrderItemId = removedOrderDetail.value.items[0].id;
+    const removedOrderConfirmed = await module.revise(
+      removedOrderDraft.value.id,
+      { requestedStatus: 'ordered' },
+    );
+    expect(removedOrderConfirmed).toEqual({
+      ok: true,
+      value: expect.objectContaining({ status: 'ordered' }),
+    });
+    const holdingOrder = await module.createDraft({
+      title: 'receipt readback holding order',
+      note: null,
+    });
+    if (!holdingOrder.ok || !holdingOrder.value) {
+      throw new Error('expected holding order creation success');
+    }
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_remove_received_order_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'receive'
+         AND NEW.entity_type = 'order_item'
+         AND NEW.entity_id = ${retainedOrderItemId}
+       BEGIN
+         UPDATE order_items
+            SET order_id = ${holdingOrder.value.id}
+          WHERE id = NEW.entity_id;
+         DELETE FROM purchase_orders WHERE id = ${removedOrderDraft.value.id};
+       END`,
+    ).run();
+    try {
+      const received = await module.receive(
+        removedOrderDraft.value.id,
+        retainedOrderItemId,
+        { quantity: 1, note: '' },
+      );
+      expect(received).toEqual({
+        ok: true,
+        value: {
+          order: null,
+          order_item: {
+            id: retainedOrderItemId,
+            item_id: removedOrderItemInventoryId,
+            ordered_qty: 1,
+            received_qty: 1,
+            memo: 'order memo',
+          },
+        },
+      });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_remove_received_order_before_readback',
+      ).run();
+    }
+  });
+});

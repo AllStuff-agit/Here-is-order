@@ -91,6 +91,19 @@ export type OrderItemRevision = {
   memo?: string | null;
 };
 
+export type PartialReceiptInput = {
+  quantity: number;
+  note?: string | null;
+};
+
+export type PartialReceiptResult = {
+  order: PurchaseOrderRow | null;
+  order_item: Pick<
+    OrderItemRow,
+    'id' | 'item_id' | 'ordered_qty' | 'received_qty' | 'memo'
+  > | null;
+};
+
 export type AddItemsToDraftResult = {
   items: OrderItemRow[];
 };
@@ -108,6 +121,12 @@ export type EditDraftItemStage = {
     orderItemId: number,
     change: OrderItemRevision,
   ): Promise<PurchaseOrderResult<OrderItemRow | null>>;
+};
+
+export type PartialReceiptStage = {
+  execute(
+    note: string | null,
+  ): Promise<PurchaseOrderResult<PartialReceiptResult>>;
 };
 
 export interface PurchaseOrderModule {
@@ -140,6 +159,16 @@ export interface PurchaseOrderModule {
     orderItemId: number,
     change: OrderItemRevision,
   ): Promise<PurchaseOrderResult<OrderItemRow | null>>;
+  stageReceive(
+    orderId: number,
+    orderItemId: number,
+    quantity: number,
+  ): Promise<PurchaseOrderResult<PartialReceiptStage>>;
+  receive(
+    orderId: number,
+    orderItemId: number,
+    receipt: PartialReceiptInput,
+  ): Promise<PurchaseOrderResult<PartialReceiptResult>>;
 }
 
 export function purchaseOrders(
@@ -156,6 +185,8 @@ export function purchaseOrders(
     addItemsToDraft,
     stageEditDraftItem,
     editDraftItem,
+    stageReceive,
+    receive,
   };
 
   async function createDraft(
@@ -668,6 +699,191 @@ export function purchaseOrders(
     ).bind(orderItemId).first<OrderItemRow>();
 
     return success(after);
+  }
+
+  async function stageReceive(
+    orderId: number,
+    orderItemId: number,
+    quantity: number,
+  ): Promise<PurchaseOrderResult<PartialReceiptStage>> {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      return invalid('INVALID_INPUT', 'qty는 1 이상의 정수여야 합니다.');
+    }
+
+    const order = await db.prepare(
+      'SELECT id, status FROM purchase_orders WHERE id = ? AND is_deleted = 0',
+    ).bind(orderId).first<{ id: number; status: string }>();
+    if (!order) return notFound('발주서를 찾지 못했습니다.');
+
+    if (order.status === 'draft') {
+      return invalid('INVALID_STATUS', '초안 상태에서는 입고 처리할 수 없습니다.');
+    }
+    if (order.status === 'canceled') {
+      return invalid('INVALID_STATUS', '취소된 발주서는 입고 처리할 수 없습니다.');
+    }
+    if (order.status === 'fully_received') {
+      return invalid('INVALID_STATUS', '이미 입고 완료된 발주서입니다.');
+    }
+
+    const target = await db.prepare(
+      `SELECT oi.id, oi.item_id, oi.ordered_qty, oi.received_qty
+         FROM order_items oi
+        WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0`,
+    ).bind(orderItemId, orderId).first<{
+      id: number;
+      item_id: number;
+      ordered_qty: number;
+      received_qty: number;
+    }>();
+    if (!target) return notFound('발주 항목을 찾지 못했습니다.');
+
+    const remain = target.ordered_qty - target.received_qty;
+    if (remain <= 0) {
+      return conflict('RECEIVE_CONFLICT', '이미 입고 완료된 항목입니다.');
+    }
+    if (quantity > remain) {
+      return conflict(
+        'RECEIVE_CONFLICT',
+        `현재 최대 ${remain}개까지 입고 가능합니다.`,
+      );
+    }
+
+    return success({
+      execute(note) {
+        return receiveStagedOrderItem(
+          orderId,
+          orderItemId,
+          target.item_id,
+          quantity,
+          note,
+        );
+      },
+    });
+  }
+
+  async function receive(
+    orderId: number,
+    orderItemId: number,
+    receipt: PartialReceiptInput,
+  ): Promise<PurchaseOrderResult<PartialReceiptResult>> {
+    const stage = await stageReceive(orderId, orderItemId, receipt.quantity);
+    if (!stage.ok) return stage;
+    const note = receipt.note == null ? null : String(receipt.note);
+    return stage.value.execute(note);
+  }
+
+  async function receiveStagedOrderItem(
+    orderId: number,
+    orderItemId: number,
+    itemId: number,
+    quantity: number,
+    note: string | null,
+  ): Promise<PurchaseOrderResult<PartialReceiptResult>> {
+    const operationToken = crypto.randomUUID();
+    const reason = note == null ? '부분입고 처리' : note;
+    const statements = [
+      db.prepare(
+        `INSERT INTO stock_transactions
+           (item_id, movement_type, quantity, order_item_id, reason, created_by, operation_token)
+         SELECT oi.item_id, 'IN', ?, oi.id, ?, ?, ?
+           FROM order_items oi
+           JOIN purchase_orders po ON po.id = oi.order_id
+           JOIN items i ON i.id = oi.item_id
+          WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0
+            AND po.is_deleted = 0 AND po.status IN ('ordered', 'partially_received')
+            AND i.is_deleted = 0
+            AND oi.received_qty + ? <= oi.ordered_qty`,
+      ).bind(
+        quantity,
+        reason,
+        actorUserId,
+        operationToken,
+        orderItemId,
+        orderId,
+        quantity,
+      ),
+      db.prepare(
+        `UPDATE order_items
+            SET received_qty = received_qty + ?, updated_at = datetime('now')
+          WHERE id = ? AND order_id = ?
+            AND EXISTS (
+              SELECT 1 FROM stock_transactions WHERE operation_token = ?
+            )`,
+      ).bind(quantity, orderItemId, orderId, operationToken),
+      db.prepare(
+        `UPDATE items
+            SET current_stock = current_stock + ?, updated_at = datetime('now')
+          WHERE id = ?
+            AND EXISTS (
+              SELECT 1 FROM stock_transactions WHERE operation_token = ?
+            )`,
+      ).bind(quantity, itemId, operationToken),
+      db.prepare(
+        `UPDATE purchase_orders
+            SET status = (
+                  SELECT CASE
+                    WHEN SUM(received_qty) >= SUM(ordered_qty) THEN 'fully_received'
+                    WHEN SUM(received_qty) > 0 THEN 'partially_received'
+                    ELSE 'ordered'
+                  END
+                    FROM order_items
+                   WHERE order_id = ? AND is_deleted = 0
+                ),
+                updated_at = datetime('now')
+          WHERE id = ? AND status IN ('ordered', 'partially_received')
+            AND EXISTS (
+              SELECT 1 FROM stock_transactions WHERE operation_token = ?
+            )`,
+      ).bind(orderId, orderId, operationToken),
+      db.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         SELECT ?, 'receive', 'order_item', oi.id,
+                json_object(
+                  'id', oi.id,
+                  'item_id', oi.item_id,
+                  'ordered_qty', oi.ordered_qty,
+                  'received_qty', oi.received_qty - st.quantity
+                ),
+                json_object(
+                  'id', oi.id,
+                  'item_id', oi.item_id,
+                  'ordered_qty', oi.ordered_qty,
+                  'received_qty', oi.received_qty
+                )
+           FROM order_items oi
+           JOIN stock_transactions st ON st.order_item_id = oi.id
+          WHERE st.operation_token = ?`,
+      ).bind(actorUserId, operationToken),
+    ];
+
+    let batchResult: D1Result[];
+    try {
+      batchResult = await db.batch(statements);
+    } catch {
+      return conflict(
+        'RECEIVE_CONFLICT',
+        '입고 처리 중 상태가 변경되었습니다. 다시 시도해주세요.',
+      );
+    }
+
+    if (batchResult[0].meta.changes === 0) {
+      return conflict(
+        'RECEIVE_CONFLICT',
+        '남은 입고 수량 또는 발주 상태가 변경되었습니다.',
+      );
+    }
+
+    const updatedOrder = await selectPurchaseOrder(db, orderId);
+    const updatedItem = await db.prepare(
+      `SELECT oi.id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
+         FROM order_items oi WHERE oi.id = ?`,
+    ).bind(orderItemId).first<Pick<
+      OrderItemRow,
+      'id' | 'item_id' | 'ordered_qty' | 'received_qty' | 'memo'
+    >>();
+
+    return success({ order: updatedOrder, order_item: updatedItem });
   }
 
   async function revise(

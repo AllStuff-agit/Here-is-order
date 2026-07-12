@@ -1399,7 +1399,7 @@ app.patch('/api/purchase-orders/:id/items/:itemId', async (c) => {
 });
 
 app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const orderId = parseIntValue(c.req.param('id'), null);
   const orderItemId = parseIntValue(c.req.param('itemId'), null);
 
@@ -1413,122 +1413,15 @@ app.post('/api/purchase-orders/:id/items/:itemId/receive', async (c) => {
     return c.json(apiErr('INVALID_INPUT', 'qty는 1 이상의 정수여야 합니다.'), 400);
   }
 
-  const order = await c.env.DB.prepare(
-    'SELECT id, status FROM purchase_orders WHERE id = ? AND is_deleted = 0'
-  ).bind(orderId).first<{ id: number; status: string }>();
-  if (!order) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
+  const stage = await purchaseOrders(c.env.DB, actor.id).stageReceive(
+    orderId,
+    orderItemId,
+    qty,
+  );
+  if (!stage.ok) return purchaseOrderResponse(c, stage);
 
-  if (order.status === 'draft') {
-    return c.json(apiErr('INVALID_STATUS', '초안 상태에서는 입고 처리할 수 없습니다.'), 400);
-  }
-  if (order.status === 'canceled') {
-    return c.json(apiErr('INVALID_STATUS', '취소된 발주서는 입고 처리할 수 없습니다.'), 400);
-  }
-  if (order.status === 'fully_received') {
-    return c.json(apiErr('INVALID_STATUS', '이미 입고 완료된 발주서입니다.'), 400);
-  }
-
-  const target = await c.env.DB.prepare(
-    `SELECT oi.id, oi.item_id, oi.ordered_qty, oi.received_qty
-       FROM order_items oi
-      WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0`
-  ).bind(orderItemId, orderId).first<{ id: number; item_id: number; ordered_qty: number; received_qty: number }>();
-  if (!target) return c.json(apiErr('NOT_FOUND', '발주 항목을 찾지 못했습니다.'), 404);
-
-  const remain = target.ordered_qty - target.received_qty;
-  if (remain <= 0) {
-    return c.json(apiErr('RECEIVE_CONFLICT', '이미 입고 완료된 항목입니다.'), 409);
-  }
-  if (qty > remain) {
-    return c.json(apiErr('RECEIVE_CONFLICT', `현재 최대 ${remain}개까지 입고 가능합니다.`), 409);
-  }
-
-  const operationToken = crypto.randomUUID();
-  const reason = payload.note == null ? '부분입고 처리' : String(payload.note);
-  let batchResult: D1Result[];
-  try {
-    batchResult = await c.env.DB.batch([
-      c.env.DB.prepare(
-        `INSERT INTO stock_transactions
-           (item_id, movement_type, quantity, order_item_id, reason, created_by, operation_token)
-         SELECT oi.item_id, 'IN', ?, oi.id, ?, ?, ?
-           FROM order_items oi
-           JOIN purchase_orders po ON po.id = oi.order_id
-           JOIN items i ON i.id = oi.item_id
-          WHERE oi.id = ? AND oi.order_id = ? AND oi.is_deleted = 0
-            AND po.is_deleted = 0 AND po.status IN ('ordered', 'partially_received')
-            AND i.is_deleted = 0
-            AND oi.received_qty + ? <= oi.ordered_qty`
-      ).bind(qty, reason, user.id, operationToken, orderItemId, orderId, qty),
-      c.env.DB.prepare(
-        `UPDATE order_items
-            SET received_qty = received_qty + ?, updated_at = datetime('now')
-          WHERE id = ? AND order_id = ?
-            AND EXISTS (
-              SELECT 1 FROM stock_transactions WHERE operation_token = ?
-            )`
-      ).bind(qty, orderItemId, orderId, operationToken),
-      c.env.DB.prepare(
-        `UPDATE items
-            SET current_stock = current_stock + ?, updated_at = datetime('now')
-          WHERE id = ?
-            AND EXISTS (
-              SELECT 1 FROM stock_transactions WHERE operation_token = ?
-            )`
-      ).bind(qty, target.item_id, operationToken),
-      c.env.DB.prepare(
-        `UPDATE purchase_orders
-            SET status = (
-                  SELECT CASE
-                    WHEN SUM(received_qty) >= SUM(ordered_qty) THEN 'fully_received'
-                    WHEN SUM(received_qty) > 0 THEN 'partially_received'
-                    ELSE 'ordered'
-                  END
-                    FROM order_items
-                   WHERE order_id = ? AND is_deleted = 0
-                ),
-                updated_at = datetime('now')
-          WHERE id = ? AND status IN ('ordered', 'partially_received')
-            AND EXISTS (
-              SELECT 1 FROM stock_transactions WHERE operation_token = ?
-            )`
-      ).bind(orderId, orderId, operationToken),
-      c.env.DB.prepare(
-        `INSERT INTO audit_logs
-           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-         SELECT ?, 'receive', 'order_item', oi.id,
-                json_object(
-                  'id', oi.id,
-                  'item_id', oi.item_id,
-                  'ordered_qty', oi.ordered_qty,
-                  'received_qty', oi.received_qty - st.quantity
-                ),
-                json_object(
-                  'id', oi.id,
-                  'item_id', oi.item_id,
-                  'ordered_qty', oi.ordered_qty,
-                  'received_qty', oi.received_qty
-                )
-           FROM order_items oi
-           JOIN stock_transactions st ON st.order_item_id = oi.id
-          WHERE st.operation_token = ?`
-      ).bind(user.id, operationToken),
-    ]);
-  } catch {
-    return c.json(apiErr('RECEIVE_CONFLICT', '입고 처리 중 상태가 변경되었습니다. 다시 시도해주세요.'), 409);
-  }
-
-  if ((batchResult[0] as D1Result).meta.changes === 0) {
-    return c.json(apiErr('RECEIVE_CONFLICT', '남은 입고 수량 또는 발주 상태가 변경되었습니다.'), 409);
-  }
-
-  const updatedOrder = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ?`).bind(orderId).first();
-  const updatedItem = await c.env.DB.prepare(
-    `SELECT oi.id, oi.item_id, oi.ordered_qty, oi.received_qty, oi.memo
-       FROM order_items oi WHERE oi.id = ?`
-  ).bind(orderItemId).first();
-
-  return c.json(apiOk({ order: updatedOrder, order_item: updatedItem }));
+  const note = payload.note == null ? null : String(payload.note);
+  return purchaseOrderResponse(c, await stage.value.execute(note));
 });
 
 app.get('/api/audit-logs', async (c) => {
