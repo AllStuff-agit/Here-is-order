@@ -504,3 +504,358 @@ describe('비밀번호 초기화 세션 폐기', () => {
     });
   });
 });
+
+describe('발주 compatibility characterization', () => {
+  it('생성과 추가의 memo 병합 차이와 전체 활성 항목 반환을 보존한다', async () => {
+    const sessionToken = await createSession();
+    const firstItem = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('memo 원두').run();
+    const secondItem = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('memo 우유').run();
+
+    const populatedResponse = await apiRequest('/api/purchase-orders/with-items', sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        title: '생성 병합',
+        status: 'ordered',
+        items: [
+          { item_id: firstItem.meta.last_row_id, ordered_qty: 1, memo: '첫 memo' },
+          { item_id: firstItem.meta.last_row_id, ordered_qty: 2, memo: '' },
+        ],
+      }),
+    });
+    expect(populatedResponse.status).toBe(201);
+    const populated = await populatedResponse.json() as {
+      ok: true;
+      data: { id: number; status: string };
+    };
+    expect(populated.data.status).toBe('draft');
+
+    const populatedDetailResponse = await apiRequest(
+      `/api/purchase-orders/${populated.data.id}`,
+      sessionToken,
+    );
+    const populatedDetail = await populatedDetailResponse.json() as {
+      ok: true;
+      data: { items: Array<{ ordered_qty: number; memo: string | null }> };
+    };
+    expect(populatedDetail.data.items).toEqual([
+      expect.objectContaining({ ordered_qty: 3, memo: '' }),
+    ]);
+
+    const draftResponse = await apiRequest('/api/purchase-orders', sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({ title: '추가 병합' }),
+    });
+    const draft = await draftResponse.json() as { ok: true; data: { id: number } };
+
+    const addResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}/items`,
+      sessionToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            { item_id: firstItem.meta.last_row_id, ordered_qty: 1, memo: '유지 memo' },
+            { item_id: firstItem.meta.last_row_id, ordered_qty: 2, memo: '' },
+            { item_id: secondItem.meta.last_row_id, ordered_qty: 1, memo: '두 번째' },
+          ],
+        }),
+      },
+    );
+    const added = await addResponse.json() as {
+      ok: true;
+      data: { items: Array<{ item_id: number; ordered_qty: number; memo: string | null }> };
+    };
+    expect(added.data.items).toHaveLength(2);
+    expect(added.data.items).toContainEqual(
+      expect.objectContaining({
+        item_id: Number(firstItem.meta.last_row_id),
+        ordered_qty: 3,
+        memo: '유지 memo',
+      }),
+    );
+
+    const clearMemoResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}/items`,
+      sessionToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          item_id: firstItem.meta.last_row_id,
+          ordered_qty: 1,
+          memo: null,
+        }),
+      },
+    );
+    const cleared = await clearMemoResponse.json() as {
+      ok: true;
+      data: { items: Array<{ item_id: number; ordered_qty: number; memo: string | null }> };
+    };
+    expect(cleared.data.items).toContainEqual(
+      expect.objectContaining({
+        item_id: Number(firstItem.meta.last_row_id),
+        ordered_qty: 4,
+        memo: null,
+      }),
+    );
+  });
+
+  it('동일 status, 종료 metadata, 삭제 충돌, receipt reason과 audit facts를 보존한다', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('호환성 원두').run();
+
+    const draftResponse = await apiRequest('/api/purchase-orders/with-items', sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        title: '호환성 발주',
+        items: [{ item_id: item.meta.last_row_id, ordered_qty: 2 }],
+      }),
+    });
+    const draft = await draftResponse.json() as { ok: true; data: { id: number } };
+
+    const confirmResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}`,
+      sessionToken,
+      { method: 'PATCH', body: JSON.stringify({ status: 'ordered' }) },
+    );
+    expect(confirmResponse.status).toBe(200);
+
+    const sameStatusResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}`,
+      sessionToken,
+      { method: 'PATCH', body: JSON.stringify({ status: 'ordered' }) },
+    );
+    expect(sameStatusResponse.status).toBe(200);
+
+    const orderedAuditsResponse = await apiRequest(
+      `/api/audit-logs?action=update&entity_type=purchase_order&entity_id=${draft.data.id}`,
+      sessionToken,
+    );
+    const orderedAudits = await orderedAuditsResponse.json() as {
+      ok: true;
+      data: Array<{ before_json: string; after_json: string }>;
+    };
+    expect(orderedAudits.data).toHaveLength(2);
+    expect(JSON.parse(orderedAudits.data[0].after_json)).toEqual(
+      expect.objectContaining({ id: draft.data.id, status: 'ordered' }),
+    );
+
+    const detailResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}`,
+      sessionToken,
+    );
+    const detail = await detailResponse.json() as {
+      ok: true;
+      data: { items: Array<{ id: number }> };
+    };
+    const receiveResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}/items/${detail.data.items[0].id}/receive`,
+      sessionToken,
+      { method: 'POST', body: JSON.stringify({ qty: 2, note: null }) },
+    );
+    expect(receiveResponse.status).toBe(200);
+
+    const ledgerResponse = await apiRequest(
+      `/api/stock/ledger/${item.meta.last_row_id}`,
+      sessionToken,
+    );
+    const ledger = await ledgerResponse.json() as {
+      ok: true;
+      data: Array<{ reason: string | null }>;
+    };
+    expect(ledger.data[0].reason).toBe('부분입고 처리');
+
+    const metadataResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}`,
+      sessionToken,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          title: '완료 후 수정',
+          note: '종료 상태 memo',
+          external_order_ref: 'external-1',
+        }),
+      },
+    );
+    expect(metadataResponse.status).toBe(200);
+    await expect(metadataResponse.json()).resolves.toEqual({
+      ok: true,
+      data: expect.objectContaining({
+        id: draft.data.id,
+        status: 'fully_received',
+        title: '완료 후 수정',
+        note: '종료 상태 memo',
+        external_order_ref: 'external-1',
+      }),
+    });
+
+    const terminalStatusResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}`,
+      sessionToken,
+      { method: 'PATCH', body: JSON.stringify({ status: 'fully_received' }) },
+    );
+    expect(terminalStatusResponse.status).toBe(400);
+    await expect(terminalStatusResponse.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_STATUS_TRANSITION',
+        message: '부분입고/입고완료 상태는 입고 처리에서 자동으로 변경됩니다.',
+      },
+    });
+
+    const deletionOrder = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('삭제 충돌').run();
+    await env.DB.prepare(
+      `INSERT INTO order_items
+       (order_id, item_id, ordered_qty, received_qty, is_deleted, deleted_at)
+     VALUES (?, ?, 1, 1, 1, datetime('now'))`,
+    ).bind(deletionOrder.meta.last_row_id, item.meta.last_row_id).run();
+    const deleteResponse = await apiRequest(
+      `/api/purchase-orders/${deletionOrder.meta.last_row_id}`,
+      sessionToken,
+      { method: 'DELETE' },
+    );
+    expect(deleteResponse.status).toBe(409);
+    await expect(deleteResponse.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'ORDER_DELETE_CONFLICT',
+        message: '발주 상태가 변경되어 삭제할 수 없습니다.',
+      },
+    });
+  });
+
+  it('preserves create, item mutation, and cascade-delete audit JSON facts', async () => {
+    const sessionToken = await createSession();
+    const item = await env.DB.prepare(
+      `INSERT INTO items (name, unit, safety_stock, min_stock, current_stock, unit_price)
+       VALUES (?, '개', 0, 0, 0, 0)`,
+    ).bind('audit 원두').run();
+    const draftResponse = await apiRequest('/api/purchase-orders', sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({ title: 'audit 초안', note: 'audit note' }),
+    });
+    const draft = await draftResponse.json() as { ok: true; data: { id: number } };
+
+    const orderCreateResponse = await apiRequest(
+      `/api/audit-logs?action=create&entity_type=purchase_order&entity_id=${draft.data.id}`,
+      sessionToken,
+    );
+    const orderCreate = await orderCreateResponse.json() as {
+      ok: true;
+      data: Array<{ before_json: string | null; after_json: string }>;
+    };
+    expect(orderCreate.data).toHaveLength(1);
+    expect(orderCreate.data[0].before_json).toBeNull();
+    expect(JSON.parse(orderCreate.data[0].after_json)).toEqual({
+      title: 'audit 초안',
+      status: 'draft',
+      note: 'audit note',
+    });
+
+    const addResponse = await apiRequest(
+      `/api/purchase-orders/${draft.data.id}/items`,
+      sessionToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          item_id: item.meta.last_row_id,
+          ordered_qty: 2,
+          memo: 'item memo',
+        }),
+      },
+    );
+    const added = await addResponse.json() as {
+      ok: true;
+      data: { items: Array<{ id: number }> };
+    };
+    const orderItemId = added.data.items[0].id;
+
+    const itemCreateResponse = await apiRequest(
+      `/api/audit-logs?action=create&entity_type=order_item&entity_id=${orderItemId}`,
+      sessionToken,
+    );
+    const itemCreate = await itemCreateResponse.json() as {
+      ok: true;
+      data: Array<{ before_json: string | null; after_json: string }>;
+    };
+    expect(itemCreate.data[0].before_json).toBeNull();
+    expect(JSON.parse(itemCreate.data[0].after_json)).toEqual({
+      order_id: draft.data.id,
+      item_id: Number(item.meta.last_row_id),
+      ordered_qty: 2,
+      received_qty: 0,
+      memo: 'item memo',
+    });
+
+    await apiRequest(
+      `/api/purchase-orders/${draft.data.id}/items/${orderItemId}`,
+      sessionToken,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ ordered_qty: 3, memo: 'revised memo' }),
+      },
+    );
+    const itemUpdateResponse = await apiRequest(
+      `/api/audit-logs?action=update&entity_type=order_item&entity_id=${orderItemId}`,
+      sessionToken,
+    );
+    const itemUpdate = await itemUpdateResponse.json() as {
+      ok: true;
+      data: Array<{ before_json: string; after_json: string }>;
+    };
+    expect(JSON.parse(itemUpdate.data[0].before_json)).toEqual({
+      id: orderItemId,
+      order_id: draft.data.id,
+      item_id: Number(item.meta.last_row_id),
+      ordered_qty: 2,
+      received_qty: 0,
+      memo: 'item memo',
+    });
+    expect(JSON.parse(itemUpdate.data[0].after_json)).toEqual({
+      id: orderItemId,
+      order_id: draft.data.id,
+      item_id: Number(item.meta.last_row_id),
+      ordered_qty: 3,
+      received_qty: 0,
+      memo: 'revised memo',
+    });
+
+    const beforeDelete = await env.DB.prepare(
+      `SELECT * FROM purchase_orders WHERE id = ?`,
+    ).bind(draft.data.id).first<Record<string, unknown>>();
+    if (!beforeDelete) throw new Error('expected Purchase Order before deletion');
+    await apiRequest(
+      `/api/purchase-orders/${draft.data.id}`,
+      sessionToken,
+      { method: 'DELETE' },
+    );
+    const deleteAuditResponse = await apiRequest(
+      `/api/audit-logs?action=soft_delete&entity_type=purchase_order&entity_id=${draft.data.id}`,
+      sessionToken,
+    );
+    const deleteAudit = await deleteAuditResponse.json() as {
+      ok: true;
+      data: Array<{ before_json: string; after_json: string }>;
+    };
+    expect(JSON.parse(deleteAudit.data[0].before_json)).toEqual(beforeDelete);
+    expect(JSON.parse(deleteAudit.data[0].after_json)).toEqual({
+      ...beforeDelete,
+      is_deleted: 1,
+    });
+    const itemDeleteAuditResponse = await apiRequest(
+      `/api/audit-logs?action=soft_delete&entity_type=order_item&entity_id=${orderItemId}`,
+      sessionToken,
+    );
+    await expect(itemDeleteAuditResponse.json()).resolves.toEqual({ ok: true, data: [] });
+  });
+});
