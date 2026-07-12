@@ -210,21 +210,47 @@ type PartialReceiptInput = {
 };
 
 type PartialReceiptResult = {
-  order: PurchaseOrderRow;
+  order: PurchaseOrderRow | null;
   order_item: Pick<
     OrderItemRow,
     'id' | 'item_id' | 'ordered_qty' | 'received_qty' | 'memo'
-  >;
+  > | null;
+};
+
+type AddItemsToDraftResult = {
+  items: OrderItemRow[];
+};
+
+type AddItemsToDraftStage = {
+  execute(
+    items: readonly OrderItemInput[],
+  ): Promise<PurchaseOrderResult<AddItemsToDraftResult>>;
+};
+
+type EditDraftItemStage = {
+  execute(
+    orderItemId: number,
+    change: OrderItemRevision,
+  ): Promise<PurchaseOrderResult<OrderItemRow | null>>;
+};
+
+type PartialReceiptStage = {
+  execute(
+    note: string | null,
+  ): Promise<PurchaseOrderResult<PartialReceiptResult>>;
 };
 
 interface PurchaseOrderModule {
-  createDraft(input: CreateDraftInput): Promise<PurchaseOrderResult<PurchaseOrderRow>>;
-  createDraftWithItems(input: CreateDraftWithItemsInput): Promise<PurchaseOrderResult<PurchaseOrderRow>>;
+  createDraft(input: CreateDraftInput): Promise<PurchaseOrderResult<PurchaseOrderRow | null>>;
+  createDraftWithItems(input: CreateDraftWithItemsInput): Promise<PurchaseOrderResult<PurchaseOrderRow | null>>;
   getDetail(orderId: number): Promise<PurchaseOrderResult<PurchaseOrderDetail>>;
-  revise(orderId: number, change: PurchaseOrderRevision): Promise<PurchaseOrderResult<PurchaseOrderRow>>;
+  revise(orderId: number, change: PurchaseOrderRevision): Promise<PurchaseOrderResult<PurchaseOrderRow | null>>;
   deleteDraft(orderId: number): Promise<PurchaseOrderResult<{ deleted: true }>>;
-  addItemsToDraft(orderId: number, items: readonly OrderItemInput[]): Promise<PurchaseOrderResult<{ items: OrderItemRow[] }>>;
-  editDraftItem(orderId: number, orderItemId: number, change: OrderItemRevision): Promise<PurchaseOrderResult<OrderItemRow>>;
+  stageAddItemsToDraft(orderId: number): Promise<PurchaseOrderResult<AddItemsToDraftStage>>;
+  addItemsToDraft(orderId: number, items: readonly OrderItemInput[]): Promise<PurchaseOrderResult<AddItemsToDraftResult>>;
+  stageEditDraftItem(orderId: number): Promise<PurchaseOrderResult<EditDraftItemStage>>;
+  editDraftItem(orderId: number, orderItemId: number, change: OrderItemRevision): Promise<PurchaseOrderResult<OrderItemRow | null>>;
+  stageReceive(orderId: number, orderItemId: number, quantity: number): Promise<PurchaseOrderResult<PartialReceiptStage>>;
   receive(orderId: number, orderItemId: number, receipt: PartialReceiptInput): Promise<PurchaseOrderResult<PartialReceiptResult>>;
 }
 
@@ -239,6 +265,10 @@ function purchaseOrders(db: D1Database, actorUserId: number): PurchaseOrderModul
 - `revise`는 metadata와 상태를 한 요청에서 함께 바꾸는 현재 atomic behavior를 보존한다. 이를 `updateMetadata`, `confirm`, `cancel`로 분리하지 않는다.
 - 성공 row는 현재 snake_case public shape를 유지하여 frontend와 HTTP contract를 바꾸지 않는다.
 - input type의 optional property는 HTTP payload에서 해당 field가 실제로 존재할 때만 설정한다. `null`은 nullable field를 지우는 명시적 값이다.
+- 생성과 `revise`의 Purchase Order 재조회, `editDraftItem`의 Order Item 재조회는 legacy sequential readback을 그대로 유지하므로 성공하면서 `null`일 수 있다. Partial receipt의 `order`와 `order_item`도 서로 독립적으로 `null`일 수 있으며 adapter는 이를 그대로 success envelope에 담는다.
+- `stageAddItemsToDraft`, `stageEditDraftItem`, `stageReceive`는 HTTP caller의 기존 preflight 순서를 보존하는 intent-specific compatibility protocol이다. 각각 Order Item body 파싱 전 또는 receipt note coercion 전에 구체적인 order/status/item 오류를 확정한 뒤 `execute`가 나머지 입력과 conditional batch를 처리한다.
+- stage context는 generic repository, transaction, clock, UUID, audit port가 아니며 다른 caller가 사용해야 하는 범용 abstraction도 아니다. Direct intent method는 같은 stage를 내부적으로 실행해 module test와 일반 caller surface를 유지한다.
+- stage의 pre-read는 write authorization이 아니다. 최종 권한과 race outcome은 executor의 conditional token write, SQL predicate, `changes()`가 결정한다.
 
 ## 7. Domain invariants
 
@@ -295,7 +325,7 @@ function purchaseOrders(db: D1Database, actorUserId: number): PurchaseOrderModul
 - 활성 Order Item과 활성 inventory Item을 요구한다.
 - receipt `note`는 stock movement/ledger의 `reason`이 된다. 생략하거나 명시적으로 `null`이면 `부분입고 처리`를 사용하고, 빈 문자열은 그대로 보존한다.
 - 성공하면 누적 입고량, 현재고, stock movement/ledger, Purchase Order 상태, audit log가 함께 반영된다.
-- 모든 활성 Order Item의 누적 입고량 합이 주문수량 합과 같으면 `fully_received`, 일부만 입고되면 `partially_received`로 정한다.
+- 모든 활성 Order Item의 누적 입고량 합이 주문수량 합 이상이면 legacy SQL의 `>=` 판정대로 `fully_received`, 일부만 입고되면 `partially_received`로 정한다.
 
 ## 8. Data flow
 
@@ -312,6 +342,8 @@ mutation intent는 적용 가능한 범위에서 다음 순서를 따른다.
 9. Hono adapter가 기존 envelope와 상태 코드로 직렬화한다.
 
 pre-read는 메시지와 사전 검증을 위한 것이며 write authorization의 근거가 아니다. 동시성 안전성은 batch 내부 predicate, unique token, `changes()`가 보장한다.
+
+Order Item 추가·수정 adapter는 path를 파싱한 뒤 `stageAddItemsToDraft` 또는 `stageEditDraftItem`을 먼저 호출하고, 성공한 경우에만 body를 읽어 `stage.value.execute`를 호출한다. Partial receipt adapter는 path와 quantity를 파싱한 뒤 `stageReceive`로 order/status/item/remaining quantity를 preflight하고, 성공한 경우에만 note를 string으로 변환해 executor를 호출한다. 이 두 단계는 legacy의 earlier-error precedence와 preflight 이후 race conflict를 함께 보존하는 좁은 예외다.
 
 `getDetail`은 read-only 흐름을 사용한다: Hono adapter가 ID를 파싱하고, module이 활성 Purchase Order와 활성 Order Item을 조회한 뒤 success 또는 `NOT_FOUND`를 반환하며, Hono adapter가 직렬화한다. D1 batch와 `changes()`는 사용하지 않는다.
 
@@ -349,6 +381,8 @@ Hono adapter가 `kind`를 상태 코드로 변환하고 기존 code와 한국어
 conditional write의 변경 행이 0이면 intent별 `CONFLICT`, `ORDER_DELETE_CONFLICT`, `RECEIVE_CONFLICT`를 반환한다.
 
 Hono adapter는 malformed JSON을 현재처럼 빈 payload로 취급하고, 유효하지 않은 path ID, row가 object가 아닌 경우, `POST .../items`의 container 선택, 숫자 coercion 실패처럼 typed module input을 만들 수 없는 wire 오류를 현재 code와 message로 처리한다. Module은 typed지만 신뢰하지 않는 string/number 값을 받아 빈 제목, 0 이하 수량, 활성 품목, 상태 전이 같은 semantic 오류를 다시 검증한다.
+
+Wire 호환성은 이상적인 일괄 validation으로 정규화하지 않는다. Legacy handler가 top-level `null`, `[null]`, 또는 안전하지 않은 string conversion에서 throw했다면 `app.onError`의 500을 유지하고, malformed body보다 order/status/item preflight가 먼저였던 staged route는 그 404/400/409를 먼저 반환한다. Preflight를 통과한 뒤의 body 또는 note coercion이 throw하면 500이 된다. Sequential adapter validation과 Result mapping test가 이 우선순위를 고정한다.
 
 ## 10. Testing
 

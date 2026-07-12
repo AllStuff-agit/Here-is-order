@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import {
+  isPurchaseOrderStatus,
   purchaseOrders,
   type OrderItemRevision,
   type PurchaseOrderRevision,
@@ -20,7 +21,6 @@ type SessionUser = {
 };
 
 type UserRole = 'admin' | 'staff';
-type OrderStatus = 'draft' | 'ordered' | 'partially_received' | 'fully_received' | 'canceled';
 
 type AppVariables = {
   user?: SessionUser;
@@ -43,12 +43,9 @@ const PASSWORD_SALT_BYTES = 16;
 const PASSWORD_HASH_BITS = 256;
 const PUBLIC_API_PATHS = new Set(['/api/auth/login', '/health', '/login']);
 const USER_ROLES = ['admin', 'staff'] as const;
-const ORDER_STATUSES = ['draft', 'ordered', 'partially_received', 'fully_received', 'canceled'] as const;
 const ITEM_PUBLIC_COLUMNS = `i.id, i.category_id, i.name, i.spec, i.unit,
   i.safety_stock, i.min_stock, i.current_stock, i.unit_price, i.memo,
   i.is_deleted, i.deleted_at, i.created_at, i.updated_at`;
-const ORDER_PUBLIC_COLUMNS = `id, title, status, order_date, external_order_ref, note,
-  is_deleted, deleted_at, created_at, updated_at`;
 
 function apiOk<T>(data: T) {
   return { ok: true, data };
@@ -253,18 +250,6 @@ function authClearCookie(secure: boolean) {
   ] as const;
 }
 
-async function writeAudit(
-  db: D1Database,
-  actorUserId: number | null,
-  action: string,
-  entityType: string,
-  entityId: number | null,
-  before?: unknown,
-  after?: unknown,
-) {
-  await auditStatement(db, actorUserId, action, entityType, entityId, before, after).run();
-}
-
 function auditStatement(
   db: D1Database,
   actorUserId: number | null,
@@ -287,9 +272,6 @@ function auditStatement(
   );
 }
 
-function isOrderStatus(status: string): status is OrderStatus {
-  return ORDER_STATUSES.includes(status as OrderStatus);
-}
 function isUserRole(role: string): role is UserRole {
   return USER_ROLES.includes(role as UserRole);
 }
@@ -1150,7 +1132,7 @@ app.get('/api/purchase-orders', async (c) => {
     if (!normalizedStatus) {
       return c.json(apiErr('INVALID_STATUS', '발주 상태값이 올바르지 않습니다. 허용값: draft, ordered, partially_received, fully_received, canceled'), 400);
     }
-    if (!isOrderStatus(normalizedStatus)) {
+    if (!isPurchaseOrderStatus(normalizedStatus)) {
       return c.json(apiErr('INVALID_STATUS', '발주 상태값이 올바르지 않습니다. 허용값: draft, ordered, partially_received, fully_received, canceled'), 400);
     }
     where.push('po.status = ?');
@@ -1276,7 +1258,7 @@ app.patch('/api/purchase-orders/:id', async (c) => {
 
   if ('status' in payload) {
     const status = String(payload.status).trim();
-    if (!isOrderStatus(status)) {
+    if (!isPurchaseOrderStatus(status)) {
       return c.json(apiErr('INVALID_STATUS', '발주 상태값이 올바르지 않습니다. 허용값: draft, ordered, partially_received, fully_received, canceled'), 400);
     }
     if (status === 'partially_received' || status === 'fully_received') {

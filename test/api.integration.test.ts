@@ -1712,4 +1712,80 @@ describe('발주 compatibility characterization', () => {
       ).run();
     }
   });
+
+  it('maps Purchase Order invalid, not-found, and conflict results to existing envelopes', async () => {
+    const sessionToken = await createSession();
+    const invalid = await apiRequest('/api/purchase-orders', sessionToken, {
+      method: 'POST',
+      body: JSON.stringify({ title: '' }),
+    });
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toEqual({
+      ok: false,
+      error: { code: 'INVALID_INPUT', message: '발주명은 필수입니다.' },
+    });
+
+    const missing = await apiRequest('/api/purchase-orders/999999', sessionToken);
+    expect(missing.status).toBe(404);
+    await expect(missing.json()).resolves.toEqual({
+      ok: false,
+      error: { code: 'NOT_FOUND', message: '발주서를 찾지 못했습니다.' },
+    });
+
+    const order = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'ordered')`,
+    ).bind('삭제 conflict').run();
+    const conflict = await apiRequest(
+      `/api/purchase-orders/${order.meta.last_row_id}`,
+      sessionToken,
+      { method: 'DELETE' },
+    );
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'ORDER_DELETE_CONFLICT',
+        message: '확정되었거나 입고가 시작된 발주서는 삭제할 수 없습니다.',
+      },
+    });
+  });
+
+  it('keeps unexpected Purchase Order D1 failures on the global 500 envelope', async () => {
+    const sessionToken = await createSession();
+    const order = await env.DB.prepare(
+      `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
+    ).bind('unexpected failure').run();
+
+    await env.DB.prepare(
+      'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
+    ).run();
+    try {
+      await env.DB.prepare(
+        `CREATE TRIGGER test_fail_purchase_order_update
+         BEFORE UPDATE ON purchase_orders
+         WHEN NEW.title = 'trigger-500'
+         BEGIN
+           SELECT RAISE(ABORT, 'TEST_PURCHASE_ORDER_UPDATE_FAILURE');
+         END`,
+      ).run();
+
+      const response = await apiRequest(
+        `/api/purchase-orders/${order.meta.last_row_id}`,
+        sessionToken,
+        { method: 'PATCH', body: JSON.stringify({ title: 'trigger-500' }) },
+      );
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: '서버 오류가 발생했습니다.',
+        },
+      });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
+      ).run();
+    }
+  });
 });

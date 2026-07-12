@@ -1138,7 +1138,7 @@ const ORDER_STATUSES = [
   'canceled',
 ] as const;
 
-function isPurchaseOrderStatus(status: string): status is PurchaseOrderStatus {
+export function isPurchaseOrderStatus(status: string): status is PurchaseOrderStatus {
   return ORDER_STATUSES.includes(status as PurchaseOrderStatus);
 }
 

@@ -8,6 +8,16 @@
 
 **Tech Stack:** TypeScript 5.6, Hono 4, Cloudflare Workers, D1/SQLite, Vitest 4 with `@cloudflare/vitest-pool-workers`, Next.js 16 verification gates.
 
+## Implementation Compatibility Amendments
+
+These amendments override later literal snippets where they differ from the characterized legacy behavior:
+
+- Create and revise readbacks are `PurchaseOrderRow | null`, edit readback is `OrderItemRow | null`, and receipt `order`/`order_item` fields are independently nullable. Successful HTTP envelopes preserve those `null` values.
+- The add, edit, and receive HTTP adapters intentionally use `stageAddItemsToDraft`, `stageEditDraftItem`, or `stageReceive` before body/note coercion, followed by `stage.value.execute`. This narrow compatibility protocol preserves preflight-before-body ordering and race outcomes; it is not a generic repository, transaction, clock, UUID, or audit port. Conditional token writes and batch predicates remain authorization.
+- List and PATCH still need status validation. Export `isPurchaseOrderStatus` from `src/purchase-orders.ts`, reuse it in `src/index.ts`, and remove only the local `OrderStatus`, `ORDER_STATUSES`, `isOrderStatus`, dead index `ORDER_PUBLIC_COLUMNS`, and caller-free `writeAudit`. Keep the list SQL/projection byte-for-byte unchanged.
+- Receipt completion uses the legacy `SUM(received_qty) >= SUM(ordered_qty)` predicate. Preserve malformed/null wire 500s and sequential earlier-error precedence characterized by the adapter tests.
+- Fixed-name test triggers must be dropped before creation and protected by an outer `try/finally`, so an interrupted run cannot poison later runs.
+
 ## Global Constraints
 
 - Preserve all current HTTP paths, accepted payload shapes, snake_case response fields, envelope shapes, success statuses, error statuses, codes, and Korean messages.
@@ -1441,6 +1451,8 @@ git commit -m 'refactor: move purchase order receipt lifecycle'
 - Modify: `src/purchase-orders.ts`
 - Modify: `test/api.integration.test.ts`
 - Modify: `test/purchase-orders.integration.test.ts`
+- Modify: `docs/superpowers/specs/2026-07-12-purchase-order-lifecycle-refactor-design.md`
+- Modify: `docs/superpowers/plans/2026-07-12-purchase-order-lifecycle-refactor.md`
 
 **Interfaces:**
 - Consumes: complete `PurchaseOrderModule` from Tasks 2-5.
@@ -1494,36 +1506,37 @@ it('keeps unexpected Purchase Order D1 failures on the global 500 envelope', asy
     `INSERT INTO purchase_orders (title, status) VALUES (?, 'draft')`,
   ).bind('unexpected failure').run();
   await env.DB.prepare(
-    `CREATE TRIGGER test_fail_purchase_order_update
-     BEFORE UPDATE ON purchase_orders
-     WHEN NEW.title = 'trigger-500'
-     BEGIN
-       SELECT RAISE(ABORT, 'TEST_PURCHASE_ORDER_UPDATE_FAILURE');
-     END`,
+    'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
   ).run();
 
-  const response = await (async () => {
-    try {
-      return await apiRequest(
-        `/api/purchase-orders/${order.meta.last_row_id}`,
-        sessionToken,
-        { method: 'PATCH', body: JSON.stringify({ title: 'trigger-500' }) },
-      );
-    } finally {
-      await env.DB.prepare(
-        'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
-      ).run();
-    }
-  })();
+  try {
+    await env.DB.prepare(
+      `CREATE TRIGGER test_fail_purchase_order_update
+       BEFORE UPDATE ON purchase_orders
+       WHEN NEW.title = 'trigger-500'
+       BEGIN
+         SELECT RAISE(ABORT, 'TEST_PURCHASE_ORDER_UPDATE_FAILURE');
+       END`,
+    ).run();
 
-  expect(response.status).toBe(500);
-  await expect(response.json()).resolves.toEqual({
-    ok: false,
-    error: {
-      code: 'INTERNAL_ERROR',
-      message: '서버 오류가 발생했습니다.',
-    },
-  });
+    const response = await apiRequest(
+      `/api/purchase-orders/${order.meta.last_row_id}`,
+      sessionToken,
+      { method: 'PATCH', body: JSON.stringify({ title: 'trigger-500' }) },
+    );
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: '서버 오류가 발생했습니다.',
+      },
+    });
+  } finally {
+    await env.DB.prepare(
+      'DROP TRIGGER IF EXISTS test_fail_purchase_order_update',
+    ).run();
+  }
 });
 ```
 
@@ -1535,24 +1548,31 @@ Expected: PASS.
 
 - [ ] **Step 3: Delete legacy symbols and verify the seam**
 
-Remove `OrderStatus`, `ORDER_STATUSES`, `ORDER_PUBLIC_COLUMNS`, and `isOrderStatus` from `src/index.ts` once `rg` confirms no nonlegacy caller needs them. Keep `GET /api/purchase-orders` and its list SQL unchanged.
+Export `isPurchaseOrderStatus` from `src/purchase-orders.ts` and use it for list and PATCH validation. Then remove local `OrderStatus`, `ORDER_STATUSES`, `ORDER_PUBLIC_COLUMNS`, `isOrderStatus`, and caller-free `writeAudit` from `src/index.ts`. Keep used `auditStatement`, `GET /api/purchase-orders`, and its list SQL unchanged.
 
 Run these structural checks:
 
 ```bash
-! rg -n "ORDER_PUBLIC_COLUMNS|ORDER_STATUSES|isOrderStatus" src/index.ts
+! rg -n "type OrderStatus|ORDER_PUBLIC_COLUMNS|ORDER_STATUSES|isOrderStatus|writeAudit" src/index.ts
 ! rg -n "RECEIVE_CONFLICT|ORDER_DELETE_CONFLICT" src/index.ts
-rg -n "app\.(post|patch|delete)\('/api/purchase-orders" src/index.ts
-rg -n "purchaseOrders\(c\.env\.DB" src/index.ts
+! rg -U -n "(?s)(INSERT INTO|UPDATE|DELETE FROM)\s+(purchase_orders|order_items)" src/index.ts
+rg -n "app\.(get|post|patch|delete)\('/api/purchase-orders" src/index.ts
+test $(rg -c "app\.(post|patch|delete)\('/api/purchase-orders" src/index.ts) -eq 7
+test $(rg -c "app\.get\('/api/purchase-orders/:id'" src/index.ts) -eq 1
+test "$(rg -c 'purchaseOrders\(c\.env\.DB' src/index.ts)" -eq 8
+test "$(rg -c 'stage(AddItemsToDraft|EditDraftItem|Receive)' src/index.ts)" -eq 3
+test "$(rg -c 'stage\.value\.execute' src/index.ts)" -eq 3
+test "$(rg -c 'purchaseOrderResponse\(' src/index.ts)" -eq 11
+rg -n "app\.get\('/api/purchase-orders'|SELECT po\.id, po\.title, po\.status" src/index.ts
 rg -n "creation_token|operation_token|RECEIVE_CONFLICT|ORDER_DELETE_CONFLICT" src/purchase-orders.ts
 ```
 
 Expected:
 
-- The first and second commands return no matches after the legacy symbols and lifecycle failures move out of `src/index.ts`.
-- The third command lists the existing mutation routes.
-- The fourth command lists one deep-module call in every lifecycle/detail adapter.
-- The fifth command finds lifecycle token and failure implementation in `src/purchase-orders.ts`.
+- The first three commands return no matches after local legacy symbols, lifecycle failures, and Purchase Order/Order Item mutation SQL move out of `src/index.ts`.
+- The route command lists the retained list route, GET detail, and all seven mutation routes.
+- The count assertions prove five flat adapters plus three staged adapter entry calls, all three staged executors, and all shared Result serializer calls. The approved two-phase stage protocol is not duplicate lifecycle implementation.
+- The list check finds the unchanged projection in `src/index.ts`; the final check finds lifecycle token and failure implementation in `src/purchase-orders.ts`.
 
 - [ ] **Step 4: Run all repository verification gates**
 
@@ -1584,23 +1604,25 @@ Run:
 ```bash
 git diff --check
 git status --short
-git diff -- src/index.ts src/purchase-orders.ts test/api.integration.test.ts test/purchase-orders.integration.test.ts
+git status --short --ignored
+git diff -- src/index.ts src/purchase-orders.ts test/api.integration.test.ts test/purchase-orders.integration.test.ts docs/superpowers/specs/2026-07-12-purchase-order-lifecycle-refactor-design.md docs/superpowers/plans/2026-07-12-purchase-order-lifecycle-refactor.md
 ```
 
 Confirm all of the following before committing:
 
 - No migration, schema, frontend implementation, HTTP path, payload, response, or message changed.
 - The list projection remains in `src/index.ts`.
-- Every lifecycle/detail route is a thin adapter.
+- Every lifecycle/detail route is a thin adapter; add/edit/receive use only the approved stage plus executor compatibility protocol.
 - Every expected failure is a Result and unexpected failures still reach `app.onError`.
 - `creation_token` is cleared and `operation_token` persists.
 - Audit JSON fields match characterization fixtures.
 - No generic repository, transaction primitive, clock, UUID, or audit port exists.
+- Ignored `.superpowers`, `.wrangler`, `.next`, `.open-next`, dependency, and generated build state is inspected separately and not cleaned or committed.
 
 - [ ] **Step 6: Commit final cleanup**
 
 ```bash
-git add src/index.ts src/purchase-orders.ts test/api.integration.test.ts test/purchase-orders.integration.test.ts
+git add src/index.ts src/purchase-orders.ts test/api.integration.test.ts test/purchase-orders.integration.test.ts docs/superpowers/specs/2026-07-12-purchase-order-lifecycle-refactor-design.md docs/superpowers/plans/2026-07-12-purchase-order-lifecycle-refactor.md
 git commit -m 'refactor: complete purchase order lifecycle module'
 ```
 
