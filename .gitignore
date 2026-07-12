@@ -37,6 +37,9 @@ Thumbs.db
 !.codex/skills/**
 .codex_custom/
 
+# Local Git worktrees
+.worktrees/
+
 # Data / seed files (local only)
 data/
 
