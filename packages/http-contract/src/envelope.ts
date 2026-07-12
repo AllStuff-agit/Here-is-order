@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
-export type RuntimeSchema<T> = z.ZodType<T>;
+export interface RuntimeSchema<T> {
+  parse(input: unknown): T;
+}
 
 export const apiErrorPayloadSchema = z.object({
   code: z.string(),
@@ -16,11 +18,21 @@ export type ApiErrorEnvelope = z.infer<typeof apiErrorEnvelopeSchema>;
 export type ApiSuccessEnvelope<T> = { ok: true; data: T };
 export type ApiEnvelope<T> = ApiSuccessEnvelope<T> | ApiErrorEnvelope;
 
+const rawApiEnvelopeSchema = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), data: z.unknown() }).strict(),
+  apiErrorEnvelopeSchema,
+]);
+
 export function apiEnvelopeSchema<T>(dataSchema: RuntimeSchema<T>): RuntimeSchema<ApiEnvelope<T>> {
-  return z.discriminatedUnion('ok', [
-    z.object({ ok: z.literal(true), data: dataSchema }).strict(),
-    apiErrorEnvelopeSchema,
-  ]);
+  return {
+    parse(input: unknown): ApiEnvelope<T> {
+      const envelope = rawApiEnvelopeSchema.parse(input);
+      if (!envelope.ok) {
+        return envelope;
+      }
+      return { ok: true, data: dataSchema.parse(envelope.data) };
+    },
+  };
 }
 
 export function decodeApiEnvelope<T>(

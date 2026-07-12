@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 /** @type {import('next').NextConfig} */
 const apiBase = process.env.API_PROXY_URL || process.env.NEXT_PUBLIC_API_PROXY;
-const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+const frontendRoot = path.dirname(fileURLToPath(import.meta.url));
 
 function normalizeApiBase(value) {
   if (!value) {
@@ -34,6 +34,7 @@ function normalizeApiBase(value) {
 const normalizedApiBase = normalizeApiBase(apiBase);
 
 const nextConfig = {
+  transpilePackages: ['@here-is-order/http-contract'],
   typescript: {
     ignoreBuildErrors: false,
   },
@@ -41,7 +42,7 @@ const nextConfig = {
     unoptimized: true,
   },
   turbopack: {
-    root: projectRoot,
+    root: frontendRoot,
   },
   async rewrites() {
     if (!normalizedApiBase) {
