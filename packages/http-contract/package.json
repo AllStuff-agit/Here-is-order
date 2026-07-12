@@ -1,0 +1,13 @@
+{
+  "name": "@here-is-order/http-contract",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./envelope": "./src/envelope.ts",
+    "./purchase-orders": "./src/purchase-orders.ts"
+  },
+  "dependencies": {
+    "zod": "3.24.1"
+  }
+}

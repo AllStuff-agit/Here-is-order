@@ -179,6 +179,8 @@ describe('Purchase Order module draft creation', () => {
     expect(detail).toEqual({
       ok: true,
       value: expect.objectContaining({
+        ordered_qty: 3,
+        received_qty: 0,
         items: [expect.objectContaining({ item_id: itemId, ordered_qty: 3, memo: '' })],
       }),
     });

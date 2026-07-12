@@ -3,7 +3,25 @@
 import * as React from 'react';
 import { CalendarCheck, ReceiptText, SendHorizonal, ShieldAlert, Truck } from 'lucide-react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
+import {
+  addPurchaseOrderItemsResultSchema,
+  editPurchaseOrderItemResultSchema,
+  purchaseOrderDetailSchema,
+  purchaseOrderPaths,
+  purchaseOrderRowResultSchema,
+  receivePurchaseOrderItemResultSchema,
+  type AddPurchaseOrderItemsRequest,
+  type EditPurchaseOrderItemRequest,
+  type ReceivePurchaseOrderItemRequest,
+  type RevisePurchaseOrderRequest,
+} from '@here-is-order/http-contract/purchase-orders';
+import {
+  apiGet,
+  apiGetDecoded,
+  apiPatchDecoded,
+  apiPostDecoded,
+  ApiError,
+} from '@/lib/api';
 import { Item, PurchaseOrderDetail, PurchaseOrderItem } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -78,7 +96,11 @@ function OrderDetailPageContent() {
     setError('');
     try {
       const [detail, loadedItems] = await Promise.all([
-        apiGet<PurchaseOrderDetail>(`/api/purchase-orders/${orderId.value}`, signal),
+        apiGetDecoded(
+          purchaseOrderPaths.detail(orderId.value),
+          purchaseOrderDetailSchema,
+          signal,
+        ),
         apiGet<Item[]>('/api/items', signal),
       ]);
       setSelectedOrder(detail);
@@ -174,11 +196,17 @@ function OrderDetailPageContent() {
     return () => document.removeEventListener('click', interceptNavigation, true);
   }, [hasUnsavedDraft]);
 
-  const updateOrderStatus = async (status: PurchaseOrderDetail['status']) => {
+  const updateOrderStatus = async (
+    status: NonNullable<RevisePurchaseOrderRequest['status']>,
+  ) => {
     if (!selectedOrder) return;
 
     try {
-      await apiPatch(`/api/purchase-orders/${selectedOrder.id}`, { status });
+      await apiPatchDecoded(
+        purchaseOrderPaths.detail(selectedOrder.id),
+        purchaseOrderRowResultSchema,
+        { status } satisfies RevisePurchaseOrderRequest,
+      );
       await loadOrderDetail();
       setMessage('발주 상태가 변경되었습니다.');
       return true;
@@ -202,10 +230,14 @@ function OrderDetailPageContent() {
 
     try {
       setSavingDraft(true);
-      await apiPatch(`/api/purchase-orders/${selectedOrder.id}`, {
-        title,
-        note,
-      });
+      await apiPatchDecoded(
+        purchaseOrderPaths.detail(selectedOrder.id),
+        purchaseOrderRowResultSchema,
+        {
+          title,
+          note,
+        } satisfies RevisePurchaseOrderRequest,
+      );
       await loadOrderDetail();
       setMessage('초안 저장되었습니다.');
       return true;
@@ -288,7 +320,11 @@ function OrderDetailPageContent() {
     }
 
     try {
-      await apiPost(`/api/purchase-orders/${selectedOrder.id}/items`, { items: rows });
+      await apiPostDecoded(
+        purchaseOrderPaths.items(selectedOrder.id),
+        addPurchaseOrderItemsResultSchema,
+        { items: rows } satisfies AddPurchaseOrderItemsRequest,
+      );
       setOpenAddItem(false);
       setAddItemRows(createInitialAddItemRows());
       await loadOrderDetail();
@@ -325,10 +361,14 @@ function OrderDetailPageContent() {
     }
 
     try {
-      await apiPatch(`/api/purchase-orders/${selectedOrder.id}/items/${orderItemEdit.item.id}`, {
-        ordered_qty: qty,
-        memo: editMemo.trim() || null,
-      });
+      await apiPatchDecoded(
+        purchaseOrderPaths.item(selectedOrder.id, orderItemEdit.item.id),
+        editPurchaseOrderItemResultSchema,
+        {
+          ordered_qty: qty,
+          memo: editMemo.trim() || null,
+        } satisfies EditPurchaseOrderItemRequest,
+      );
       setOrderItemEdit({ open: false });
       await loadOrderDetail();
       setMessage('발주 항목이 수정되었습니다.');
@@ -370,10 +410,14 @@ function OrderDetailPageContent() {
     }
 
     try {
-      await apiPost(`/api/purchase-orders/${selectedOrder.id}/items/${receiveOpen.item.id}/receive`, {
-        qty,
-        note: receiveNote.trim() || undefined,
-      });
+      await apiPostDecoded(
+        purchaseOrderPaths.receive(selectedOrder.id, receiveOpen.item.id),
+        receivePurchaseOrderItemResultSchema,
+        {
+          qty,
+          note: receiveNote.trim() || undefined,
+        } satisfies ReceivePurchaseOrderItemRequest,
+      );
       setReceiveOpen({ open: false });
       await loadOrderDetail();
       notifyInventoryStateUpdated();

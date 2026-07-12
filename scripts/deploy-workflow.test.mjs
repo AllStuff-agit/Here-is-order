@@ -36,3 +36,26 @@ test('production jobs are ordered and smoke-tested', () => {
   assert.match(workflow, /smoke-deployment\.mjs web/);
   assert.match(workflow, /cancel-in-progress: false/);
 });
+
+test('verify job runs web checks in CI order', () => {
+  const verifyJob = workflow.match(
+    /^  verify:\n([\s\S]*?)(?=^  [a-zA-Z0-9_-]+:\n)/m,
+  )?.[1];
+  assert.ok(verifyJob, 'verify job must exist');
+
+  const runCommands = [...verifyJob.matchAll(/^\s+run:\s+(.+)$/gm)].map(
+    ([, command]) => command.trim(),
+  );
+  const expectedWebCommands = [
+    'npm ci --prefix frontend',
+    'npm run test --prefix frontend',
+    'npm run lint --prefix frontend',
+    'npm run build --prefix frontend',
+    'npm run build:cloudflare --prefix frontend',
+  ];
+
+  assert.deepEqual(
+    runCommands.filter((command) => expectedWebCommands.includes(command)),
+    expectedWebCommands,
+  );
+});

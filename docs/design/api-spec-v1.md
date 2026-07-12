@@ -261,6 +261,8 @@ Query: `limit`(기본 100)
 
 ## 6. 발주
 
+발주 API의 성공 `data` projection은 Worker가 직렬화하기 전과 브라우저 fetch Adapter가 envelope를 decode한 후에 포터블 `@here-is-order/http-contract` 런타임 schema로 검증합니다. 이 계약 module은 발주 path, 성공 projection, envelope, 브라우저 요청 type을 공유하지만 raw Hono 요청의 coercion과 validation 순서는 여전히 Worker Adapter가 소유합니다. 따라서 기존 HTTP status, error code·message, legacy coercion, 아래의 nullable 재조회 race는 변하지 않습니다.
+
 발주 상태:
 
 ```text
@@ -285,9 +287,10 @@ draft | ordered | partially_received | fully_received | canceled
 | PATCH | `/api/purchase-orders/:id` | `{ title?, note?, external_order_ref?, status? }` | `PurchaseOrderRow \| null` |
 | DELETE | `/api/purchase-orders/:id` | - | `{ deleted: true }` |
 
-생성/상세/수정/입고 응답의 공개 발주서 row는 `{ id, title, status, order_date, external_order_ref, note, is_deleted, deleted_at, created_at, updated_at }`입니다.
+생성/수정/입고 응답의 공개 발주서 row는 `{ id, title, status, order_date, external_order_ref, note, is_deleted, deleted_at, created_at, updated_at }`입니다. 상세의 `PurchaseOrderDetail`은 이 row에 top-level `ordered_qty`, `received_qty`, `items`를 더합니다.
 
 - `GET /api/purchase-orders/:id`는 200일 때 항상 non-null `PurchaseOrderDetail`을 반환하고, 활성 발주서가 없으면 404를 반환합니다.
+- `PurchaseOrderDetail.ordered_qty`와 `PurchaseOrderDetail.received_qty`는 각각 상세에 포함된 활성 `items`의 `ordered_qty`와 `received_qty` 합계입니다. 계약 schema는 top-level 합계와 항목 합계가 다르면 성공 응답을 거부합니다.
 - 생성과 PATCH는 DB 변경 성공 후 legacy 순차 재조회 사이에 대상 row가 사라지는 race를 보존하므로 드물게 200/201의 `data`가 `null`일 수 있습니다. 일반적인 미존재 성공을 뜻하지 않습니다.
 - `POST /api/purchase-orders/with-items`의 `status`는 어떤 JSON 값이든 선택적으로 받을 수 있지만 무시하며, 발주서는 항상 `draft`로 생성합니다.
 

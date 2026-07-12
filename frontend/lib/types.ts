@@ -1,3 +1,10 @@
+import type {
+  PurchaseOrderDetail as ContractPurchaseOrderDetail,
+  PurchaseOrderDetailItem,
+  PurchaseOrderItemInput,
+  PurchaseOrderSummary,
+} from '@here-is-order/http-contract/purchase-orders';
+
 export type ApiErrorPayload = {
   code: string;
   message: string;
@@ -67,38 +74,10 @@ export type DashboardData = {
   };
 };
 
-export type PurchaseOrder = {
-  id: number;
-  title: string;
-  status: 'draft' | 'ordered' | 'partially_received' | 'fully_received' | 'canceled';
-  order_date: string | null;
-  external_order_ref: string | null;
-  note: string | null;
-  ordered_qty: number;
-  received_qty: number;
-  created_at: string;
-  updated_at: string;
-};
-
-export type PurchaseOrderBatchItemPayload = {
-  item_id: number;
-  ordered_qty: number;
-  memo: string | null;
-};
-
-export type PurchaseOrderItem = {
-  id: number;
-  item_id: number;
-  item_name: string;
-  ordered_qty: number;
-  received_qty: number;
-  remaining_qty: number;
-  memo: string | null;
-};
-
-export type PurchaseOrderDetail = PurchaseOrder & {
-  items: PurchaseOrderItem[];
-};
+export type PurchaseOrder = PurchaseOrderSummary;
+export type PurchaseOrderBatchItemPayload = PurchaseOrderItemInput;
+export type PurchaseOrderItem = PurchaseOrderDetailItem;
+export type PurchaseOrderDetail = ContractPurchaseOrderDetail;
 
 export type UserRole = 'admin' | 'staff';
 

@@ -55,6 +55,8 @@ export type OrderItemRow = {
 };
 
 export type PurchaseOrderDetail = PurchaseOrderRow & {
+  ordered_qty: number;
+  received_qty: number;
   items: Array<{
     id: number;
     item_id: number;
@@ -350,7 +352,7 @@ export function purchaseOrders(
     const order = await selectActivePurchaseOrder(db, orderId);
     if (!order) return notFound('발주서를 찾지 못했습니다.');
 
-    const items = await db.prepare(
+    const { results: items } = await db.prepare(
       `SELECT oi.id, oi.item_id, i.name AS item_name, i.spec,
               oi.ordered_qty, oi.received_qty,
               (oi.ordered_qty - oi.received_qty) AS remaining_qty, oi.memo
@@ -360,7 +362,15 @@ export function purchaseOrders(
         ORDER BY oi.id DESC`,
     ).bind(orderId).all<PurchaseOrderDetail['items'][number]>();
 
-    return success({ ...order, items: items.results });
+    const orderedQty = items.reduce((sum, item) => sum + Number(item.ordered_qty), 0);
+    const receivedQty = items.reduce((sum, item) => sum + Number(item.received_qty), 0);
+
+    return success({
+      ...(order as PurchaseOrderRow),
+      ordered_qty: orderedQty,
+      received_qty: receivedQty,
+      items,
+    });
   }
 
   async function stageAddItemsToDraft(

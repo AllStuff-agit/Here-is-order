@@ -3,7 +3,24 @@
 import * as React from 'react';
 import { Calendar, ReceiptText, SendHorizonal, Trash2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
+import {
+  addPurchaseOrderItemsResultSchema,
+  deletePurchaseOrderResultSchema,
+  purchaseOrderPaths,
+  purchaseOrderRowResultSchema,
+  purchaseOrderSummaryListSchema,
+  type AddPurchaseOrderItemsRequest,
+  type CreatePurchaseOrderRequest,
+  type RevisePurchaseOrderRequest,
+} from '@here-is-order/http-contract/purchase-orders';
+import {
+  apiDeleteDecoded,
+  apiGet,
+  apiGetDecoded,
+  apiPatchDecoded,
+  apiPostDecoded,
+  ApiError,
+} from '@/lib/api';
 import { formatDateTime, parseDateLike } from '@/lib/format';
 import { Item, PurchaseOrder } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
@@ -41,12 +58,6 @@ import {
 type PrefillInfo = {
   itemId: number | null;
   qty: number;
-};
-
-type PrefillItem = {
-  item_id: number;
-  quantity: number;
-  unit_price: number;
 };
 
 export default function OrdersPage() {
@@ -100,7 +111,10 @@ export default function OrdersPage() {
       if (search) params.set('q', search);
 
       const [rows, loadedItems] = await Promise.all([
-        apiGet<PurchaseOrder[]>(`/api/purchase-orders${params.toString() ? `?${params.toString()}` : ''}`),
+        apiGetDecoded(
+          `${purchaseOrderPaths.collection}${params.toString() ? `?${params.toString()}` : ''}`,
+          purchaseOrderSummaryListSchema,
+        ),
         apiGet<Item[]>('/api/items'),
       ]);
       setOrders(rows || []);
@@ -138,17 +152,34 @@ export default function OrdersPage() {
           return;
         }
 
-        const created = await apiPost<PurchaseOrder>('/api/purchase-orders', {
-          title: `${targetItem.name} 발주 초안`,
-          note: '알림에서 생성된 초안',
-          status: 'draft',
-        });
+        const created = await apiPostDecoded(
+          purchaseOrderPaths.collection,
+          purchaseOrderRowResultSchema,
+          {
+            title: `${targetItem.name} 발주 초안`,
+            note: '알림에서 생성된 초안',
+            status: 'draft',
+          } satisfies CreatePurchaseOrderRequest,
+        );
+        if (created === null) {
+          throw new ApiError(
+            '생성된 발주서를 확인할 수 없습니다. 목록을 새로고침해주세요.',
+            502,
+            'INVALID_RESPONSE',
+          );
+        }
 
-        await apiPost(`/api/purchase-orders/${created.id}/items`, {
-          item_id: prefillTargetItemId,
-          ordered_qty: prefillInfo.qty,
-          memo: '알림에서 자동 추가',
-        });
+        await apiPostDecoded(
+          purchaseOrderPaths.items(created.id),
+          addPurchaseOrderItemsResultSchema,
+          {
+            items: [{
+              item_id: prefillTargetItemId,
+              ordered_qty: prefillInfo.qty,
+              memo: '알림에서 자동 추가',
+            }],
+          } satisfies AddPurchaseOrderItemsRequest,
+        );
 
         await loadOrders();
         router.replace(`/orders/${created.id}`);
@@ -173,7 +204,11 @@ export default function OrdersPage() {
 
   const confirmOrder = async (orderId: number) => {
     try {
-      await apiPatch(`/api/purchase-orders/${orderId}`, { status: 'ordered' });
+      await apiPatchDecoded(
+        purchaseOrderPaths.detail(orderId),
+        purchaseOrderRowResultSchema,
+        { status: 'ordered' } satisfies RevisePurchaseOrderRequest,
+      );
       await loadOrders();
       setMessage('발주 상태가 변경되었습니다.');
     } catch (error) {
@@ -185,7 +220,10 @@ export default function OrdersPage() {
     if (!deleteTarget) return;
 
     try {
-      await apiDelete(`/api/purchase-orders/${deleteTarget.id}`);
+      await apiDeleteDecoded(
+        purchaseOrderPaths.detail(deleteTarget.id),
+        deletePurchaseOrderResultSchema,
+      );
       await loadOrders();
       setMessage('발주서가 삭제되었습니다.');
     } catch (error) {
@@ -195,27 +233,28 @@ export default function OrdersPage() {
     }
   };
 
-  const createDraftOrderAndOpen = async (title: string, note: string | null, prefillItems?: PrefillItem[]) => {
+  const createDraftOrderAndOpen = async (title: string, note: string | null) => {
     if (creatingOrder) return;
     try {
       setCreatingOrder(true);
       setNewDraftError('');
-      let createdId: number;
-      if (prefillItems && prefillItems.length > 0) {
-        const created = await apiPost<PurchaseOrder>('/api/purchase-orders/with-items', {
-          order_date: new Date().toISOString().slice(0, 10),
-          note: note ?? '',
-          items: prefillItems,
-        });
-        createdId = created.id;
-      } else {
-        const created = await apiPost<PurchaseOrder>('/api/purchase-orders', {
+      const created = await apiPostDecoded(
+        purchaseOrderPaths.collection,
+        purchaseOrderRowResultSchema,
+        {
           title,
           note,
           status: 'draft',
-        });
-        createdId = created.id;
+        } satisfies CreatePurchaseOrderRequest,
+      );
+      if (created === null) {
+        throw new ApiError(
+          '생성된 발주서를 확인할 수 없습니다. 목록을 새로고침해주세요.',
+          502,
+          'INVALID_RESPONSE',
+        );
       }
+      const createdId = created.id;
       setCreateDraftOpen(false);
       router.push(`/orders/${createdId}`);
     } catch (e) {

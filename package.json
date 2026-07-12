@@ -32,6 +32,7 @@
     "db:bootstrap:remote:from-notion": "npm run import:notion && npm run db:migrate:remote && npm run db:seed:remote && npm run db:seed:admin:remote"
   },
   "dependencies": {
+    "@here-is-order/http-contract": "file:packages/http-contract",
     "hono": "^4.12.4"
   },
   "devDependencies": {

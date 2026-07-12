@@ -5,7 +5,9 @@
 
 ## 기준선
 
-| 항목 | 현재 상태 |
+> 아래 수치는 리뷰 작성 시점의 스냅샷으로, 후속 리팩터링이 반영된 현재 라인 수·테스트 수가 아닙니다.
+
+| 항목 | 리뷰 시점 상태 |
 | --- | ---: |
 | Worker | `src/index.ts` 2,016줄 |
 | 발주 상세 화면 | 851줄 |
@@ -18,6 +20,7 @@
 ## 1. 발주 생명주기 module 심화
 
 **추천 강도:** Strong
+**완료 상태:** Completed — deep Purchase Order module과 integration test 안전망으로 상태 규칙, D1 batch, domain error를 집중시켰습니다.
 **Files:** `src/index.ts:1170-1948`, `migrations/002_integrity_and_roles.sql:118-164`, `test/api.integration.test.ts:96-343`, `docs/design/api-spec-v1.md:264-365`
 
 ### Problem
@@ -105,6 +108,7 @@ flowchart LR
 ## 4. 실행 가능한 HTTP contract module
 
 **추천 강도:** Strong
+**완료 상태:** Completed — [Purchase Order HTTP Contract 구현 계획](superpowers/plans/2026-07-12-purchase-order-http-contract.md)에 따라 Worker·browser Adapter가 포터블 런타임 계약을 공유합니다.
 **Files:** `src/index.ts:39-55`, `frontend/lib/types.ts:1-114`, `frontend/lib/api.ts:15-56`, `test/api.integration.test.ts`, `scripts/smoke-deployment.mjs:50-64`, `docs/design/api-spec-v1.md`
 
 ### Problem
@@ -162,4 +166,4 @@ flowchart LR
 
 ## Top recommendation
 
-**1번 발주 생명주기 module 심화**부터 시작하는 것이 가장 안전합니다. 가장 많은 invariant·동시성·감사 지식을 집중시키며 기존 integration test를 바로 안전망으로 사용할 수 있습니다. 첫 단계에서는 발주 HTTP contract를 characterization한 뒤 implementation을 deep module 뒤로 이동합니다.
+**1번 발주 생명주기 module 심화는 완료했습니다.** 후속으로 [Purchase Order HTTP Contract 구현 계획](superpowers/plans/2026-07-12-purchase-order-http-contract.md)에서 발주 HTTP contract characterization, 상세 합계 보정, Worker·browser 런타임 검증을 완료했습니다. 다음 구조적 후보는 2번 브라우저 발주 workflow module이며, 새 구현은 별도 계획과 안전망으로 진행합니다.
