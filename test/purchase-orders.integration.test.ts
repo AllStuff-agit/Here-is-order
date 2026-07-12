@@ -54,16 +54,26 @@ describe('test trigger helper', () => {
       BEGIN
         SELECT 1;
       END`;
-    await env.DB.prepare(triggerSql).run();
-
-    await expect(withTestTrigger(
+    await withTestTrigger(
       env.DB,
       triggerName,
       triggerSql,
       async () => {
-        throw new Error('expected callback failure');
+        await expect(withTestTrigger(
+          env.DB,
+          triggerName,
+          triggerSql,
+          async () => {
+            throw new Error('expected callback failure');
+          },
+        )).rejects.toThrow('expected callback failure');
+
+        const nestedTrigger = await env.DB.prepare(
+          `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = ?`,
+        ).bind(triggerName).first();
+        expect(nestedTrigger).toBeNull();
       },
-    )).rejects.toThrow('expected callback failure');
+    );
 
     const trigger = await env.DB.prepare(
       `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = ?`,

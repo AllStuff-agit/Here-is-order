@@ -325,7 +325,7 @@ draft | ordered | partially_received | fully_received | canceled
 - 한 행이라도 잘못되면 전체 요청을 거부하고 발주서/항목을 하나도 만들지 않습니다.
 - 같은 `item_id`가 여러 번 나오면 수량을 합쳐 활성 발주 항목 하나로 만듭니다.
 - 발주서, 항목, 감사로그는 하나의 D1 batch에서 생성됩니다.
-- 성공 `data`는 생성된 발주서 row입니다. 상세 항목이 필요하면 `GET /api/purchase-orders/:id`를 호출합니다.
+- 성공 `data`가 `null`이 아니면 생성된 발주서 row입니다. 상세 항목이 필요하면 `GET /api/purchase-orders/:id`를 호출합니다.
 
 상세 응답의 각 `items` 행:
 
