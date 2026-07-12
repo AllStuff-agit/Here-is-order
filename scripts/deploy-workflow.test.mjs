@@ -36,3 +36,10 @@ test('production jobs are ordered and smoke-tested', () => {
   assert.match(workflow, /smoke-deployment\.mjs web/);
   assert.match(workflow, /cancel-in-progress: false/);
 });
+
+test('web contract adapter tests run after install and before lint and build', () => {
+  assert.match(
+    workflow,
+    /npm ci --prefix frontend[\s\S]*?npm run test --prefix frontend[\s\S]*?npm run lint --prefix frontend[\s\S]*?npm run build --prefix frontend/,
+  );
+});

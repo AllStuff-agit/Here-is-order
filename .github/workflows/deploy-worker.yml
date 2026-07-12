@@ -47,6 +47,9 @@ jobs:
       - name: Install web dependencies
         run: npm ci --prefix frontend
 
+      - name: Test web contract adapters
+        run: npm run test --prefix frontend
+
       - name: Lint web
         run: npm run lint --prefix frontend
 
