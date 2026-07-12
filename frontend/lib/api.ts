@@ -80,7 +80,15 @@ async function apiRequestDecoded<T>(
   let input: unknown;
   try {
     input = await response.json();
-  } catch {
+  } catch (error) {
+    if (
+      error !== null
+      && typeof error === 'object'
+      && 'name' in error
+      && error.name === 'AbortError'
+    ) {
+      throw error;
+    }
     throw new ApiError(
       '응답 계약이 올바르지 않습니다.',
       response.status,
@@ -101,6 +109,10 @@ async function apiRequestDecoded<T>(
 
   if (!envelope.ok) {
     throw new ApiError(envelope.error.message, response.status, envelope.error.code);
+  }
+
+  if (!response.ok) {
+    throw new ApiError(`요청 실패 (${response.status})`, response.status);
   }
 
   return envelope.data;

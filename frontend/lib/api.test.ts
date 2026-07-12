@@ -38,4 +38,32 @@ describe('decoded browser HTTP Adapter', () => {
         message: '상태가 변경되었습니다.',
       });
   });
+
+  it('rejects a non-2xx response even when it has a valid success envelope', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { id: 7 },
+    }), { status: 500 })));
+
+    await expect(apiGetDecoded('/contract', z.object({ id: z.number() }).strict()))
+      .rejects.toMatchObject({
+        name: 'ApiError',
+        status: 500,
+        message: '요청 실패 (500)',
+      });
+  });
+
+  it('preserves AbortError when reading the response body is cancelled', async () => {
+    const abortError = new DOMException('요청이 취소되었습니다.', 'AbortError');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: vi.fn(async () => {
+        throw abortError;
+      }),
+    } as unknown as Response)));
+
+    await expect(apiGetDecoded('/contract', z.object({ id: z.number() }).strict()))
+      .rejects.toBe(abortError);
+  });
 });
