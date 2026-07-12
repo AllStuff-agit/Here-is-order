@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import {
   purchaseOrders,
+  type PurchaseOrderRevision,
   type PurchaseOrderResult,
 } from './purchase-orders';
 
@@ -1257,20 +1258,19 @@ app.get('/api/purchase-orders/:id', async (c) => {
 });
 
 app.patch('/api/purchase-orders/:id', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
-  const patches: string[] = [];
-  const params: unknown[] = [];
-  let requestedStatus: OrderStatus | null = null;
+  const change: PurchaseOrderRevision = {};
 
   if ('title' in payload) {
     const title = String(payload.title || '').trim();
-    if (!title) return c.json(apiErr('INVALID_INPUT', '발주명은 빈 값이 될 수 없습니다.'), 400);
-    patches.push('title = ?');
-    params.push(title);
+    if (!title) {
+      return c.json(apiErr('INVALID_INPUT', '발주명은 빈 값이 될 수 없습니다.'), 400);
+    }
+    change.title = title;
   }
 
   if ('status' in payload) {
@@ -1281,169 +1281,33 @@ app.patch('/api/purchase-orders/:id', async (c) => {
     if (status === 'partially_received' || status === 'fully_received') {
       return c.json(apiErr('INVALID_STATUS_TRANSITION', '부분입고/입고완료 상태는 입고 처리에서 자동으로 변경됩니다.'), 400);
     }
-
-    patches.push('status = ?');
-    params.push(status);
-    requestedStatus = status;
+    change.requestedStatus = status;
   }
 
   if ('note' in payload) {
-    patches.push('note = ?');
-    params.push(payload.note == null ? null : String(payload.note));
+    change.note = payload.note == null ? null : String(payload.note);
   }
 
   if ('external_order_ref' in payload) {
-    patches.push('external_order_ref = ?');
-    params.push(payload.external_order_ref == null ? null : String(payload.external_order_ref));
+    change.externalOrderRef = payload.external_order_ref == null
+      ? null
+      : String(payload.external_order_ref);
   }
 
-  if (!patches.length) {
-    return c.json(apiErr('INVALID_INPUT', '수정할 데이터가 없습니다.'), 400);
-  }
-
-  const before = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0')
-    .bind(id)
-    .first();
-  if (!before) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
-  const previousStatus = String((before as { status?: string }).status || '') as OrderStatus;
-  if (requestedStatus !== null && requestedStatus !== previousStatus) {
-    if (requestedStatus === 'draft') {
-      return c.json(apiErr('INVALID_STATUS_TRANSITION', '확정된 발주서는 초안으로 되돌릴 수 없습니다.'), 400);
-    }
-    if (requestedStatus === 'ordered' && previousStatus !== 'draft') {
-      return c.json(apiErr('INVALID_STATUS_TRANSITION', '초안 상태의 발주서만 확정할 수 있습니다.'), 400);
-    }
-    if (requestedStatus === 'canceled') {
-      if (previousStatus !== 'draft' && previousStatus !== 'ordered') {
-        return c.json(apiErr('INVALID_STATUS_TRANSITION', '입고가 시작되었거나 종료된 발주서는 취소할 수 없습니다.'), 400);
-      }
-      const receipt = await c.env.DB.prepare(
-        `SELECT COALESCE(SUM(received_qty), 0) AS received_qty
-           FROM order_items WHERE order_id = ? AND is_deleted = 0`
-      ).bind(id).first<{ received_qty: number }>();
-      if (Number(receipt?.received_qty || 0) > 0) {
-        return c.json(apiErr('INVALID_STATUS_TRANSITION', '입고가 시작된 발주서는 취소할 수 없습니다.'), 400);
-      }
-    }
-  }
-
-
-  if (requestedStatus === 'ordered') {
-    const row = await c.env.DB.prepare(
-      'SELECT COUNT(1) AS cnt FROM order_items WHERE order_id = ? AND is_deleted = 0'
-    ).bind(id).first<{ cnt: number }>();
-    const itemCount = Number(row?.cnt || 0);
-    if (itemCount <= 0) {
-      return c.json(apiErr('INVALID_STATUS_TRANSITION', '발주 항목이 없는 초안은 발주 확정할 수 없습니다.'), 400);
-    }
-
-    const prevStatus = String((before as { status?: string }).status || '');
-    if (prevStatus === 'draft') {
-      patches.push('order_date = date("now")');
-    }
-  }
-
-  let q = `UPDATE purchase_orders SET ${patches.join(', ')}, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`;
-  const updateParams: unknown[] = [...params, id];
-  if (requestedStatus !== null) {
-    q += ' AND status = ?';
-    updateParams.push(previousStatus);
-    if (requestedStatus === 'ordered') {
-      q += ` AND EXISTS (
-        SELECT 1 FROM order_items
-         WHERE order_id = purchase_orders.id AND is_deleted = 0
-      )`;
-    }
-    if (requestedStatus === 'canceled') {
-      q += ` AND NOT EXISTS (
-        SELECT 1 FROM order_items
-         WHERE order_id = purchase_orders.id AND is_deleted = 0 AND received_qty > 0
-      )`;
-    }
-  }
-
-  const batchResult = await c.env.DB.batch([
-    c.env.DB.prepare(q).bind(...updateParams),
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       SELECT ?, 'update', 'purchase_order', po.id, ?,
-              json_object(
-                'id', po.id, 'title', po.title, 'status', po.status,
-                'order_date', po.order_date, 'external_order_ref', po.external_order_ref,
-                'note', po.note, 'is_deleted', po.is_deleted,
-                'created_at', po.created_at, 'updated_at', po.updated_at
-              )
-         FROM purchase_orders po
-        WHERE po.id = ? AND changes() = 1`
-    ).bind(user.id, JSON.stringify(before), id),
-  ]);
-
-  if ((batchResult[0] as D1Result).meta.changes === 0) {
-    return c.json(apiErr('CONFLICT', '발주 상태가 변경되어 수정할 수 없습니다.'), 409);
-  }
-
-  const after = await c.env.DB.prepare(`SELECT ${ORDER_PUBLIC_COLUMNS} FROM purchase_orders WHERE id = ? AND is_deleted = 0`)
-    .bind(id)
-    .first();
-
-  return c.json(apiOk(after));
+  return purchaseOrderResponse(
+    c,
+    await purchaseOrders(c.env.DB, actor.id).revise(id, change),
+  );
 });
 
 app.delete('/api/purchase-orders/:id', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const actor = c.get('user') as SessionUser;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
-
-  const before = await c.env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ?').bind(id).first();
-  if (!before) return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
-  if ((before as { is_deleted?: number }).is_deleted === 1) {
-    return c.json(apiErr('NOT_FOUND', '발주서를 찾지 못했습니다.'), 404);
-  }
-  if ((before as { status?: string }).status !== 'draft') {
-    return c.json(apiErr('ORDER_DELETE_CONFLICT', '확정되었거나 입고가 시작된 발주서는 삭제할 수 없습니다.'), 409);
-  }
-
-  const after = { ...before, is_deleted: 1 };
-  const deleteToken = crypto.randomUUID();
-  const batchResult = await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE order_items
-          SET is_deleted = 1, deleted_at = datetime('now'), updated_at = datetime('now')
-        WHERE order_id = ? AND is_deleted = 0
-          AND EXISTS (
-            SELECT 1 FROM purchase_orders po
-             WHERE po.id = ? AND po.is_deleted = 0 AND po.status = 'draft'
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM order_items received
-             WHERE received.order_id = ? AND received.received_qty > 0
-          )`
-    ).bind(id, id, id),
-    c.env.DB.prepare(
-      `UPDATE purchase_orders
-          SET is_deleted = 1, deleted_at = datetime('now'), updated_at = datetime('now'),
-              creation_token = ?
-        WHERE id = ? AND is_deleted = 0 AND status = 'draft'
-          AND NOT EXISTS (
-            SELECT 1 FROM order_items WHERE order_id = ? AND received_qty > 0
-          )`
-    ).bind(deleteToken, id, id),
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       SELECT ?, 'soft_delete', 'purchase_order', id, ?, ?
-         FROM purchase_orders WHERE creation_token = ?`
-    ).bind(user.id, JSON.stringify(before), JSON.stringify(after), deleteToken),
-    c.env.DB.prepare(
-      'UPDATE purchase_orders SET creation_token = NULL WHERE creation_token = ?'
-    ).bind(deleteToken),
-  ]);
-
-  if ((batchResult[1] as D1Result).meta.changes === 0) {
-    return c.json(apiErr('ORDER_DELETE_CONFLICT', '발주 상태가 변경되어 삭제할 수 없습니다.'), 409);
-  }
-  return c.json(apiOk({ deleted: true }));
+  return purchaseOrderResponse(
+    c,
+    await purchaseOrders(c.env.DB, actor.id).deleteDraft(id),
+  );
 });
 
 app.post('/api/purchase-orders/:id/items', async (c) => {

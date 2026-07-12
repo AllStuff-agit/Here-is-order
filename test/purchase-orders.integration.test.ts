@@ -227,3 +227,103 @@ describe('Purchase Order module draft creation', () => {
     expect(Number(row?.count ?? 0)).toBe(0);
   });
 });
+
+describe('Purchase Order module revision and deletion', () => {
+  it('preserves same-status updates and terminal metadata revisions', async () => {
+    const { module } = await createActor();
+    const itemId = await createInventoryItem('revision 원두');
+    const created = await module.createDraftWithItems({
+      title: 'revision 발주',
+      note: null,
+      items: [{ itemId, orderedQty: 1, memo: null }],
+    });
+    if (!created.ok || !created.value) throw new Error('expected creation success');
+
+    const confirmed = await module.revise(created.value.id, { requestedStatus: 'ordered' });
+    expect(confirmed).toEqual({
+      ok: true,
+      value: expect.objectContaining({ status: 'ordered' }),
+    });
+    const sameStatus = await module.revise(created.value.id, { requestedStatus: 'ordered' });
+    expect(sameStatus.ok).toBe(true);
+
+    await env.DB.prepare(
+      `UPDATE purchase_orders SET status = 'fully_received' WHERE id = ?`,
+    ).bind(created.value.id).run();
+    const metadata = await module.revise(created.value.id, {
+      title: '완료 후 수정',
+      note: '완료 memo',
+      externalOrderRef: 'external-2',
+    });
+    expect(metadata).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        title: '완료 후 수정',
+        status: 'fully_received',
+        note: '완료 memo',
+        external_order_ref: 'external-2',
+      }),
+    });
+  });
+
+  it('returns null when a revised order is deleted before active readback', async () => {
+    const { module } = await createActor();
+    const created = await module.createDraft({
+      title: 'revision readback 초안',
+      note: null,
+    });
+    if (!created.ok || !created.value) throw new Error('expected creation success');
+
+    await env.DB.prepare(
+      `CREATE TRIGGER test_delete_revised_order_before_readback
+       AFTER INSERT ON audit_logs
+       WHEN NEW.action = 'update' AND NEW.entity_type = 'purchase_order'
+       BEGIN
+         UPDATE purchase_orders
+            SET is_deleted = 1, deleted_at = datetime('now')
+          WHERE id = NEW.entity_id;
+       END`,
+    ).run();
+
+    try {
+      const revised = await module.revise(created.value.id, {
+        title: 'revision readback 수정',
+      });
+      expect(revised).toEqual({ ok: true, value: null });
+    } finally {
+      await env.DB.prepare(
+        'DROP TRIGGER IF EXISTS test_delete_revised_order_before_readback',
+      ).run();
+    }
+  });
+
+  it('deletes only an unreceived draft and rejects received rows even when deleted', async () => {
+    const { module } = await createActor();
+    const itemId = await createInventoryItem('delete 원두');
+    const deletable = await module.createDraft({ title: '삭제 가능', note: null });
+    if (!deletable.ok || !deletable.value) throw new Error('expected creation success');
+    await expect(module.deleteDraft(deletable.value.id)).resolves.toEqual({
+      ok: true,
+      value: { deleted: true },
+    });
+
+    const blocked = await module.createDraftWithItems({
+      title: '삭제 충돌',
+      note: null,
+      items: [{ itemId, orderedQty: 1, memo: null }],
+    });
+    if (!blocked.ok || !blocked.value) throw new Error('expected creation success');
+    await env.DB.prepare(
+      `UPDATE order_items
+          SET received_qty = 1, is_deleted = 1, deleted_at = datetime('now')
+        WHERE order_id = ?`,
+    ).bind(blocked.value.id).run();
+    await expect(module.deleteDraft(blocked.value.id)).resolves.toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        kind: 'conflict',
+        code: 'ORDER_DELETE_CONFLICT',
+      }),
+    });
+  });
+});

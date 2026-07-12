@@ -340,6 +340,23 @@ describe('발주 상태 머신', () => {
     };
     expect(detail.data.status).toBe('ordered');
   });
+
+  it('앞선 필드를 검증한 뒤 나중 필드를 coercion한다', async () => {
+    const sessionToken = await createSession();
+    const response = await apiRequest('/api/purchase-orders/1', sessionToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ title: '', status: { toString: null } }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: '발주명은 빈 값이 될 수 없습니다.',
+      },
+    });
+  });
 });
 
 describe('재고 원장 강제', () => {
