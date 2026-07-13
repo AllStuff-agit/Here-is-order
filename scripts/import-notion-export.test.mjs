@@ -16,6 +16,7 @@ import { buildNotionImportArtifacts } from './notion-import-core.mjs';
 const WRANGLER_BIN = fileURLToPath(
   new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url),
 );
+const IMPORT_CLI = fileURLToPath(new URL('./import-notion-export.mjs', import.meta.url));
 
 function runWrangler(args) {
   const result = spawnSync(process.execPath, [WRANGLER_BIN, ...args], {
@@ -64,6 +65,39 @@ test('validation 실패는 기존 승인 artifact를 바꾸지 않는다', (t) =
   assert.throws(() => generateNotionImport({ sourceDir, outDir, log: () => {} }), /NUL/);
   for (const target of targets) {
     assert.equal(fs.readFileSync(path.join(outDir, target), 'utf8'), `sentinel-${target}`);
+  }
+});
+
+test('CLI 실패 로그는 attacker-controlled collision detail을 노출하지 않는다', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hio-notion-cli-failure-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sourceDir = path.join(root, 'source');
+  fs.mkdirSync(sourceDir);
+  fs.writeFileSync(path.join(sourceDir, '01-safe.md'), '# ATTACKER_NAME\n분류: safe');
+  fs.writeFileSync(
+    path.join(sourceDir, '02-ATTACKER_ALPHA.md'),
+    '# ATTACKER_NAME\n분류: ATTACKER_CATEGORY',
+  );
+  fs.writeFileSync(
+    path.join(sourceDir, '03-ATTACKER_BETA.md'),
+    '# ATTACKER_NAME\n분류: ATTACKER_CATEGORY',
+  );
+
+  const result = spawnSync(process.execPath, [IMPORT_CLI, sourceDir], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'Notion import failed\n');
+  for (const attackerControlled of [
+    'ATTACKER_NAME',
+    'ATTACKER_CATEGORY',
+    '02-ATTACKER_ALPHA.md',
+    '03-ATTACKER_BETA.md',
+  ]) {
+    assert.ok(!result.stderr.includes(attackerControlled));
   }
 });
 

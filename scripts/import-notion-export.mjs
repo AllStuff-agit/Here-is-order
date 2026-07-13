@@ -59,8 +59,8 @@ export function generateNotionImport({
 function runCli() {
   try {
     generateNotionImport({ sourceDir: process.argv[2] ?? 'notion-export' });
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : 'Notion import failed');
+  } catch {
+    console.error('Notion import failed');
     process.exitCode = 1;
   }
 }
