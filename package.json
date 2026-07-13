@@ -22,6 +22,8 @@
     "db:init:remote": "npm run db:migrate:remote",
     "db:seed": "wrangler d1 execute hereisorder --local --file=data/seed_categories_items.sql",
     "db:generate:admin-seed": "node scripts/generate-admin-seed.mjs",
+    "db:recover-password": "node scripts/recover-password.mjs",
+    "test:d1-rest-batch-contract": "node scripts/d1-rest-batch-contract.mjs",
     "db:seed:admin": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --local --file=data/seed_admin.sql",
     "db:seed:remote": "node scripts/apply-notion-seed.mjs --remote",
     "db:seed:admin:remote": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --remote --file=data/seed_admin.sql",
