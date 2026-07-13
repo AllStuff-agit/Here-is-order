@@ -1,6 +1,8 @@
 import { env, exports } from 'cloudflare:workers';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { purchaseOrderDetailSchema } from '@here-is-order/http-contract/purchase-orders';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import worker from '../src/index';
 import { withTestTrigger } from './helpers/test-trigger';
 
 const TABLES_IN_DELETE_ORDER = [
@@ -39,6 +41,54 @@ async function createSession(role: 'admin' | 'staff' = 'admin') {
   return sessionToken;
 }
 
+async function createSessionWithExpiry(expiresAt: string) {
+  const token = `expiry-${crypto.randomUUID()}`;
+  const user = await env.DB.prepare(
+    `INSERT INTO users (username, password_hash, name, role)
+     VALUES (?, 'unused', '세션 테스트', 'admin')`,
+  ).bind(`expiry-${crypto.randomUUID()}`).run();
+  await env.DB.prepare(
+    'INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)',
+  ).bind(token, user.meta.last_row_id, expiresAt).run();
+  return { token, userId: Number(user.meta.last_row_id) };
+}
+
+async function createLegacyLoginUser() {
+  const username = `login-${crypto.randomUUID()}`;
+  const password = `password-${crypto.randomUUID()}`;
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(password),
+  );
+  const passwordHash = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  const user = await env.DB.prepare(
+    `INSERT INTO users (username, password_hash, name, role)
+     VALUES (?, ?, '로그인 테스트', 'admin')`,
+  ).bind(username, passwordHash).run();
+
+  return {
+    userId: Number(user.meta.last_row_id),
+    username,
+    password,
+  };
+}
+
+function loginRequest(username: string, password: string, protocol = 'http') {
+  return new Request(`${protocol}://example.com/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+function sessionTokenFromCookie(cookie: string) {
+  const value = cookie.match(/(?:^|;\s*)isorder_sid=([^;]+)/)?.[1];
+  if (!value) throw new Error('Login response did not contain a session token.');
+  return decodeURIComponent(value);
+}
+
 function apiRequest(path: string, sessionToken: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set('Cookie', `isorder_sid=${sessionToken}`);
@@ -61,6 +111,251 @@ async function expectApiError(
     error: { code, message },
   });
 }
+
+describe('세션 만료 형식', () => {
+  it.each([
+    ['future ISO', new Date(Date.now() + 3_600_000).toISOString(), 200],
+    ['past ISO', new Date(Date.now() - 3_600_000).toISOString(), 401],
+    ['future SQLite', '2999-01-01 00:00:00', 200],
+    ['past SQLite', '2000-01-01 00:00:00', 401],
+    ['invalid', 'not-a-timestamp', 401],
+  ])('%s session을 정확히 판정한다', async (_label, expiresAt, status) => {
+    const { token } = await createSessionWithExpiry(expiresAt);
+    const response = await apiRequest('/api/users/me', token);
+    expect(response.status).toBe(status);
+  });
+
+  it('현재 SQLite 시각과 같은 session을 만료로 판정한다', async () => {
+    const now = await env.DB.prepare("SELECT datetime('now') AS value")
+      .first<{ value: string }>();
+    const { token } = await createSessionWithExpiry(String(now?.value));
+    expect((await apiRequest('/api/users/me', token)).status).toBe(401);
+  });
+
+  it('HTTP 로그인은 canonical 30일 session을 만들고 만료 행을 cleanup한다', async () => {
+    const { userId, username, password } = await createLegacyLoginUser();
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES ('expired-before-login', ?, '2000-01-01 00:00:00'),
+              ('invalid-before-login', ?, 'not-a-timestamp')`,
+    ).bind(userId, userId).run();
+
+    const ctx = createExecutionContext();
+    const login = await worker.fetch(loginRequest(username, password), env, ctx);
+    expect(login.status).toBe(200);
+    await expect(login.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        user: {
+          id: userId,
+          username,
+          name: '로그인 테스트',
+          role: 'admin',
+        },
+      },
+    });
+
+    const cookie = login.headers.get('Set-Cookie') ?? '';
+    expect(cookie).toContain('isorder_sid=');
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('Path=/');
+    expect(cookie).toContain('Max-Age=2592000');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(cookie).not.toContain('Secure');
+
+    const token = sessionTokenFromCookie(cookie);
+    await waitOnExecutionContext(ctx);
+
+    const session = await env.DB.prepare(
+      `SELECT expires_at,
+              unixepoch(expires_at) - unixepoch('now') AS lifetime_seconds
+         FROM sessions
+        WHERE token = ?`,
+    ).bind(token).first<{ expires_at: string; lifetime_seconds: number }>();
+    expect(session?.expires_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(session?.expires_at).not.toContain('T');
+    expect(session?.expires_at).not.toContain('Z');
+    expect(session?.lifetime_seconds).toBeGreaterThanOrEqual(2_591_998);
+    expect(session?.lifetime_seconds).toBeLessThanOrEqual(2_592_000);
+
+    const staleSessions = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+         FROM sessions
+        WHERE token IN ('expired-before-login', 'invalid-before-login')`,
+    ).first<{ count: number }>();
+    expect(staleSessions?.count).toBe(0);
+
+    const upgraded = await env.DB.prepare(
+      'SELECT password_hash FROM users WHERE id = ?',
+    ).bind(userId).first<{ password_hash: string }>();
+    expect(upgraded?.password_hash).toMatch(
+      /^pbkdf2_sha256\$100000\$[0-9a-f]{32}\$[0-9a-f]{64}$/,
+    );
+  });
+
+  it('HTTPS 로그인 cookie에만 Secure를 설정한다', async () => {
+    const { username, password } = await createLegacyLoginUser();
+    const ctx = createExecutionContext();
+    const login = await worker.fetch(
+      loginRequest(username, password, 'https'),
+      env,
+      ctx,
+    );
+
+    expect(login.status).toBe(200);
+    expect(login.headers.get('Set-Cookie') ?? '').toContain('; Secure');
+    await waitOnExecutionContext(ctx);
+  });
+
+  it('logout은 session을 삭제하고 cookie를 지워 token 재사용을 거부한다', async () => {
+    const { token, userId } = await createSessionWithExpiry('2999-01-01 00:00:00');
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES ('expired-before-logout', ?, '2000-01-01 00:00:00'),
+              ('invalid-before-logout', ?, 'not-a-timestamp')`,
+    ).bind(userId, userId).run();
+
+    const ctx = createExecutionContext();
+    const logout = await worker.fetch(
+      new Request('http://example.com/api/auth/logout', {
+        method: 'POST',
+        headers: { Cookie: `isorder_sid=${token}` },
+      }),
+      env,
+      ctx,
+    );
+
+    expect(logout.status).toBe(200);
+    await expect(logout.json()).resolves.toEqual({
+      ok: true,
+      data: { loggedOut: true },
+    });
+    const cookie = logout.headers.get('Set-Cookie') ?? '';
+    expect(cookie).toContain('isorder_sid=;');
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('Path=/');
+    expect(cookie).toContain('Max-Age=0');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(cookie).not.toContain('Secure');
+
+    await waitOnExecutionContext(ctx);
+    const remaining = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+         FROM sessions
+        WHERE token IN (?, 'expired-before-logout', 'invalid-before-logout')`,
+    ).bind(token).first<{ count: number }>();
+    expect(remaining?.count).toBe(0);
+    expect((await apiRequest('/api/users/me', token)).status).toBe(401);
+  });
+
+  it('login 응답은 cleanup 실패와 격리된다', async () => {
+    const { userId, username, password } = await createLegacyLoginUser();
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES ('cleanup-failure', ?, 'not-a-timestamp')`,
+    ).bind(userId).run();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await withTestTrigger(
+        env.DB,
+        'test_fail_expired_session_cleanup',
+        `CREATE TRIGGER test_fail_expired_session_cleanup
+         BEFORE DELETE ON sessions
+         WHEN OLD.token = 'cleanup-failure'
+         BEGIN
+           SELECT RAISE(ABORT, 'TEST_SESSION_CLEANUP_FAILURE');
+         END`,
+        async () => {
+          const ctx = createExecutionContext();
+          const response = await worker.fetch(loginRequest(username, password), env, ctx);
+          expect(response.status).toBe(200);
+          await expect(response.json()).resolves.toEqual({
+            ok: true,
+            data: {
+              user: {
+                id: userId,
+                username,
+                name: '로그인 테스트',
+                role: 'admin',
+              },
+            },
+          });
+          expect(response.headers.get('Set-Cookie') ?? '').toContain('isorder_sid=');
+
+          await waitOnExecutionContext(ctx);
+          expect(consoleError).toHaveBeenCalledWith(
+            'expired session cleanup failed',
+            expect.anything(),
+          );
+        },
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+
+    const failedCleanup = await env.DB.prepare(
+      "SELECT token FROM sessions WHERE token = 'cleanup-failure'",
+    ).first<{ token: string }>();
+    expect(failedCleanup?.token).toBe('cleanup-failure');
+  });
+
+  it('logout 응답과 현재 session 삭제는 cleanup 실패와 격리된다', async () => {
+    const { token, userId } = await createSessionWithExpiry('2999-01-01 00:00:00');
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES ('cleanup-failure', ?, 'not-a-timestamp')`,
+    ).bind(userId).run();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await withTestTrigger(
+        env.DB,
+        'test_fail_expired_session_cleanup',
+        `CREATE TRIGGER test_fail_expired_session_cleanup
+         BEFORE DELETE ON sessions
+         WHEN OLD.token = 'cleanup-failure'
+         BEGIN
+           SELECT RAISE(ABORT, 'TEST_SESSION_CLEANUP_FAILURE');
+         END`,
+        async () => {
+          const ctx = createExecutionContext();
+          const response = await worker.fetch(
+            new Request('https://example.com/api/auth/logout', {
+              method: 'POST',
+              headers: { Cookie: `isorder_sid=${token}` },
+            }),
+            env,
+            ctx,
+          );
+          expect(response.status).toBe(200);
+          await expect(response.json()).resolves.toEqual({
+            ok: true,
+            data: { loggedOut: true },
+          });
+          const cookie = response.headers.get('Set-Cookie') ?? '';
+          expect(cookie).toContain('isorder_sid=;');
+          expect(cookie).toContain('Max-Age=0');
+          expect(cookie).toContain('; Secure');
+
+          await waitOnExecutionContext(ctx);
+          expect(consoleError).toHaveBeenCalledWith(
+            'expired session cleanup failed',
+            expect.anything(),
+          );
+        },
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+
+    const currentSession = await env.DB.prepare(
+      'SELECT token FROM sessions WHERE token = ?',
+    ).bind(token).first<{ token: string }>();
+    expect(currentSession).toBeNull();
+    expect((await apiRequest('/api/users/me', token)).status).toBe(401);
+  });
+});
 
 describe('사용자 관리 권한', () => {
   it('staff 사용자의 사용자 목록과 감사로그 조회를 거부한다', async () => {
