@@ -39,6 +39,7 @@
 - [x] pull request/`main` 품질 게이트와 D1→API→웹 순차 배포 workflow
 - [x] `main`의 모든 push에서 production 자동 배포
 - [x] exact Wrangler deploy evidence에서 검증한 API URL만 웹 `API_PROXY_URL`로 전달
+- [x] 웹 배포는 OpenNext CLI를 직접 호출해 inner Wrangler의 exact 2-record evidence만 생성
 - [x] API health/D1 readiness 및 웹 same-origin proxy smoke test
 - [x] 별도 production URL 변수와 Environment 승인 불필요
 

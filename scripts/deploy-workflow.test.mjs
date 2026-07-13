@@ -153,6 +153,7 @@ test('API and web deploy with exact SHA evidence before active-version verificat
       verifyName: 'Verify API active Worker version',
       smokeName: 'Smoke test API deployment',
       evidencePath: '${{ runner.temp }}/hereisorder-api-deploy.ndjson',
+      deployCommand: 'npm exec -- wrangler deploy --message "$GITHUB_SHA" --strict',
     },
     {
       body: web,
@@ -161,6 +162,7 @@ test('API and web deploy with exact SHA evidence before active-version verificat
       verifyName: 'Verify web active Worker version',
       smokeName: 'Smoke test web deployment and API proxy',
       evidencePath: '${{ runner.temp }}/hereisorder-web-deploy.ndjson',
+      deployCommand: 'npm exec -- opennextjs-cloudflare deploy --message "$GITHUB_SHA" --strict',
     },
   ];
 
@@ -177,7 +179,7 @@ test('API and web deploy with exact SHA evidence before active-version verificat
     assert.ok(smoke, `${scenario.target} smoke step must exist`);
     assert.match(
       deploy,
-      /^\s+run: npm exec -- wrangler deploy --message "\$GITHUB_SHA" --strict$/m,
+      new RegExp(`^\\s+run: ${scenario.deployCommand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
     );
     assert.match(
       deploy,
@@ -201,6 +203,9 @@ test('API and web deploy with exact SHA evidence before active-version verificat
 
   assert.match(api, /DEPLOYMENT_URL: \$\{\{ steps\.verify-api\.outputs\.deployment-url \}\}/);
   assert.match(web, /DEPLOYMENT_URL: \$\{\{ steps\.verify-web\.outputs\.deployment-url \}\}/);
+  assert.match(web, /^\s+working-directory: frontend$/m);
+  assert.doesNotMatch(api, /^\s+working-directory:/m);
+  assert.doesNotMatch(web, /^\s+run: npm exec -- wrangler deploy --message "\$GITHUB_SHA" --strict$/m);
   assert.doesNotMatch(workflow, /command-output|deployments status --json|upload-artifact|download-artifact/);
 });
 

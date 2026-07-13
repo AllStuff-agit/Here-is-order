@@ -193,7 +193,7 @@ jobs:
 
       - name: Deploy web Worker
         working-directory: frontend
-        run: npm exec -- wrangler deploy --message "$GITHUB_SHA" --strict
+        run: npm exec -- opennextjs-cloudflare deploy --message "$GITHUB_SHA" --strict
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
