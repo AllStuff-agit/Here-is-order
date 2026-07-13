@@ -23,13 +23,12 @@
     "db:seed": "wrangler d1 execute hereisorder --local --file=data/seed_categories_items.sql",
     "db:generate:admin-seed": "node scripts/generate-admin-seed.mjs",
     "db:seed:admin": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --local --file=data/seed_admin.sql",
-    "db:seed:remote": "wrangler d1 execute hereisorder --remote --file=data/seed_categories_items.sql",
+    "db:seed:remote": "node scripts/apply-notion-seed.mjs --remote",
     "db:seed:admin:remote": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --remote --file=data/seed_admin.sql",
     "import:notion": "node scripts/import-notion-export.mjs notion-export",
     "db:bootstrap": "npm run db:migrate && npm run db:seed:admin",
     "db:bootstrap:from-notion": "npm run import:notion && npm run db:migrate && npm run db:seed && npm run db:seed:admin",
-    "db:bootstrap:remote": "npm run db:migrate:remote && npm run db:seed:admin:remote",
-    "db:bootstrap:remote:from-notion": "npm run import:notion && npm run db:migrate:remote && npm run db:seed:remote && npm run db:seed:admin:remote"
+    "db:bootstrap:remote": "npm run db:migrate:remote && npm run db:seed:admin:remote"
   },
   "dependencies": {
     "@here-is-order/http-contract": "file:packages/http-contract",

@@ -5,6 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { sqlText } from './sqlite-sql.mjs';
+
+export { sqlText };
+
 export const PASSWORD_HASH_SCHEME = 'pbkdf2_sha256';
 export const PASSWORD_HASH_ITERATIONS = 100_000;
 export const PASSWORD_SALT_BYTES = 16;
@@ -71,10 +75,6 @@ export function createPasswordHash(password, salt = randomBytes(PASSWORD_SALT_BY
     saltBuffer.toString('hex'),
     hash.toString('hex'),
   ].join('$');
-}
-
-export function sqlText(value) {
-  return `'${String(value).replaceAll("'", "''")}'`;
 }
 
 export function buildAdminSeedSql({ username, passwordHash, name }) {

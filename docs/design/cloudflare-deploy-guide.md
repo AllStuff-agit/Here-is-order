@@ -42,7 +42,7 @@ npm run db:migrate:remote
 
 ## 2. 초기 관리자 생성
 
-fresh clone에는 관리자 seed가 포함되지 않습니다. 12자 이상의 비밀번호를 환경변수로 전달하면 PBKDF2 해시가 담긴 `data/seed_admin.sql`을 로컬에서 생성한 뒤 D1에 적용합니다. 생성 파일은 Git에 포함하지 않습니다.
+fresh clone에는 관리자 seed가 포함되지 않습니다. 12자 이상의 비밀번호를 환경변수로 전달하면 PBKDF2 해시가 담긴 `data/seed_admin.sql`을 로컬에서 생성한 뒤 D1에 적용합니다. `data/` 생성물은 계속 Git 추적 대상이 아니므로 커밋하지 않습니다.
 
 ```bash
 # 로컬 DB: migration + 관리자 생성
@@ -58,8 +58,21 @@ Notion export로 카테고리/품목까지 적재하려면 저장소 루트에 `
 
 ```bash
 ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:from-notion
-ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:remote:from-notion
 ```
+
+이 결합 bootstrap은 로컬 D1용으로 계속 제공됩니다. 생성부터 적용까지 한 번에 실행하던 원격 Notion 결합 bootstrap 기능은 제거했습니다. 운영에서는 생성물 검토가 적용보다 반드시 먼저이며 다음 순서만 사용합니다.
+
+```bash
+npm run import:notion
+# data/seed_categories_items.sql, data/seed_items.csv,
+# data/import-report.json과 seedSha256을 검토합니다.
+npm run db:migrate:remote
+npm run db:seed:remote -- --expected-sha <검토한-64자리-SHA-256>
+# 최초 bootstrap에서만 실행합니다.
+ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:seed:admin:remote
+```
+
+원격 품목 seed 명령은 검토자가 전달한 SHA-256, report의 `seedSha256`, 실제 SQL의 SHA-256이 모두 일치할 때만 Wrangler를 호출합니다. 운영 품목 seed SQL을 Wrangler로 직접 적용하지 않습니다.
 
 ## 3. 수동 배포
 

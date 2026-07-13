@@ -1,104 +1,70 @@
 #!/usr/bin/env node
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const sourceDir = process.argv[2] ?? 'notion-export';
-const outDir = 'data';
+import { buildNotionImportArtifacts } from './notion-import-core.mjs';
 
-if (!fs.existsSync(sourceDir)) {
-  console.error(`notion export folder not found: ${sourceDir}`);
-  process.exit(1);
+export function writeNotionArtifacts({
+  outDir,
+  artifacts,
+  fsImpl = fs,
+  token = randomUUID(),
+}) {
+  fsImpl.mkdirSync(outDir, { recursive: true });
+  const targets = {
+    sql: path.join(outDir, 'seed_categories_items.sql'),
+    csv: path.join(outDir, 'seed_items.csv'),
+    report: path.join(outDir, 'import-report.json'),
+  };
+  const temporary = Object.fromEntries(
+    Object.entries(targets).map(([key, target]) => [key, `${target}.${token}.tmp`]),
+  );
+  try {
+    fsImpl.writeFileSync(temporary.sql, artifacts.sql, { flag: 'wx' });
+    fsImpl.writeFileSync(temporary.csv, artifacts.csv, { flag: 'wx' });
+    fsImpl.writeFileSync(temporary.report, JSON.stringify(artifacts.report, null, 2), { flag: 'wx' });
+    if (fsImpl.existsSync(targets.report)) fsImpl.unlinkSync(targets.report);
+    fsImpl.renameSync(temporary.sql, targets.sql);
+    fsImpl.renameSync(temporary.csv, targets.csv);
+    fsImpl.renameSync(temporary.report, targets.report);
+  } catch (error) {
+    for (const temporaryPath of Object.values(temporary)) {
+      try { fsImpl.unlinkSync(temporaryPath); } catch {}
+    }
+    throw error;
+  }
 }
 
-const files = fs.readdirSync(sourceDir).filter((f) => f.endsWith('.md')).sort((a, b) => a.localeCompare(b, 'ko'));
-
-const categorySet = new Set();
-const byName = new Map();
-
-const items = [];
-
-for (const file of files) {
-  const full = path.join(sourceDir, file);
-  const raw = fs.readFileSync(full, 'utf-8').split(/\r?\n/);
-  const titleLine = raw.find((l) => l.trim().startsWith('# ')) || '';
-  const name = titleLine.replace(/^#\s*/, '').trim() || path.parse(file).name.replace(/\s+317830bfc2f[0-9a-f]+$/i, '');
-  const catLine = raw.find((l) => l.startsWith('분류:'));
-  const category = catLine ? catLine.replace('분류:', '').trim() : '';
-  const itemKey = `${name}::${category}`;
-
-  if (!categorySet.has(category) && category) categorySet.add(category);
-
-  const seen = byName.get(name) || 0;
-  byName.set(name, seen + 1);
-
-  // spec은 중복 이름일 때만 카테고리를 붙여 variant를 명확히 함
-  const spec = seen > 0 ? `변형-${category || '기본'}` : '';
-
-  items.push({
+export function generateNotionImport({
+  sourceDir = 'notion-export',
+  outDir = 'data',
+  generatedAt = new Date().toISOString(),
+  log = console.log,
+} = {}) {
+  if (!fs.existsSync(sourceDir)) throw new Error(`notion export folder not found: ${sourceDir}`);
+  const names = fs.readdirSync(sourceDir).filter((file) => file.endsWith('.md'));
+  const files = names.map((file) => ({
     file,
-    name,
-    category,
-    spec,
-    safety_stock: 0,
-    min_stock: 0,
-    current_stock: 0,
-    unit_price: 0,
-    memo: '',
-    recommended_unit: '개',
-  });
+    content: fs.readFileSync(path.join(sourceDir, file), 'utf8'),
+  }));
+  const artifacts = buildNotionImportArtifacts({ files, sourceDir, generatedAt });
+  writeNotionArtifacts({ outDir, artifacts });
+
+  log(`Notion seed artifacts generated: items=${artifacts.report.totalItems}, categories=${artifacts.report.totalCategories}, sha256=${artifacts.report.seedSha256}`);
+  return artifacts.report;
 }
 
-fs.mkdirSync(outDir, { recursive: true });
+function runCli() {
+  try {
+    generateNotionImport({ sourceDir: process.argv[2] ?? 'notion-export' });
+  } catch {
+    console.error('Notion import failed');
+    process.exitCode = 1;
+  }
+}
 
-// categories
-const categories = [...categorySet].sort((a, b) => a.localeCompare(b, 'ko')).map((name) => `INSERT OR IGNORE INTO item_categories (name) VALUES (${JSON.stringify(name)});`);
-
-const itemSql = items.map((it) => {
-  const cols = ['category_id', 'name', 'spec', 'unit', 'safety_stock', 'min_stock', 'current_stock', 'unit_price', 'memo'];
-  const values = [
-    `(SELECT id FROM item_categories WHERE name = ${JSON.stringify(it.category)} LIMIT 1)`,
-    JSON.stringify(it.name),
-    JSON.stringify(it.spec),
-    JSON.stringify(it.recommended_unit),
-    it.safety_stock,
-    it.min_stock,
-    it.current_stock,
-    it.unit_price,
-    JSON.stringify(it.memo),
-  ];
-  return `INSERT OR IGNORE INTO items (category_id, name, spec, unit, safety_stock, min_stock, current_stock, unit_price, memo)
-    VALUES (${values.join(', ')});`;
-});
-
-const csvHeader = 'file,name,category,spec,safety_stock,min_stock,current_stock,unit_price,memo\n';
-const csvRows = items.map((it) => [it.file, it.name, it.category, it.spec, it.safety_stock, it.min_stock, it.current_stock, it.unit_price, it.memo].map((x) => `"${String(x ?? '').replaceAll('"', '""')}"`).join(','));
-
-const sql = [
-  '-- Seed categories',
-  ...categories,
-  '',
-  '-- Seed items',
-  ...itemSql,
-].join('\n');
-
-fs.writeFileSync(path.join(outDir, 'seed_categories_items.sql'), sql);
-fs.writeFileSync(path.join(outDir, 'seed_items.csv'), csvHeader + csvRows.join('\n'));
-
-const duplicates = [...byName.entries()].filter(([, count]) => count > 1);
-
-const report = {
-  sourceDir,
-  totalFiles: files.length,
-  totalItems: items.length,
-  totalCategories: categorySet.size,
-  duplicateItemNames: duplicates.length,
-  duplicateSample: duplicates.slice(0, 20),
-  generatedAt: new Date().toISOString(),
-};
-fs.writeFileSync(path.join(outDir, 'import-report.json'), JSON.stringify(report, null, 2));
-
-console.log('Generated:');
-console.log('- data/seed_categories_items.sql');
-console.log('- data/seed_items.csv');
-console.log('- data/import-report.json');
-console.log(`items=${items.length}, categories=${categorySet.size}, duplicateNames=${duplicates.length}`);
+const isMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) runCli();
