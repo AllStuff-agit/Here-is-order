@@ -295,8 +295,10 @@ describe('세션 만료 형식', () => {
 
           await waitOnExecutionContext(ctx);
           expect(consoleError).toHaveBeenCalledWith(
-            'expired session cleanup failed',
-            expect.anything(),
+            JSON.stringify({ event: 'expired_session_cleanup_failed' }),
+          );
+          expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+            'TEST_SESSION_CLEANUP_FAILURE',
           );
         },
       );
@@ -350,8 +352,10 @@ describe('세션 만료 형식', () => {
 
           await waitOnExecutionContext(ctx);
           expect(consoleError).toHaveBeenCalledWith(
-            'expired session cleanup failed',
-            expect.anything(),
+            JSON.stringify({ event: 'expired_session_cleanup_failed' }),
+          );
+          expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+            'TEST_SESSION_CLEANUP_FAILURE',
           );
         },
       );

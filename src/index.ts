@@ -17,6 +17,7 @@ import {
   type PurchaseOrderRevision,
   type PurchaseOrderResult,
 } from './purchase-orders';
+import { logApiErrorEvent } from './observability';
 import { probeRequiredD1Schema } from './readiness';
 
 type Env = {
@@ -41,8 +42,8 @@ type AppVariables = {
 
 const app = new Hono<{ Bindings: Env['Bindings']; Variables: AppVariables }>();
 
-app.onError((err, c) => {
-  console.error(err);
+app.onError((_err, c) => {
+  logApiErrorEvent('unhandled_request_error');
   return c.json(apiErr('INTERNAL_ERROR', '서버 오류가 발생했습니다.'), 500);
 });
 
@@ -240,8 +241,8 @@ function scheduleExpiredSessionCleanup(c: any) {
            OR unixepoch(expires_at) <= unixepoch('now')`,
     )
       .run()
-      .catch((error: unknown) => {
-        console.error('expired session cleanup failed', error);
+      .catch(() => {
+        logApiErrorEvent('expired_session_cleanup_failed');
       }),
   );
 }
@@ -318,7 +319,7 @@ app.get('/ready', async (c) => {
   c.header('Cache-Control', 'no-store');
   const readiness = await probeRequiredD1Schema(c.env?.DB);
   if (!readiness.ready) {
-    console.error(JSON.stringify({ event: 'd1_readiness_failed' }));
+    logApiErrorEvent('d1_readiness_failed');
     return c.json(apiErr('NOT_READY', '서비스가 준비되지 않았습니다.'), 503);
   }
 
