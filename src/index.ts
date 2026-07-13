@@ -17,6 +17,7 @@ import {
   type PurchaseOrderRevision,
   type PurchaseOrderResult,
 } from './purchase-orders';
+import { probeRequiredD1Schema } from './readiness';
 
 type Env = {
   Bindings: {
@@ -312,6 +313,17 @@ app.use('/api/*', async (c, next) => {
 });
 
 app.get('/health', (c) => c.json(apiOk({ ok: true, ts: new Date().toISOString() })));
+
+app.get('/ready', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const readiness = await probeRequiredD1Schema(c.env?.DB);
+  if (!readiness.ready) {
+    console.error(JSON.stringify({ event: 'd1_readiness_failed' }));
+    return c.json(apiErr('NOT_READY', '서비스가 준비되지 않았습니다.'), 503);
+  }
+
+  return c.json(apiOk(readiness));
+});
 
 app.post('/api/auth/login', async (c) => {
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
