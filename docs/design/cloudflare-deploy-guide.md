@@ -74,6 +74,20 @@ ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:seed:admin:remote
 
 원격 품목 seed 명령은 검토자가 전달한 SHA-256, report의 `seedSha256`, 실제 SQL의 SHA-256이 모두 일치할 때만 Wrangler를 호출합니다. 운영 품목 seed SQL을 Wrangler로 직접 적용하지 않습니다.
 
+### 운영 비밀번호 복구
+
+로그인 가능한 관리자가 있으면 앱의 **설정 → 계정 관리**에서 다른 사용자의 비밀번호를 초기화합니다. 모든 관리자가 잠긴 경우에만 신뢰할 수 있는 운영자가 저장소 루트의 interactive TTY에서 다음 명령을 실행합니다.
+
+```bash
+npm run db:recover-password -- --remote --username admin
+```
+
+작업자 환경에는 대상 계정의 `CLOUDFLARE_ACCOUNT_ID`와 D1 읽기·쓰기가 가능한 `CLOUDFLARE_API_TOKEN`이 필요합니다. Cloudflare custom token은 대상 계정의 **Account / D1 / Edit** 권한으로 제한합니다.
+
+명령은 대상 데이터베이스와 사용자 이름을 표시하고 `RECOVER hereisorder admin`을 정확히 입력받습니다. 이어서 12자 이상의 새 비밀번호와 확인값을 echo 없이 입력받아 일치 여부를 확인하고, 성공하면 대상 사용자의 모든 세션을 폐기한 뒤 운영자 비밀번호 복구 감사를 기록합니다.
+
+복구할 비밀번호는 웹 hash 도구, 채팅, 이슈 또는 shell argument에 입력하지 않습니다. D1 콘솔에서 계정을 직접 수정하는 방식도 복구 경로가 아닙니다.
+
 ## 3. 수동 배포
 
 API를 먼저 배포합니다.

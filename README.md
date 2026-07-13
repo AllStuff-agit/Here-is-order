@@ -75,24 +75,22 @@ ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:seed:admin:remote
 
 원격 품목 seed 명령은 검토자가 전달한 SHA-256, report의 `seedSha256`, 실제 SQL의 SHA-256이 모두 일치할 때만 D1 적용을 시작합니다. 운영 품목 seed를 Wrangler로 직접 적용하지 않습니다.
 
-### 비밀번호를 잊어버렸을 때
+### 운영 비밀번호 복구
 
-Cloudflare D1 콘솔에서 직접 비밀번호를 초기화할 수 있습니다.
+복구 경로는 다음 두 가지뿐입니다.
 
-1. [dash.cloudflare.com](https://dash.cloudflare.com)에 로그인합니다.
-2. 좌측 메뉴에서 **Storage & Databases → D1 SQL Database**를 클릭합니다.
-3. **hereisorder** 데이터베이스를 클릭합니다.
-4. 상단 **Console** 탭을 클릭합니다.
-5. 새 비밀번호의 SHA-256 해시를 구합니다. 예: [SHA-256 온라인 도구](https://emn178.github.io/online-tools/sha256.html)에 새 비밀번호를 입력하면 해시값이 나옵니다.
-6. 아래 SQL을 입력하고 **Execute** 버튼을 누릅니다.
+1. 로그인 가능한 관리자가 있으면 앱의 **설정 → 계정 관리**에서 다른 사용자의 비밀번호를 초기화합니다.
+2. 모든 관리자가 잠겼으면 저장소 루트의 interactive TTY에서 신뢰할 수 있는 운영자가 다음 명령을 실행합니다.
 
-```sql
-UPDATE users
-SET password_hash = '여기에_SHA256_해시값_붙여넣기'
-WHERE username = '아이디';
+```bash
+npm run db:recover-password -- --remote --username admin
 ```
 
-7. 앱으로 돌아와 새 비밀번호로 로그인합니다.
+작업자 환경에는 대상 계정의 `CLOUDFLARE_ACCOUNT_ID`와 D1 읽기·쓰기가 가능한 `CLOUDFLARE_API_TOKEN`이 필요합니다. Cloudflare custom token 권한은 대상 계정의 **Account / D1 / Edit**로 제한합니다.
+
+명령은 대상 데이터베이스와 사용자 이름을 표시하고 `RECOVER hereisorder admin`을 정확히 입력받은 뒤, 12자 이상의 새 비밀번호를 echo 없이 두 번 입력받습니다. 성공하면 대상 사용자의 모든 세션을 폐기하고 운영자 비밀번호 복구 감사를 기록합니다.
+
+복구할 비밀번호를 웹 hash 도구, 채팅, 이슈 또는 shell argument에 입력하지 마세요. D1 콘솔에서 계정을 직접 수정하는 방식도 사용하지 않습니다.
 
 ## 주요 API
 
