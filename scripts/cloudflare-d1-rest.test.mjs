@@ -332,6 +332,44 @@ test('getTimeTravelBookmark는 malformed bookmark response를 fail closed 한다
   }
 });
 
+test('getTimeTravelBookmark는 HTTP/envelope 실패 detail을 노출하지 않는다', async (t) => {
+  const sensitiveDetail = `${ACCOUNT_ID}/${API_TOKEN}/bookmark-detail`;
+  const cases = [
+    {
+      name: 'non-2xx response',
+      status: 403,
+      body: { success: false, errors: [{ message: sensitiveDetail }] },
+    },
+    {
+      name: 'successful HTTP with rejected envelope',
+      status: 200,
+      body: { success: false, errors: [{ message: sensitiveDetail }] },
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const client = createCloudflareD1RestClient({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        baseUrl: BASE_URL,
+        fetchImpl: async () => jsonResponse(scenario.body, { status: scenario.status }),
+      });
+
+      await assert.rejects(
+        client.getTimeTravelBookmark(DATABASE_ID),
+        (error) => {
+          assert.match(error.message, /^Cloudflare D1 request failed with HTTP \d{3}\.$/);
+          assert.doesNotMatch(error.message, /bookmark-detail/);
+          assert.doesNotMatch(error.message, new RegExp(API_TOKEN));
+          assert.doesNotMatch(error.message, new RegExp(ACCOUNT_ID));
+          return true;
+        },
+      );
+    });
+  }
+});
+
 test('database operation은 canonical UUID가 아니면 fetch 전에 거부한다', async () => {
   let fetchCalls = 0;
   const client = createCloudflareD1RestClient({
