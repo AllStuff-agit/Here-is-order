@@ -614,7 +614,7 @@ describe('Purchase Order module partial receipt', () => {
     expect(Number(ledgerCount?.count ?? 0)).toBe(0);
   });
 
-  it('retains greater-than-or-equal status aggregation for legacy over-received rows', async () => {
+  it('does not let a legacy over-received row hide another item remaining quantity', async () => {
     const { module } = await createActor();
     const legacyItemId = await createInventoryItem('legacy over-received 원두');
     const targetItemId = await createInventoryItem('legacy receipt target 원두');
@@ -680,7 +680,7 @@ describe('Purchase Order module partial receipt', () => {
     expect(received).toEqual({
       ok: true,
       value: {
-        order: expect.objectContaining({ status: 'fully_received' }),
+        order: expect.objectContaining({ status: 'partially_received' }),
         order_item: expect.objectContaining({
           id: targetOrderItem.id,
           received_qty: 1,

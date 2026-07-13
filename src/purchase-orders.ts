@@ -832,8 +832,14 @@ export function purchaseOrders(
         `UPDATE purchase_orders
             SET status = (
                   SELECT CASE
-                    WHEN SUM(received_qty) >= SUM(ordered_qty) THEN 'fully_received'
-                    WHEN SUM(received_qty) > 0 THEN 'partially_received'
+                    WHEN SUM(
+                           CASE WHEN received_qty < ordered_qty THEN 1 ELSE 0 END
+                         ) = 0
+                      THEN 'fully_received'
+                    WHEN SUM(
+                           CASE WHEN received_qty > 0 THEN 1 ELSE 0 END
+                         ) > 0
+                      THEN 'partially_received'
                     ELSE 'ordered'
                   END
                     FROM order_items
