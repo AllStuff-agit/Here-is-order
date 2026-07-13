@@ -115,6 +115,7 @@ npm run db:recover-password -- --remote --username admin
 - `db:bootstrap`, `db:bootstrap:remote`: migration + 관리자 seed
 - `db:bootstrap:from-notion`: Notion 변환 + migration + 품목/관리자 seed를 로컬 D1에 적용
 - `import:notion`: `notion-export/`를 검토용 `data/` 생성물로 변환
+- `deploy:preflight`: GitHub Actions에서 production D1/Worker recovery checkpoint 검증
 - `npm run build:cloudflare --prefix frontend`: OpenNext Worker 산출물 검증
 - `npm run deploy --prefix frontend`: 웹 Worker 배포
 - `npm run deploy`: API Worker 배포
@@ -127,11 +128,24 @@ GitHub Actions에 `CLOUDFLARE_API_TOKEN`과 `CLOUDFLARE_ACCOUNT_ID` repository s
 git push origin main
 ```
 
-Workflow는 `verify` → 일회용 원격 D1 rollback contract → production D1 migration → API Worker 배포/health check → API URL을 주입한 웹 Worker 배포 → 웹/API proxy smoke test 순서로 실행됩니다. rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 rollback을 확인하고 데이터베이스를 삭제한 뒤에만 운영 migration을 허용합니다. 따라서 배포 token에는 Workers 배포와 migration 권한뿐 아니라 일회용 D1 생성·삭제 권한도 필요합니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
+Workflow는 다음 순서를 벗어나지 않습니다.
+
+1. `verify`
+2. 일회용 원격 D1 rollback contract
+3. production recovery checkpoint
+4. production D1 migration
+5. API Worker 배포
+6. API `GET /health` smoke
+7. API URL을 주입한 웹 Worker build/deploy
+8. 웹/API proxy smoke
+
+rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 rollback을 확인하고 데이터베이스를 삭제합니다. production recovery checkpoint는 현재 D1 Time Travel bookmark, migration 적용 이력, 기존 API/web Worker version을 읽어 GitHub job summary에 남깁니다. 두 gate가 모두 성공해야 production D1 migration이 시작됩니다. 따라서 배포 token에는 Workers 배포와 migration 권한뿐 아니라 D1 생성·삭제 권한과 D1/Worker 상태 조회 권한도 필요합니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
+
+실패 단계별 forward repair, Worker rollback, 예외적인 D1 restore 판단은 [Cloudflare 배포 가이드의 배포 복구 runbook](docs/design/cloudflare-deploy-guide.md#52-failure-phase별-복구)을 따릅니다. Workflow는 Worker rollback이나 D1 restore를 자동 실행하지 않습니다.
 
 ### 수동 복구 배포
 
-GitHub Actions를 사용할 수 없는 장애 상황에서는 API Worker를 먼저 배포한 뒤 해당 origin을 웹 빌드의 서버 전용 `API_PROXY_URL`로 전달합니다. 관리자 계정이 없는 최초 bootstrap에서만 `ADMIN_PASSWORD` 명령을 먼저 실행합니다.
+GitHub Actions를 사용할 수 없는 장애 상황에서는 곧바로 production mutation을 실행하지 않습니다. 먼저 [배포 복구 runbook](docs/design/cloudflare-deploy-guide.md#52-failure-phase별-복구)에서 현재 phase와 checkpoint를 확인하고, 기존 D1 bookmark와 API/web Worker version을 별도 incident 기록에 보존합니다. 아래 명령은 새 환경의 최초 bootstrap 또는 그 기록과 복구 판단을 마친 뒤에만 사용합니다. API Worker를 먼저 배포한 다음 해당 origin을 웹 빌드의 서버 전용 `API_PROXY_URL`로 전달합니다.
 
 ```bash
 ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:remote
