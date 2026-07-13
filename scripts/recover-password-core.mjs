@@ -51,11 +51,33 @@ export function buildRecoveryPreflightQuery(username) {
   };
 }
 
-export function assertRecoverableAdmin(rows, username) {
-  if (rows.length !== 1 || rows[0].username !== username) {
-    throw new Error('정확히 한 active admin을 찾을 수 없습니다.');
+function exactSingleQueryRow(results, errorMessage) {
+  if (!Array.isArray(results) || results.length !== 1) {
+    throw new Error(errorMessage);
   }
-  return { id: Number(rows[0].id), username: String(rows[0].username) };
+  const [result] = results;
+  if (!result
+    || result.success !== true
+    || !Array.isArray(result.results)
+    || result.results.length !== 1) {
+    throw new Error(errorMessage);
+  }
+  const [row] = result.results;
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error(errorMessage);
+  }
+  return row;
+}
+
+export function assertRecoverableAdmin(results, username) {
+  const errorMessage = '정확히 한 active admin을 찾을 수 없습니다.';
+  const row = exactSingleQueryRow(results, errorMessage);
+  if (!Number.isSafeInteger(row.id)
+    || row.id <= 0
+    || row.username !== username) {
+    throw new Error(errorMessage);
+  }
+  return { id: row.id, username: row.username };
 }
 
 export function buildRecoveryBatch({ username, passwordHash }) {
@@ -100,17 +122,23 @@ export function buildRecoveryPostflightQuery(username) {
 }
 
 export function assertRecoveryWriteResults(results) {
-  if (results.length !== 3 || results.some((result) => result.success !== true)) {
+  if (!Array.isArray(results)
+    || results.length !== 3
+    || results.some((result) => !result || result.success !== true)) {
     throw new Error('password recovery D1 batch가 완전히 성공하지 않았습니다.');
   }
-  if (Number(results[0].meta?.changes) !== 1) {
+  if (results[0].meta?.changes !== 1) {
     throw new Error('password recovery가 정확히 한 admin을 변경하지 않았습니다.');
   }
 }
 
-export function assertRecoveryPostflight(row, auditJson) {
-  if (!row || Number(row.hash_scheme_ok) !== 1 || Number(row.session_count) !== 0) {
-    throw new Error('password recovery postflight 검증에 실패했습니다.');
+export function assertRecoveryPostflight(results, username, auditJson) {
+  const errorMessage = 'password recovery postflight 검증에 실패했습니다.';
+  const row = exactSingleQueryRow(results, errorMessage);
+  if (row.username !== username
+    || row.hash_scheme_ok !== 1
+    || row.session_count !== 0) {
+    throw new Error(errorMessage);
   }
   if (row.latest_recovery_audit !== auditJson) {
     throw new Error('password recovery audit fact가 일치하지 않습니다.');

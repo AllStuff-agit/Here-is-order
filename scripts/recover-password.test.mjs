@@ -48,11 +48,13 @@ function successEnvelope(result) {
 
 function makeRecoveryFetch({
   username = USERNAME,
+  preflightResults,
   writeResults = [
     { success: true, results: [], meta: { changes: 1 } },
     { success: true, results: [], meta: { changes: 2 } },
     { success: true, results: [], meta: { changes: 1 } },
   ],
+  postflightResults,
   postflightRow = {
     username,
     hash_scheme_ok: 1,
@@ -60,6 +62,16 @@ function makeRecoveryFetch({
     latest_recovery_audit: JSON.stringify({ source: 'operator_recovery', username }),
   },
 } = {}) {
+  const resolvedPreflightResults = preflightResults ?? [{
+    success: true,
+    results: [{ id: 1, username }],
+    meta: {},
+  }];
+  const resolvedPostflightResults = postflightResults ?? [{
+    success: true,
+    results: [postflightRow],
+    meta: {},
+  }];
   const requests = [];
   const responseBodies = [];
   const fetchImpl = async (url, init) => {
@@ -69,17 +81,9 @@ function makeRecoveryFetch({
     if (Object.hasOwn(body, 'batch')) {
       envelope = successEnvelope(writeResults);
     } else if (/^SELECT id, username FROM users/.test(body.sql)) {
-      envelope = successEnvelope([{
-        success: true,
-        results: [{ id: 1, username }],
-        meta: {},
-      }]);
+      envelope = successEnvelope(resolvedPreflightResults);
     } else {
-      envelope = successEnvelope([{
-        success: true,
-        results: [postflightRow],
-        meta: {},
-      }]);
+      envelope = successEnvelope(resolvedPostflightResults);
     }
     responseBodies.push(envelope);
     return jsonResponse(envelope);
@@ -332,6 +336,145 @@ test('같은 password recovery도 매번 다른 random salt hash를 전송한다
   assert.notEqual(hashes[0], hashes[1]);
 });
 
+test('preflight의 missing/extra statement와 row는 mutation과 completion 전에 거부한다', async (t) => {
+  const root = makeRoot(t);
+  const configPath = writeConfig(root);
+  const validStatement = {
+    success: true,
+    results: [{ id: 1, username: USERNAME }],
+    meta: {},
+  };
+  const scenarios = [
+    { name: 'missing statement', preflightResults: [] },
+    {
+      name: 'extra statement',
+      preflightResults: [validStatement, structuredClone(validStatement)],
+    },
+    {
+      name: 'missing row',
+      preflightResults: [{ ...validStatement, results: [] }],
+    },
+    {
+      name: 'extra row',
+      preflightResults: [{
+        ...validStatement,
+        results: [
+          { id: 1, username: USERNAME },
+          { id: 2, username: USERNAME },
+        ],
+      }],
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { fetchImpl, requests } = makeRecoveryFetch({
+        preflightResults: scenario.preflightResults,
+      });
+      const output = [];
+      let questionCalls = 0;
+      let hiddenCalls = 0;
+
+      await assert.rejects(
+        runPasswordRecovery({
+          argv: ['--remote', '--username', USERNAME],
+          env: { CLOUDFLARE_API_TOKEN: API_TOKEN, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+          fetchImpl,
+          configPath,
+          question: async () => {
+            questionCalls += 1;
+            return `RECOVER ${DATABASE_NAME} ${USERNAME}`;
+          },
+          hiddenPrompt: async () => {
+            hiddenCalls += 1;
+            return PASSWORD;
+          },
+          createHash: () => PASSWORD_HASH,
+          output: { write(value) { output.push(String(value)); } },
+        }),
+        /active admin/,
+      );
+
+      assert.equal(requests.length, 1);
+      assert.equal(Object.hasOwn(requests[0].body, 'batch'), false);
+      assert.equal(questionCalls, 0);
+      assert.equal(hiddenCalls, 0);
+      assert.doesNotMatch(output.join(''), /Password recovery completed/);
+    });
+  }
+});
+
+test('postflight의 missing/extra statement와 row 및 username mismatch는 completion을 거부한다', async (t) => {
+  const root = makeRoot(t);
+  const configPath = writeConfig(root);
+  const auditJson = JSON.stringify({ source: 'operator_recovery', username: USERNAME });
+  const validRow = {
+    username: USERNAME,
+    hash_scheme_ok: 1,
+    session_count: 0,
+    latest_recovery_audit: auditJson,
+  };
+  const validStatement = { success: true, results: [validRow], meta: {} };
+  const scenarios = [
+    { name: 'missing statement', postflightResults: [] },
+    {
+      name: 'extra statement',
+      postflightResults: [validStatement, structuredClone(validStatement)],
+    },
+    {
+      name: 'missing row',
+      postflightResults: [{ ...validStatement, results: [] }],
+    },
+    {
+      name: 'extra row',
+      postflightResults: [{
+        ...validStatement,
+        results: [validRow, structuredClone(validRow)],
+      }],
+    },
+    {
+      name: 'username mismatch',
+      postflightResults: [{
+        ...validStatement,
+        results: [{ ...validRow, username: 'other-admin' }],
+      }],
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { fetchImpl, requests } = makeRecoveryFetch({
+        postflightResults: scenario.postflightResults,
+      });
+      const output = [];
+
+      await assert.rejects(
+        runPasswordRecovery({
+          argv: ['--remote', '--username', USERNAME],
+          env: { CLOUDFLARE_API_TOKEN: API_TOKEN, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+          fetchImpl,
+          configPath,
+          question: async () => `RECOVER ${DATABASE_NAME} ${USERNAME}`,
+          hiddenPrompt: async () => PASSWORD,
+          createHash: () => PASSWORD_HASH,
+          output: { write(value) { output.push(String(value)); } },
+        }),
+        (error) => {
+          assert.match(error.message, /postflight/);
+          assert.ok(!error.message.includes(PASSWORD));
+          assert.ok(!error.message.includes(PASSWORD_HASH));
+          assert.ok(!error.message.includes(API_TOKEN));
+          assert.ok(!error.message.includes(ACCOUNT_ID));
+          return true;
+        },
+      );
+
+      assert.equal(requests.length, 3);
+      assert.doesNotMatch(output.join(''), /Password recovery completed/);
+    });
+  }
+});
+
 test('write/postflight의 changes, success, session, scheme, audit mismatch를 거부한다', async (t) => {
   const root = makeRoot(t);
   const configPath = writeConfig(root);
@@ -354,6 +497,17 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
       },
       pattern: /정확히 한 admin/,
     },
+    ...[true, '1', null].map((changes) => ({
+      name: `update changes type ${String(changes)}`,
+      options: {
+        writeResults: [
+          { success: true, meta: { changes } },
+          { success: true, meta: {} },
+          { success: true, meta: {} },
+        ],
+      },
+      pattern: /정확히 한 admin/,
+    })),
     {
       name: 'statement success',
       options: {
@@ -375,6 +529,16 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
       options: { postflightRow: { ...verifiedRow, hash_scheme_ok: 0 } },
       pattern: /postflight/,
     },
+    ...[true, '1', null].map((hashScheme) => ({
+      name: `hash scheme type ${String(hashScheme)}`,
+      options: { postflightRow: { ...verifiedRow, hash_scheme_ok: hashScheme } },
+      pattern: /postflight/,
+    })),
+    ...[null, '0', false].map((sessionCount) => ({
+      name: `session count type ${String(sessionCount)}`,
+      options: { postflightRow: { ...verifiedRow, session_count: sessionCount } },
+      pattern: /postflight/,
+    })),
     {
       name: 'audit fact',
       options: { postflightRow: { ...verifiedRow, latest_recovery_audit: '{}' } },
@@ -385,6 +549,7 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
   for (const scenario of cases) {
     await t.test(scenario.name, async () => {
       const { fetchImpl } = makeRecoveryFetch(scenario.options);
+      const output = [];
       await assert.rejects(
         runPasswordRecovery({
           argv: ['--remote', '--username', USERNAME],
@@ -394,7 +559,7 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
           question: async () => `RECOVER ${DATABASE_NAME} ${USERNAME}`,
           hiddenPrompt: async () => PASSWORD,
           createHash: () => PASSWORD_HASH,
-          output: { write() {} },
+          output: { write(value) { output.push(String(value)); } },
         }),
         (error) => {
           assert.match(error.message, scenario.pattern);
@@ -405,6 +570,7 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
           return true;
         },
       );
+      assert.doesNotMatch(output.join(''), /Password recovery completed/);
     });
   }
 });

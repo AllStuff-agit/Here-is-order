@@ -137,8 +137,9 @@ describe('세션 만료 형식', () => {
     await env.DB.prepare(
       `INSERT INTO sessions (token, user_id, expires_at)
        VALUES ('expired-before-login', ?, '2000-01-01 00:00:00'),
+              ('expired-iso-before-login', ?, '2000-01-01T00:00:00.000Z'),
               ('invalid-before-login', ?, 'not-a-timestamp')`,
-    ).bind(userId, userId).run();
+    ).bind(userId, userId, userId).run();
 
     const ctx = createExecutionContext();
     const login = await worker.fetch(loginRequest(username, password), env, ctx);
@@ -164,6 +165,12 @@ describe('세션 만료 형식', () => {
     expect(cookie).not.toContain('Secure');
 
     const token = sessionTokenFromCookie(cookie);
+    const cookiePair = cookie.split(';', 1)[0];
+    expect(cookiePair).toBe(`isorder_sid=${token}`);
+    const me = await worker.fetch(new Request('http://example.com/api/users/me', {
+      headers: { Cookie: cookiePair },
+    }), env);
+    expect(me.status).toBe(200);
     await waitOnExecutionContext(ctx);
 
     const session = await env.DB.prepare(
@@ -180,7 +187,11 @@ describe('세션 만료 형식', () => {
     const staleSessions = await env.DB.prepare(
       `SELECT COUNT(*) AS count
          FROM sessions
-        WHERE token IN ('expired-before-login', 'invalid-before-login')`,
+        WHERE token IN (
+          'expired-before-login',
+          'expired-iso-before-login',
+          'invalid-before-login'
+        )`,
     ).first<{ count: number }>();
     expect(staleSessions?.count).toBe(0);
 

@@ -16,6 +16,10 @@ import {
 const USERNAME_PAYLOAD = "admin' OR 1=1 --";
 const PASSWORD_HASH_PAYLOAD = 'pbkdf2-hash-with-sensitive-payload';
 
+function queryResults(rows) {
+  return [{ success: true, results: rows, meta: {} }];
+}
+
 test('remote와 username을 각각 정확히 한 번 명시해야 한다', () => {
   assert.throws(() => parseRecoveryArgs([]), /--remote/);
   assert.throws(() => parseRecoveryArgs(['--remote']), /--username/);
@@ -146,21 +150,43 @@ test('postflight는 hash를 반환하지 않고 PBKDF2, session, audit fact만 �
   assert.doesNotMatch(statement.sql, /SELECT\s+u\.password_hash/);
 });
 
-test('target은 요청 username과 일치하는 정확히 한 admin row여야 한다', () => {
+test('preflight는 정확히 한 statement와 한 row의 safe positive integer admin만 받는다', () => {
   assert.throws(() => assertRecoverableAdmin([], 'admin'), /active admin/);
   assert.throws(
     () => assertRecoverableAdmin([
-      { id: 7, username: 'admin' },
-      { id: 8, username: 'admin' },
+      { success: true, results: [{ id: 7, username: 'admin' }], meta: {} },
+      { success: true, results: [{ id: 7, username: 'admin' }], meta: {} },
     ], 'admin'),
     /active admin/,
   );
   assert.throws(
-    () => assertRecoverableAdmin([{ id: 7, username: 'other-admin' }], 'admin'),
+    () => assertRecoverableAdmin(queryResults([]), 'admin'),
     /active admin/,
   );
+  assert.throws(
+    () => assertRecoverableAdmin(queryResults([
+      { id: 7, username: 'admin' },
+      { id: 8, username: 'admin' },
+    ]), 'admin'),
+    /active admin/,
+  );
+  assert.throws(
+    () => assertRecoverableAdmin(
+      queryResults([{ id: 7, username: 'other-admin' }]),
+      'admin',
+    ),
+    /active admin/,
+  );
+
+  for (const id of ['7', null, true, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => assertRecoverableAdmin(queryResults([{ id, username: 'admin' }]), 'admin'),
+      /active admin/,
+    );
+  }
+
   assert.deepEqual(
-    assertRecoverableAdmin([{ id: '7', username: 'admin' }], 'admin'),
+    assertRecoverableAdmin(queryResults([{ id: 7, username: 'admin' }]), 'admin'),
     { id: 7, username: 'admin' },
   );
 });
@@ -189,7 +215,7 @@ test('write result는 세 statement 모두 성공하고 update가 한 row를 바
       /완전히 성공/,
     );
   }
-  for (const changes of [undefined, 0, 2]) {
+  for (const changes of [undefined, true, '1', null, 0, 2]) {
     const wrongUpdateCount = structuredClone(successfulResults);
     wrongUpdateCount[0].meta.changes = changes;
     assert.throws(
@@ -211,27 +237,91 @@ test('postflight는 PBKDF2 scheme, session 0건, exact audit JSON을 모두 요�
     latest_recovery_audit: auditJson,
   };
 
-  assert.doesNotThrow(() => assertRecoveryPostflight(verifiedRow, auditJson));
+  const verifiedResults = queryResults([verifiedRow]);
+
+  assert.doesNotThrow(() => assertRecoveryPostflight(
+    verifiedResults,
+    'admin',
+    auditJson,
+  ));
   assert.throws(
-    () => assertRecoveryPostflight(undefined, auditJson),
+    () => assertRecoveryPostflight([], 'admin', auditJson),
     /postflight/,
   );
   assert.throws(
-    () => assertRecoveryPostflight({ ...verifiedRow, hash_scheme_ok: 0 }, auditJson),
+    () => assertRecoveryPostflight([
+      ...verifiedResults,
+      ...verifiedResults,
+    ], 'admin', auditJson),
     /postflight/,
   );
   assert.throws(
-    () => assertRecoveryPostflight({ ...verifiedRow, session_count: 1 }, auditJson),
+    () => assertRecoveryPostflight(queryResults([]), 'admin', auditJson),
     /postflight/,
   );
   assert.throws(
-    () => assertRecoveryPostflight({
-      ...verifiedRow,
-      latest_recovery_audit: JSON.stringify({
-        username: 'admin',
-        source: 'operator_recovery',
-      }),
-    }, auditJson),
+    () => assertRecoveryPostflight(queryResults([
+      verifiedRow,
+      verifiedRow,
+    ]), 'admin', auditJson),
+    /postflight/,
+  );
+  assert.throws(
+    () => assertRecoveryPostflight(
+      queryResults([{ ...verifiedRow, username: 'other-admin' }]),
+      'admin',
+      auditJson,
+    ),
+    /postflight/,
+  );
+  assert.throws(
+    () => assertRecoveryPostflight(
+      queryResults([{ ...verifiedRow, hash_scheme_ok: 0 }]),
+      'admin',
+      auditJson,
+    ),
+    /postflight/,
+  );
+  assert.throws(
+    () => assertRecoveryPostflight(
+      queryResults([{ ...verifiedRow, session_count: 1 }]),
+      'admin',
+      auditJson,
+    ),
+    /postflight/,
+  );
+  for (const hashScheme of [true, '1', null]) {
+    assert.throws(
+      () => assertRecoveryPostflight(
+        queryResults([{ ...verifiedRow, hash_scheme_ok: hashScheme }]),
+        'admin',
+        auditJson,
+      ),
+      /postflight/,
+    );
+  }
+  for (const sessionCount of [null, '0', false]) {
+    assert.throws(
+      () => assertRecoveryPostflight(
+        queryResults([{ ...verifiedRow, session_count: sessionCount }]),
+        'admin',
+        auditJson,
+      ),
+      /postflight/,
+    );
+  }
+  assert.throws(
+    () => assertRecoveryPostflight(
+      queryResults([{
+        ...verifiedRow,
+        latest_recovery_audit: JSON.stringify({
+          username: 'admin',
+          source: 'operator_recovery',
+        }),
+      }]),
+      'admin',
+      auditJson,
+    ),
     /audit fact/,
   );
 });

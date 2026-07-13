@@ -3,9 +3,34 @@ import { fileURLToPath } from 'node:url';
 
 import { createCloudflareD1RestClient } from './cloudflare-d1-rest.mjs';
 
+const ROLLBACK_GUARD_MARKER = 'hio_rollback_guard';
+const D1_QUERY_ERROR_CODE = 7500;
+
 const delay = (milliseconds) => new Promise((resolve) => {
   setTimeout(resolve, milliseconds);
 });
+
+function hasExactMarker(message) {
+  return new RegExp(
+    `(?:^|[^A-Za-z0-9_])${ROLLBACK_GUARD_MARKER}(?:$|[^A-Za-z0-9_])`,
+  ).test(message);
+}
+
+function isExpectedConstraintFailure(failure) {
+  if (!failure
+    || failure.httpOk !== false
+    || failure.httpStatus !== 400
+    || failure.envelope?.success !== false
+    || !Array.isArray(failure.envelope.errors)
+    || failure.envelope.errors.length !== 1) {
+    return false;
+  }
+
+  const [error] = failure.envelope.errors;
+  return error?.code === D1_QUERY_ERROR_CODE
+    && typeof error.message === 'string'
+    && hasExactMarker(error.message);
+}
 
 async function retryReady(operation, sleep = delay) {
   let lastError;
@@ -36,7 +61,7 @@ export async function runD1RestBatchContract({
       params: [],
     }), sleep);
     await client.query(database.uuid, {
-      sql: 'CREATE TABLE contract_guard(value INTEGER CHECK(value > 0))',
+      sql: 'CREATE TABLE contract_guard(value INTEGER CONSTRAINT hio_rollback_guard CHECK(value = 0))',
       params: [],
     });
     await client.query(database.uuid, {
@@ -47,17 +72,14 @@ export async function runD1RestBatchContract({
     const failedBatch = await client.queryAllowingFailure(database.uuid, {
       batch: [
         { sql: 'UPDATE contract_state SET value = 1 WHERE id = ?', params: ['1'] },
-        { sql: 'INSERT INTO contract_guard(value) VALUES (?)', params: ['0'] },
+        {
+          sql: 'INSERT INTO contract_guard(value) SELECT value FROM contract_state WHERE id = ?',
+          params: ['1'],
+        },
       ],
     });
-    const batchResults = Array.isArray(failedBatch.envelope?.result)
-      ? failedBatch.envelope.result
-      : [];
-    const failureObserved = !failedBatch.httpOk
-      || failedBatch.envelope?.success !== true
-      || batchResults.some((result) => result?.success !== true);
-    if (!failureObserved) {
-      throw new Error('D1 REST failure batch가 성공으로 보고되었습니다.');
+    if (!isExpectedConstraintFailure(failedBatch)) {
+      throw new Error('D1 REST failure batch가 예상한 constraint 오류를 반환하지 않았습니다.');
     }
 
     const verification = await client.query(database.uuid, {

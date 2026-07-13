@@ -4,6 +4,12 @@ function requestFailure(status) {
     : new Error(`Cloudflare D1 request failed with HTTP ${status}.`);
 }
 
+function sanitizeHttpStatus(status) {
+  return Number.isInteger(status) && status >= 100 && status <= 599
+    ? status
+    : undefined;
+}
+
 export function createCloudflareD1RestClient({
   accountId,
   apiToken,
@@ -73,7 +79,11 @@ export function createCloudflareD1RestClient({
         `${databasePath}/${databaseId}/query`,
         { method: 'POST', body: JSON.stringify(body) },
       );
-      return { httpOk: response.ok, envelope };
+      return {
+        httpOk: response.ok,
+        httpStatus: sanitizeHttpStatus(response.status),
+        envelope,
+      };
     },
   };
 }

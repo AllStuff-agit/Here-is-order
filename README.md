@@ -127,7 +127,7 @@ GitHub Actions에 `CLOUDFLARE_API_TOKEN`과 `CLOUDFLARE_ACCOUNT_ID` repository s
 git push origin main
 ```
 
-Workflow는 검증 → production D1 migration → API Worker 배포/health check → API URL을 주입한 웹 Worker 배포 → 웹/API proxy smoke test 순서로 실행됩니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
+Workflow는 `verify` → 일회용 원격 D1 rollback contract → production D1 migration → API Worker 배포/health check → API URL을 주입한 웹 Worker 배포 → 웹/API proxy smoke test 순서로 실행됩니다. rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 rollback을 확인하고 데이터베이스를 삭제한 뒤에만 운영 migration을 허용합니다. 따라서 배포 token에는 Workers 배포와 migration 권한뿐 아니라 일회용 D1 생성·삭제 권한도 필요합니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
 
 ### 수동 복구 배포
 

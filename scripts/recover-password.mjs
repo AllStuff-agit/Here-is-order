@@ -168,7 +168,7 @@ export async function runPasswordRecovery({
     binding.databaseId,
     buildRecoveryPreflightQuery(username),
   );
-  assertRecoverableAdmin(preflightResults[0]?.results ?? [], username);
+  assertRecoverableAdmin(preflightResults, username);
 
   output.write(`Target database: ${binding.databaseName}\nTarget admin: ${username}\n`);
   const expected = expectedRecoveryConfirmation(binding.databaseName, username);
@@ -203,7 +203,7 @@ export async function runPasswordRecovery({
     binding.databaseId,
     buildRecoveryPostflightQuery(username),
   );
-  assertRecoveryPostflight(postflightResults[0]?.results?.[0], auditJson);
+  assertRecoveryPostflight(postflightResults, username, auditJson);
   output.write(
     `Password recovery completed for ${binding.databaseName}/${username}; sessions revoked and audit recorded.\n`,
   );

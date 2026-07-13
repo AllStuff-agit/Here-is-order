@@ -7,8 +7,23 @@ import { runD1RestBatchContract } from './d1-rest-batch-contract.mjs';
 const EXPECTED_FAILURE_BATCH = {
   batch: [
     { sql: 'UPDATE contract_state SET value = 1 WHERE id = ?', params: ['1'] },
-    { sql: 'INSERT INTO contract_guard(value) VALUES (?)', params: ['0'] },
+    {
+      sql: 'INSERT INTO contract_guard(value) SELECT value FROM contract_state WHERE id = ?',
+      params: ['1'],
+    },
   ],
+};
+
+const EXPECTED_CONSTRAINT_FAILURE = {
+  httpOk: false,
+  httpStatus: 400,
+  envelope: {
+    success: false,
+    errors: [{
+      code: 7500,
+      message: 'D1_ERROR: CHECK constraint failed: hio_rollback_guard: SQLITE_CONSTRAINT',
+    }],
+  },
 };
 
 const workflow = readFileSync(
@@ -84,10 +99,7 @@ test('remote failure batch rollback을 확인하고 disposable D1을 삭제한�
     },
     async queryAllowingFailure(_databaseId, body) {
       failureBodies.push(body);
-      return {
-        httpOk: true,
-        envelope: { success: true, result: [{ success: false, results: [], meta: {} }] },
-      };
+      return structuredClone(EXPECTED_CONSTRAINT_FAILURE);
     },
     async deleteDatabase(databaseId) { deleted.push(databaseId); },
   };
@@ -114,7 +126,7 @@ test('remote failure batch rollback을 확인하고 disposable D1을 삭제한�
       params: [],
     },
     {
-      sql: 'CREATE TABLE contract_guard(value INTEGER CHECK(value > 0))',
+      sql: 'CREATE TABLE contract_guard(value INTEGER CONSTRAINT hio_rollback_guard CHECK(value = 0))',
       params: [],
     },
     {
@@ -156,37 +168,180 @@ test('failure batch가 모두 성공으로 보고되면 contract를 실패시키
       sleep: async () => {},
       log: () => assert.fail('must not log success'),
     }),
-    /성공으로 보고/,
+    /예상한 constraint 오류/,
   );
   assert.equal(verificationQueries, 0);
   assert.deepEqual(deleted, ['temporary-db-id']);
 });
 
-test('malformed statement result도 failure로 취급하고 rollback을 검증한다', async () => {
-  const deleted = [];
-  const client = {
-    async createDatabase() { return { name: 'temporary', uuid: 'temporary-db-id' }; },
-    async query(_databaseId, body) {
-      if (body.sql.startsWith('SELECT value')) {
-        return [{ success: true, results: [{ value: 0 }], meta: {} }];
-      }
-      return [{ success: true, results: [], meta: {} }];
+const INVALID_FAILURE_EVIDENCE = [
+  {
+    name: 'generic HTTP 500',
+    response: {
+      ...EXPECTED_CONSTRAINT_FAILURE,
+      httpStatus: 500,
     },
-    async queryAllowingFailure() {
-      return { httpOk: true, envelope: { success: true, result: [null] } };
+  },
+  {
+    name: 'generic HTTP 429',
+    response: {
+      ...EXPECTED_CONSTRAINT_FAILURE,
+      httpStatus: 429,
     },
-    async deleteDatabase(databaseId) { deleted.push(databaseId); },
-  };
+  },
+  {
+    name: 'top-level generic failure',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [{ code: 1000, message: 'generic request failure' }],
+      },
+    },
+  },
+  {
+    name: 'empty failure result',
+    response: {
+      httpOk: true,
+      httpStatus: 200,
+      envelope: { success: true, result: [] },
+    },
+  },
+  {
+    name: 'malformed null statement result',
+    response: {
+      httpOk: true,
+      httpStatus: 200,
+      envelope: { success: true, result: [null] },
+    },
+  },
+  {
+    name: 'missing marker',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [{ code: 7500, message: 'D1 constraint failed' }],
+      },
+    },
+  },
+  {
+    name: 'wrong marker',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [{ code: 7500, message: 'CHECK constraint failed: other_guard' }],
+      },
+    },
+  },
+  {
+    name: 'marker prefix collision',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [{ code: 7500, message: 'CHECK failed: hio_rollback_guard_extra' }],
+      },
+    },
+  },
+  {
+    name: 'string query code',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [{ code: '7500', message: 'CHECK failed: hio_rollback_guard' }],
+      },
+    },
+  },
+  {
+    name: 'non-string message',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [{ code: 7500, message: null }],
+      },
+    },
+  },
+  {
+    name: 'extra error evidence',
+    response: {
+      httpOk: false,
+      httpStatus: 400,
+      envelope: {
+        success: false,
+        errors: [
+          { code: 7500, message: 'CHECK failed: hio_rollback_guard' },
+          { code: 1000, message: 'unexpected extra failure' },
+        ],
+      },
+    },
+  },
+  {
+    name: 'missing numeric HTTP status',
+    response: {
+      httpOk: false,
+      envelope: EXPECTED_CONSTRAINT_FAILURE.envelope,
+    },
+  },
+  {
+    name: 'string HTTP status',
+    response: {
+      httpOk: false,
+      httpStatus: '400',
+      envelope: EXPECTED_CONSTRAINT_FAILURE.envelope,
+    },
+  },
+  {
+    name: 'HTTP ok contradiction',
+    response: {
+      httpOk: true,
+      httpStatus: 400,
+      envelope: EXPECTED_CONSTRAINT_FAILURE.envelope,
+    },
+  },
+];
 
-  await runD1RestBatchContract({
-    client,
-    runId: '123',
-    runAttempt: '1',
-    sleep: async () => {},
-    log() {},
+for (const { name, response } of INVALID_FAILURE_EVIDENCE) {
+  test(`${name} 응답은 rollback failure 증거가 아니며 D1을 삭제한다`, async () => {
+    const deleted = [];
+    const logs = [];
+    let verificationQueries = 0;
+    const client = {
+      async createDatabase() {
+        return { name: 'temporary', uuid: 'temporary-db-id' };
+      },
+      async query(_databaseId, body) {
+        if (body.sql.startsWith('SELECT value')) verificationQueries += 1;
+        return [{ success: true, results: [{ value: 0 }], meta: {} }];
+      },
+      async queryAllowingFailure() { return structuredClone(response); },
+      async deleteDatabase(databaseId) { deleted.push(databaseId); },
+    };
+
+    await assert.rejects(
+      runD1RestBatchContract({
+        client,
+        runId: '123',
+        runAttempt: '1',
+        sleep: async () => {},
+        log: (message) => logs.push(message),
+      }),
+      /예상한 constraint 오류/,
+    );
+    assert.equal(verificationQueries, 0);
+    assert.deepEqual(logs, []);
+    assert.deepEqual(deleted, ['temporary-db-id']);
   });
-  assert.deepEqual(deleted, ['temporary-db-id']);
-});
+}
 
 test('rollback assertion이 실패해도 disposable D1을 삭제한다', async () => {
   const deleted = [];
@@ -199,7 +354,7 @@ test('rollback assertion이 실패해도 disposable D1을 삭제한다', async (
       return [{ success: true, results: [], meta: {} }];
     },
     async queryAllowingFailure() {
-      return { httpOk: false, envelope: { success: false, result: [] } };
+      return structuredClone(EXPECTED_CONSTRAINT_FAILURE);
     },
     async deleteDatabase(databaseId) { deleted.push(databaseId); },
   };
@@ -268,7 +423,7 @@ for (const { name, verification } of INVALID_ROLLBACK_PROOFS) {
         return [{ success: true, results: [], meta: {} }];
       },
       async queryAllowingFailure() {
-        return { httpOk: false, envelope: { success: false, result: [] } };
+        return structuredClone(EXPECTED_CONSTRAINT_FAILURE);
       },
       async deleteDatabase(databaseId) { deleted.push(databaseId); },
     };
