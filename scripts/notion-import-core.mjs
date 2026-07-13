@@ -44,10 +44,15 @@ export function parseNotionRecords(files) {
   }
 
   const seenByName = new Map();
-  const items = [...files]
+  const normalizedFiles = files.map(({ file, content }) => ({
+    file: checkedText(file, 'Notion export', 'file'),
+    content,
+  }));
+  const items = normalizedFiles
     .sort((left, right) => compareCodePoints(left.file, right.file))
     .map(({ file, content }) => {
-      const lines = String(content).split(/\r?\n/);
+      const text = String(content);
+      const lines = text.split(/\r?\n/);
       const titleLine = lines.find((line) => line.trim().startsWith('# ')) || '';
       const fallback = path.parse(file).name.replace(/\s+317830bfc2f[0-9a-f]+$/i, '');
       const name = checkedText(titleLine.replace(/^#\s*/, '').trim() || fallback, file, 'name');
@@ -58,6 +63,7 @@ export function parseNotionRecords(files) {
         file,
         'category',
       );
+      checkedText(text, file, 'content');
       const seen = seenByName.get(name) ?? 0;
       seenByName.set(name, seen + 1);
       const item = {
@@ -80,12 +86,22 @@ export function parseNotionRecords(files) {
 
   const identityFiles = new Map();
   for (const item of items) {
-    const identity = `${item.name}::${item.spec}`;
-    identityFiles.set(identity, [...(identityFiles.get(identity) ?? []), item.file]);
+    const specs = identityFiles.get(item.name) ?? new Map();
+    specs.set(item.spec, [...(specs.get(item.spec) ?? []), item.file]);
+    identityFiles.set(item.name, specs);
   }
-  const collision = [...identityFiles.entries()].find(([, sourceFiles]) => sourceFiles.length > 1);
+  let collision;
+  for (const [name, specs] of identityFiles) {
+    const entry = [...specs.entries()].find(([, sourceFiles]) => sourceFiles.length > 1);
+    if (entry) {
+      collision = { name, spec: entry[0], sourceFiles: entry[1] };
+      break;
+    }
+  }
   if (collision) {
-    throw new Error(`중복 item identity ${collision[0]}: ${collision[1].join(', ')}`);
+    throw new Error(
+      `중복 item identity ${collision.name}::${collision.spec}: ${collision.sourceFiles.join(', ')}`,
+    );
   }
 
   return items;
