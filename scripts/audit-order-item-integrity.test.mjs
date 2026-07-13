@@ -84,6 +84,7 @@ const LEGACY_FIXTURE_PATH = fileURLToPath(
 const DETAILS_SQL_PATH = fileURLToPath(
   new URL('./sql/audit-order-item-integrity-details.sql', import.meta.url),
 );
+const DETAILS_SQL = fs.readFileSync(DETAILS_SQL_PATH, 'utf8');
 const WRANGLER_CONFIG_PATH = fileURLToPath(
   new URL('../wrangler.toml', import.meta.url),
 );
@@ -432,7 +433,7 @@ test('details parser는 integer, nullable parent, status, numeric flag를 coerci
   }
 });
 
-test('executeD1Audit는 fixed path와 bounded captured spawn contract만 사용한다', () => {
+test('executeD1Audit는 local file과 remote query를 고정하고 bounded spawn한다', () => {
   const env = { SAFE_ENV: 'yes' };
   const calls = [];
   const stdout = wranglerStdout(cleanRow);
@@ -446,6 +447,12 @@ test('executeD1Audit는 fixed path와 bounded captured spawn contract만 사용�
     target: 'local',
     persistTo: '/tmp/hio-integrity',
     sqlPath: '/tmp/operator-controlled.sql',
+    env,
+    runner,
+  }), stdout);
+  assert.equal(auditModule.executeD1Audit({
+    mode: 'summary',
+    target: 'remote',
     env,
     runner,
   }), stdout);
@@ -484,7 +491,17 @@ test('executeD1Audit는 fixed path와 bounded captured spawn contract만 사용�
         WRANGLER_BIN,
         'd1', 'execute', 'hereisorder', '--remote', '--json',
         `--config=${WRANGLER_CONFIG_PATH}`,
-        `--file=${DETAILS_SQL_PATH}`,
+        `--command=${SUMMARY_SQL}`,
+      ],
+      options: expectedOptions,
+    },
+    {
+      executable: process.execPath,
+      args: [
+        WRANGLER_BIN,
+        'd1', 'execute', 'hereisorder', '--remote', '--json',
+        `--config=${WRANGLER_CONFIG_PATH}`,
+        `--command=${DETAILS_SQL}`,
       ],
       options: expectedOptions,
     },
