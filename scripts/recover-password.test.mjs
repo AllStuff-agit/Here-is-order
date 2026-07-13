@@ -14,10 +14,11 @@ import {
 const API_TOKEN = 'recovery-api-token';
 const ACCOUNT_ID = 'recovery-account-id';
 const DATABASE_NAME = 'hereisorder';
-const DATABASE_ID = 'production-database-id';
+const DATABASE_ID = '6de5b982-fd82-4e0a-a56d-9e7bde948839';
 const USERNAME = 'admin';
 const PASSWORD = 'correct horse battery staple';
 const PASSWORD_HASH = 'pbkdf2_sha256$100000$sensitive-salt$sensitive-hash';
+const CONCURRENT_PASSWORD_HASH = 'pbkdf2_sha256$100000$other-salt$other-hash';
 
 function jsonResponse(body, { status = 200 } = {}) {
   return new Response(JSON.stringify(body), {
@@ -57,6 +58,7 @@ function makeRecoveryFetch({
   postflightResults,
   postflightRow = {
     username,
+    hash_matches: 1,
     hash_scheme_ok: 1,
     session_count: 0,
     latest_recovery_audit: JSON.stringify({ source: 'operator_recovery', username }),
@@ -137,12 +139,12 @@ database_id = "analytics-id"
 [[d1_databases]]
 binding = "DB"
 database_name = "hereisorder"
-database_id = "db-id"
+database_id = "${DATABASE_ID}"
 `);
   assert.deepEqual(readProductionD1Binding({ configPath }), {
     binding: 'DB',
     databaseName: 'hereisorder',
-    databaseId: 'db-id',
+    databaseId: DATABASE_ID,
   });
 
   fs.writeFileSync(configPath, 'name = "worker-without-d1"\n');
@@ -206,7 +208,7 @@ test('exact confirmation 전에는 mutation batch를 보내지 않는다', async
   const configPath = writeConfig(root, `[[d1_databases]]
 binding = "DB"
 database_name = "hereisorder"
-database_id = "db-id"
+database_id = "${DATABASE_ID}"
 `);
   const bodies = [];
   const fetchImpl = async (_url, init) => {
@@ -302,6 +304,7 @@ test('quote username은 SQL/URL이 아니라 REST params에만 있고 secret은 
   assert.equal(requests[1].body.batch.every(({ params }) => params.includes(username)
     || params.some((value) => typeof value === 'string' && value.includes(username))), true);
   assert.equal(requests[2].body.params.at(-1), username);
+  assert.equal(requests[2].body.params[0], PASSWORD_HASH);
 
   const outputText = output.join('');
   assert.doesNotMatch(outputText, new RegExp(PASSWORD.replaceAll('$', '\\$&')));
@@ -310,6 +313,88 @@ test('quote username은 SQL/URL이 아니라 REST params에만 있고 secret은 
   assert.ok(!outputText.includes(ACCOUNT_ID));
   assert.ok(!JSON.stringify(responseBodies[2]).includes(PASSWORD));
   assert.ok(!JSON.stringify(responseBodies[2]).includes(PASSWORD_HASH));
+});
+
+test('write 직후 다른 valid PBKDF2 hash로 덮어쓰면 completion을 거부한다', async (t) => {
+  const root = makeRoot(t);
+  const configPath = writeConfig(root);
+  const output = [];
+  const requests = [];
+  const responseBodies = [];
+  let storedHash;
+
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    requests.push({ url, body });
+    let envelope;
+    if (Object.hasOwn(body, 'batch')) {
+      storedHash = body.batch[0].params[0];
+      storedHash = CONCURRENT_PASSWORD_HASH;
+      envelope = successEnvelope([
+        { success: true, results: [], meta: { changes: 1 } },
+        { success: true, results: [], meta: { changes: 2 } },
+        { success: true, results: [], meta: { changes: 1 } },
+      ]);
+    } else if (/^SELECT id, username FROM users/.test(body.sql)) {
+      envelope = successEnvelope([{
+        success: true,
+        results: [{ id: 1, username: USERNAME }],
+        meta: {},
+      }]);
+    } else {
+      envelope = successEnvelope([{
+        success: true,
+        results: [{
+          username: USERNAME,
+          hash_matches: storedHash === body.params[0] ? 1 : 0,
+          hash_scheme_ok: storedHash.startsWith('pbkdf2_sha256$100000$') ? 1 : 0,
+          session_count: 0,
+          latest_recovery_audit: JSON.stringify({
+            source: 'operator_recovery',
+            username: USERNAME,
+          }),
+        }],
+        meta: {},
+      }]);
+    }
+    responseBodies.push(envelope);
+    return jsonResponse(envelope);
+  };
+
+  await assert.rejects(
+    runPasswordRecovery({
+      argv: ['--remote', '--username', USERNAME],
+      env: { CLOUDFLARE_API_TOKEN: API_TOKEN, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+      fetchImpl,
+      configPath,
+      question: async () => `RECOVER ${DATABASE_NAME} ${USERNAME}`,
+      hiddenPrompt: async () => PASSWORD,
+      createHash: () => PASSWORD_HASH,
+      output: { write(value) { output.push(String(value)); } },
+    }),
+    (error) => {
+      assert.match(error.message, /postflight/);
+      assert.ok(!error.message.includes(PASSWORD_HASH));
+      assert.ok(!error.message.includes(CONCURRENT_PASSWORD_HASH));
+      return true;
+    },
+  );
+
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[2].body.params, [
+    PASSWORD_HASH,
+    'pbkdf2_sha256$100000$',
+    USERNAME,
+  ]);
+  assert.ok(!requests[2].body.sql.includes(PASSWORD_HASH));
+  assert.ok(!requests[2].body.sql.includes(CONCURRENT_PASSWORD_HASH));
+  assert.ok(!requests.some(({ url }) => url.includes(PASSWORD_HASH)));
+  assert.ok(!requests.some(({ url }) => url.includes(CONCURRENT_PASSWORD_HASH)));
+  assert.ok(!JSON.stringify(responseBodies[2]).includes(PASSWORD_HASH));
+  assert.ok(!JSON.stringify(responseBodies[2]).includes(CONCURRENT_PASSWORD_HASH));
+  assert.doesNotMatch(output.join(''), /Password recovery completed/);
+  assert.ok(!output.join('').includes(PASSWORD_HASH));
+  assert.ok(!output.join('').includes(CONCURRENT_PASSWORD_HASH));
 });
 
 test('같은 password recovery도 매번 다른 random salt hash를 전송한다', async (t) => {
@@ -410,6 +495,7 @@ test('postflight의 missing/extra statement와 row 및 username mismatch는 comp
   const auditJson = JSON.stringify({ source: 'operator_recovery', username: USERNAME });
   const validRow = {
     username: USERNAME,
+    hash_matches: 1,
     hash_scheme_ok: 1,
     session_count: 0,
     latest_recovery_audit: auditJson,
@@ -481,6 +567,7 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
   const auditJson = JSON.stringify({ source: 'operator_recovery', username: USERNAME });
   const verifiedRow = {
     username: USERNAME,
+    hash_matches: 1,
     hash_scheme_ok: 1,
     session_count: 0,
     latest_recovery_audit: auditJson,
@@ -524,6 +611,16 @@ test('write/postflight의 changes, success, session, scheme, audit mismatch를 �
       options: { postflightRow: { ...verifiedRow, session_count: 1 } },
       pattern: /postflight/,
     },
+    {
+      name: 'hash ownership',
+      options: { postflightRow: { ...verifiedRow, hash_matches: 0 } },
+      pattern: /postflight/,
+    },
+    ...[true, '1', null].map((hashMatches) => ({
+      name: `hash ownership type ${String(hashMatches)}`,
+      options: { postflightRow: { ...verifiedRow, hash_matches: hashMatches } },
+      pattern: /postflight/,
+    })),
     {
       name: 'hash scheme',
       options: { postflightRow: { ...verifiedRow, hash_scheme_ok: 0 } },

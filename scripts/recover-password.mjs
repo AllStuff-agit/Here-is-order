@@ -201,7 +201,7 @@ export async function runPasswordRecovery({
 
   const postflightResults = await client.query(
     binding.databaseId,
-    buildRecoveryPostflightQuery(username),
+    buildRecoveryPostflightQuery(username, passwordHash),
   );
   assertRecoveryPostflight(postflightResults, username, auditJson);
   output.write(

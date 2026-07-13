@@ -131,15 +131,21 @@ test('recovery batch는 payload를 SQL에 보간하지 않고 모든 write에서
   }
 });
 
-test('postflight는 hash를 반환하지 않고 PBKDF2, session, audit fact만 조회한다', () => {
-  const statement = buildRecoveryPostflightQuery(USERNAME_PAYLOAD);
+test('postflight는 expected hash를 boolean으로만 비교하고 hash를 반환하지 않는다', () => {
+  const statement = buildRecoveryPostflightQuery(
+    USERNAME_PAYLOAD,
+    PASSWORD_HASH_PAYLOAD,
+  );
 
   assert.deepEqual(statement.params, [
+    PASSWORD_HASH_PAYLOAD,
     'pbkdf2_sha256$100000$',
     USERNAME_PAYLOAD,
   ]);
   assert.ok(!statement.sql.includes(USERNAME_PAYLOAD));
+  assert.ok(!statement.sql.includes(PASSWORD_HASH_PAYLOAD));
   assert.ok(!statement.sql.includes('pbkdf2_sha256$100000$'));
+  assert.match(statement.sql, /u\.password_hash = \? AS hash_matches/);
   assert.match(statement.sql, /instr\(u\.password_hash, \?\) = 1 AS hash_scheme_ok/);
   assert.match(statement.sql, /COUNT\(\*\).*AS session_count/s);
   assert.match(statement.sql, /after_json.*AS latest_recovery_audit/s);
@@ -225,13 +231,14 @@ test('write result는 세 statement 모두 성공하고 update가 한 row를 바
   }
 });
 
-test('postflight는 PBKDF2 scheme, session 0건, exact audit JSON을 모두 요구한다', () => {
+test('postflight는 expected hash ownership, PBKDF2 scheme, session 0건, exact audit JSON을 요구한다', () => {
   const auditJson = JSON.stringify({
     source: 'operator_recovery',
     username: 'admin',
   });
   const verifiedRow = {
     username: 'admin',
+    hash_matches: 1,
     hash_scheme_ok: 1,
     session_count: 0,
     latest_recovery_audit: auditJson,
@@ -276,12 +283,30 @@ test('postflight는 PBKDF2 scheme, session 0건, exact audit JSON을 모두 요�
   );
   assert.throws(
     () => assertRecoveryPostflight(
+      queryResults([{ ...verifiedRow, hash_matches: 0 }]),
+      'admin',
+      auditJson,
+    ),
+    /postflight/,
+  );
+  assert.throws(
+    () => assertRecoveryPostflight(
       queryResults([{ ...verifiedRow, hash_scheme_ok: 0 }]),
       'admin',
       auditJson,
     ),
     /postflight/,
   );
+  for (const hashMatches of [true, '1', null]) {
+    assert.throws(
+      () => assertRecoveryPostflight(
+        queryResults([{ ...verifiedRow, hash_matches: hashMatches }]),
+        'admin',
+        auditJson,
+      ),
+      /postflight/,
+    );
+  }
   assert.throws(
     () => assertRecoveryPostflight(
       queryResults([{ ...verifiedRow, session_count: 1 }]),

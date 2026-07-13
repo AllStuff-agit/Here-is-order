@@ -107,9 +107,10 @@ export function buildRecoveryBatch({ username, passwordHash }) {
   };
 }
 
-export function buildRecoveryPostflightQuery(username) {
+export function buildRecoveryPostflightQuery(username, passwordHash) {
   return {
     sql: `SELECT u.id, u.username,
+                 u.password_hash = ? AS hash_matches,
                  instr(u.password_hash, ?) = 1 AS hash_scheme_ok,
                  (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id) AS session_count,
                  (SELECT after_json FROM audit_logs a
@@ -117,7 +118,7 @@ export function buildRecoveryPostflightQuery(username) {
                      AND a.action = 'recover_password'
                    ORDER BY a.id DESC LIMIT 1) AS latest_recovery_audit
             FROM users u WHERE ${ACTIVE_ADMIN_PREDICATE}`,
-    params: ['pbkdf2_sha256$100000$', username],
+    params: [passwordHash, 'pbkdf2_sha256$100000$', username],
   };
 }
 
@@ -136,6 +137,7 @@ export function assertRecoveryPostflight(results, username, auditJson) {
   const errorMessage = 'password recovery postflight 검증에 실패했습니다.';
   const row = exactSingleQueryRow(results, errorMessage);
   if (row.username !== username
+    || row.hash_matches !== 1
     || row.hash_scheme_ok !== 1
     || row.session_count !== 0) {
     throw new Error(errorMessage);
