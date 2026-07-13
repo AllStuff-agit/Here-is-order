@@ -322,16 +322,19 @@ export async function readVerifiedWorkerDeployment({
     }
     const scriptUrl = `${CLOUDFLARE_API_BASE_URL}/accounts/${accountId}`
       + `/workers/scripts/${encodeURIComponent(selected.workerName)}`;
-    const deploymentResult = await readCloudflareEnvelope({
-      url: `${scriptUrl}/deployments`,
-      apiToken,
-      fetchImpl,
-    });
-    const active = parseVerifiedActiveDeployment({
-      result: deploymentResult,
-      expectedVersionId,
-      gitSha,
-    });
+    const readActiveDeployment = async () => {
+      const deploymentResult = await readCloudflareEnvelope({
+        url: `${scriptUrl}/deployments`,
+        apiToken,
+        fetchImpl,
+      });
+      return parseVerifiedActiveDeployment({
+        result: deploymentResult,
+        expectedVersionId,
+        gitSha,
+      });
+    };
+    const initialActive = await readActiveDeployment();
     const versionResult = await readCloudflareEnvelope({
       url: `${scriptUrl}/versions/${expectedVersionId}`,
       apiToken,
@@ -342,7 +345,13 @@ export async function readVerifiedWorkerDeployment({
       expectedVersionId,
       gitSha,
     });
-    return active;
+    const finalActive = await readActiveDeployment();
+    if (finalActive.deploymentId !== initialActive.deploymentId
+      || finalActive.versionId !== initialActive.versionId
+      || finalActive.trafficPercentage !== initialActive.trafficPercentage) {
+      throw new Error('active deployment changed during verification');
+    }
+    return finalActive;
   } catch {
     throw new Error('Cloudflare Worker deployment verification request failed.');
   }

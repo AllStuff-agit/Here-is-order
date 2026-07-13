@@ -436,6 +436,7 @@ test('readVerifiedWorkerDeployment는 fixed Worker의 deployments와 exact versi
   const responses = [
     jsonResponse(deploymentEnvelope()),
     jsonResponse(versionEnvelope()),
+    jsonResponse(deploymentEnvelope()),
   ];
   const result = await readVerifiedWorkerDeployment({
     accountId: ACCOUNT_ID,
@@ -453,12 +454,35 @@ test('readVerifiedWorkerDeployment는 fixed Worker의 deployments와 exact versi
   assert.deepEqual(requests.map(({ url }) => url), [
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/hereisorder/deployments`,
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/hereisorder/versions/${API_VERSION_ID}`,
+    `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/hereisorder/deployments`,
   ]);
   for (const { options } of requests) {
     assert.equal(options.method, 'GET');
     assert.deepEqual(options.headers, { Authorization: `Bearer ${API_TOKEN}` });
     assert.ok(options.signal instanceof AbortSignal);
   }
+});
+
+test('readVerifiedWorkerDeployment는 version 조회 중 active deployment가 바뀌면 거부한다', async () => {
+  const replacementDeploymentId = '66666666-6666-4666-8666-666666666666';
+  const responses = [
+    jsonResponse(deploymentEnvelope()),
+    jsonResponse(versionEnvelope()),
+    jsonResponse(deploymentEnvelope({ id: replacementDeploymentId })),
+  ];
+
+  await assert.rejects(
+    readVerifiedWorkerDeployment({
+      accountId: ACCOUNT_ID,
+      apiToken: API_TOKEN,
+      target: 'api',
+      expectedVersionId: API_VERSION_ID,
+      gitSha: GIT_SHA,
+      fetchImpl: async () => responses.shift(),
+    }),
+    (error) => error.message === 'Cloudflare Worker deployment verification request failed.',
+  );
+  assert.equal(responses.length, 0);
 });
 
 test('readVerifiedWorkerDeployment는 HTTP/JSON/envelope/transport/version 오류를 sanitize한다', async () => {
