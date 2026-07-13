@@ -25,6 +25,7 @@
     "db:generate:admin-seed": "node scripts/generate-admin-seed.mjs",
     "db:recover-password": "node scripts/recover-password.mjs",
     "db:audit:order-items": "node scripts/audit-order-item-integrity.mjs",
+    "deploy:preflight": "node scripts/production-preflight.mjs",
     "test:d1-rest-batch-contract": "node scripts/d1-rest-batch-contract.mjs",
     "db:seed:admin": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --local --file=data/seed_admin.sql",
     "db:seed:remote": "node scripts/apply-notion-seed.mjs --remote",
