@@ -64,7 +64,16 @@ export async function runD1RestBatchContract({
       sql: 'SELECT value FROM contract_state WHERE id = ?',
       params: ['1'],
     });
-    if (Number(verification[0]?.results?.[0]?.value) !== 0) {
+    const verificationResult = Array.isArray(verification) && verification.length === 1
+      ? verification[0]
+      : undefined;
+    const verificationRows = Array.isArray(verificationResult?.results)
+      ? verificationResult.results
+      : [];
+    const rollbackValue = verificationRows.length === 1
+      ? verificationRows[0]?.value
+      : undefined;
+    if (typeof rollbackValue !== 'number' || rollbackValue !== 0) {
       throw new Error('D1 REST batch의 선행 update가 rollback되지 않았습니다.');
     }
     log(`D1 REST batch rollback verified: ${database.name}/${database.uuid}`);

@@ -217,6 +217,77 @@ test('rollback assertion이 실패해도 disposable D1을 삭제한다', async (
   assert.deepEqual(deleted, ['temporary-db-id']);
 });
 
+const INVALID_ROLLBACK_PROOFS = [
+  {
+    name: 'null value',
+    verification: [{ success: true, results: [{ value: null }], meta: {} }],
+  },
+  {
+    name: 'empty string value',
+    verification: [{ success: true, results: [{ value: '' }], meta: {} }],
+  },
+  {
+    name: 'false value',
+    verification: [{ success: true, results: [{ value: false }], meta: {} }],
+  },
+  {
+    name: 'missing row',
+    verification: [{ success: true, results: [], meta: {} }],
+  },
+  {
+    name: 'multiple rows',
+    verification: [{
+      success: true,
+      results: [{ value: 0 }, { value: 0 }],
+      meta: {},
+    }],
+  },
+  {
+    name: 'missing verification result',
+    verification: [],
+  },
+  {
+    name: 'multiple verification results',
+    verification: [
+      { success: true, results: [{ value: 0 }], meta: {} },
+      { success: true, results: [{ value: 0 }], meta: {} },
+    ],
+  },
+];
+
+for (const { name, verification } of INVALID_ROLLBACK_PROOFS) {
+  test(`rollback proof는 ${name} 응답을 거부하고 disposable D1을 삭제한다`, async () => {
+    const deleted = [];
+    const logs = [];
+    const client = {
+      async createDatabase() {
+        return { name: 'temporary', uuid: 'temporary-db-id' };
+      },
+      async query(_databaseId, body) {
+        if (body.sql.startsWith('SELECT value')) return verification;
+        return [{ success: true, results: [], meta: {} }];
+      },
+      async queryAllowingFailure() {
+        return { httpOk: false, envelope: { success: false, result: [] } };
+      },
+      async deleteDatabase(databaseId) { deleted.push(databaseId); },
+    };
+
+    await assert.rejects(
+      runD1RestBatchContract({
+        client,
+        runId: '123',
+        runAttempt: '1',
+        sleep: async () => {},
+        log: (message) => logs.push(message),
+      }),
+      /rollback되지 않았습니다/,
+    );
+    assert.deepEqual(logs, []);
+    assert.deepEqual(deleted, ['temporary-db-id']);
+  });
+}
+
 test('readiness retry가 모두 실패해도 생성한 disposable D1을 삭제한다', async () => {
   const deleted = [];
   let attempts = 0;
