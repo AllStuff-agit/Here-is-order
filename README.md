@@ -59,6 +59,22 @@ Notion export로 카테고리/품목도 초기화하려면 저장소 루트에 `
 ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:bootstrap:from-notion
 ```
 
+이 로컬 결합 bootstrap은 계속 제공됩니다. `notion-export/`와 생성된 `data/`는 계속 Git 추적 대상이 아니므로 커밋하지 않습니다.
+
+운영 D1에서는 생성부터 적용까지 한 번에 실행하던 원격 Notion 결합 bootstrap 기능을 제거했습니다. 생성물을 적용하기 전에 반드시 검토하고 다음 순서로 분리해 실행합니다.
+
+```bash
+npm run import:notion
+# data/seed_categories_items.sql, data/seed_items.csv,
+# data/import-report.json과 seedSha256을 검토합니다.
+npm run db:migrate:remote
+npm run db:seed:remote -- --expected-sha <검토한-64자리-SHA-256>
+# 최초 bootstrap에서만 실행합니다.
+ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:seed:admin:remote
+```
+
+원격 품목 seed 명령은 검토자가 전달한 SHA-256, report의 `seedSha256`, 실제 SQL의 SHA-256이 모두 일치할 때만 D1 적용을 시작합니다. 운영 품목 seed를 Wrangler로 직접 적용하지 않습니다.
+
 ### 비밀번호를 잊어버렸을 때
 
 Cloudflare D1 콘솔에서 직접 비밀번호를 초기화할 수 있습니다.
@@ -96,8 +112,11 @@ WHERE username = '아이디';
 - `typecheck`, `test`, `build`: API typecheck, test, Worker dry-run
 - `web:lint`, `web:build`: Next.js lint/build
 - `db:migrate`, `db:migrate:remote`: `migrations/` 로컬/원격 적용
+- `db:seed`, `db:seed:remote`: Notion 품목 seed 로컬 적용 / 검토한 세 SHA-256 일치 후 원격 적용
+- `db:seed:admin`, `db:seed:admin:remote`: 관리자 seed 로컬/원격 적용
 - `db:bootstrap`, `db:bootstrap:remote`: migration + 관리자 seed
-- `db:bootstrap:from-notion`, `db:bootstrap:remote:from-notion`: Notion 품목 seed 포함
+- `db:bootstrap:from-notion`: Notion 변환 + migration + 품목/관리자 seed를 로컬 D1에 적용
+- `import:notion`: `notion-export/`를 검토용 `data/` 생성물로 변환
 - `npm run build:cloudflare --prefix frontend`: OpenNext Worker 산출물 검증
 - `npm run deploy --prefix frontend`: 웹 Worker 배포
 - `npm run deploy`: API Worker 배포
