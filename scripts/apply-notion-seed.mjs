@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -30,16 +31,48 @@ export function parseApplyArguments(argv) {
   return { expectedSha };
 }
 
-export function verifyNotionSeed({ seedPath, reportPath, expectedSha }) {
-  const sql = fs.readFileSync(seedPath, 'utf8');
+function readVerifiedNotionSeed({ seedPath, reportPath, expectedSha }) {
+  const seedBytes = fs.readFileSync(seedPath);
   const reportText = fs.readFileSync(reportPath, 'utf8');
   let report;
   try { report = JSON.parse(reportText); }
   catch (error) { throw new Error('import report JSON을 해석할 수 없습니다.', { cause: error }); }
-  const actualSha = createHash('sha256').update(sql, 'utf8').digest('hex');
+  const actualSha = createHash('sha256').update(seedBytes).digest('hex');
   if (report.seedSha256 !== actualSha) throw new Error('report와 seed SQL의 SHA-256이 일치하지 않습니다.');
   if (expectedSha !== actualSha) throw new Error('검토한 SHA-256과 seed SQL이 일치하지 않습니다.');
-  return actualSha;
+  return { actualSha, seedBytes };
+}
+
+export function verifyNotionSeed(options) {
+  return readVerifiedNotionSeed(options).actualSha;
+}
+
+function createPrivateSeedSnapshot(seedBytes) {
+  let snapshotDirectory;
+  try {
+    snapshotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'hio-notion-seed-'));
+    fs.chmodSync(snapshotDirectory, 0o700);
+    const snapshotPath = path.join(snapshotDirectory, 'seed_categories_items.sql');
+    const snapshotFile = fs.openSync(snapshotPath, 'wx', 0o600);
+    try {
+      fs.writeFileSync(snapshotFile, seedBytes);
+      fs.fchmodSync(snapshotFile, 0o600);
+    } finally {
+      fs.closeSync(snapshotFile);
+    }
+    return { snapshotDirectory, snapshotPath };
+  } catch {
+    if (snapshotDirectory) {
+      try { fs.rmSync(snapshotDirectory, { recursive: true, force: true }); }
+      catch { /* Best-effort cleanup before returning a sanitized error. */ }
+    }
+    throw new Error('검증된 seed 임시 파일을 만들 수 없습니다.');
+  }
+}
+
+function removePrivateSeedSnapshot(snapshotDirectory) {
+  try { fs.rmSync(snapshotDirectory, { recursive: true, force: true }); }
+  catch { throw new Error('검증된 seed 임시 파일을 정리하지 못했습니다.'); }
 }
 
 function defaultRunWrangler(args, cwd) {
@@ -59,13 +92,23 @@ export async function applyNotionSeed({
   const { expectedSha } = parseApplyArguments(argv);
   const seedPath = path.join(cwd, 'data', 'seed_categories_items.sql');
   const reportPath = path.join(cwd, 'data', 'import-report.json');
-  const actualSha = verifyNotionSeed({ seedPath, reportPath, expectedSha });
-  const result = runWrangler([
-    'd1', 'execute', 'hereisorder', '--remote', `--file=${seedPath}`,
-  ], cwd);
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`Wrangler seed 적용이 exit ${result.status}로 실패했습니다.`);
-  log(`Reviewed Notion seed applied: sha256=${actualSha}`);
+  const { actualSha, seedBytes } = readVerifiedNotionSeed({ seedPath, reportPath, expectedSha });
+  const { snapshotDirectory, snapshotPath } = createPrivateSeedSnapshot(seedBytes);
+  try {
+    let result;
+    try {
+      result = runWrangler([
+        'd1', 'execute', 'hereisorder', '--remote', `--file=${snapshotPath}`,
+      ], cwd);
+    } catch {
+      throw new Error('Wrangler seed 적용을 시작하지 못했습니다.');
+    }
+    if (result.error) throw new Error('Wrangler seed 적용을 시작하지 못했습니다.');
+    if (result.status !== 0) throw new Error(`Wrangler seed 적용이 exit ${result.status}로 실패했습니다.`);
+    log(`Reviewed Notion seed applied: sha256=${actualSha}`);
+  } finally {
+    removePrivateSeedSnapshot(snapshotDirectory);
+  }
 }
 
 const isMain = process.argv[1]
