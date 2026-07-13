@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "npm@10.9.8",
   "scripts": {
     "dev": "wrangler dev",
     "dev:api": "wrangler dev",
@@ -24,6 +25,7 @@
     "db:generate:admin-seed": "node scripts/generate-admin-seed.mjs",
     "db:recover-password": "node scripts/recover-password.mjs",
     "db:audit:order-items": "node scripts/audit-order-item-integrity.mjs",
+    "deploy:preflight": "node scripts/production-preflight.mjs",
     "test:d1-rest-batch-contract": "node scripts/d1-rest-batch-contract.mjs",
     "db:seed:admin": "npm run db:generate:admin-seed && wrangler d1 execute hereisorder --local --file=data/seed_admin.sql",
     "db:seed:remote": "node scripts/apply-notion-seed.mjs --remote",
@@ -39,9 +41,9 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.4",
-    "@cloudflare/workers-types": "^4.20260302.0",
+    "@cloudflare/workers-types": "5.20260708.1",
     "typescript": "^5.6.3",
     "vitest": "^4.1.10",
-    "wrangler": "^4.107.0"
+    "wrangler": "4.110.0"
   }
 }

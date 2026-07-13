@@ -111,7 +111,10 @@ test('main push/dispatch deployment는 verify 뒤 remote rollback contract에 ga
     /^  deploy-api:\n([\s\S]*?)(?=^  [a-zA-Z0-9_-]+:\n)/m,
   )?.[1];
   assert.ok(deployApi, 'deploy-api job must exist');
-  assert.match(deployApi, /needs:\n\s+- verify\n\s+- d1-rest-batch-contract/);
+  assert.match(
+    deployApi,
+    /needs:\n\s+- verify\n\s+- d1-rest-batch-contract\n\s+- production-preflight/,
+  );
   assert.match(deployApi, /Apply production D1 migrations/);
   assert.ok(
     workflow.indexOf('  verify:') < workflow.indexOf('  d1-rest-batch-contract:'),

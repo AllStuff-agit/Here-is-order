@@ -29,6 +29,7 @@ function isRetryableStatus(status) {
 }
 
 const DATABASE_UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const TIME_TRAVEL_BOOKMARK_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/;
 
 function isUsableDatabaseUuid(value) {
   return typeof value === 'string'
@@ -141,6 +142,23 @@ export function createCloudflareD1RestClient({
         name: database.name,
         uuid: database.uuid,
       }));
+    },
+
+    async getTimeTravelBookmark(databaseId) {
+      const envelope = await request(
+        `${databaseResourcePath(databaseId)}/time_travel/bookmark`,
+        { method: 'GET' },
+      );
+      const result = envelope.result;
+      if (!result
+        || typeof result !== 'object'
+        || Array.isArray(result)
+        || JSON.stringify(Object.keys(result).sort()) !== JSON.stringify(['bookmark'])
+        || typeof result.bookmark !== 'string'
+        || !TIME_TRAVEL_BOOKMARK_PATTERN.test(result.bookmark)) {
+        throw new Error('Cloudflare D1 bookmark response was invalid.');
+      }
+      return result.bookmark;
     },
 
     async deleteDatabase(databaseId) {

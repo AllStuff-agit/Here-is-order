@@ -265,6 +265,111 @@ test('exact-name list는 malformed, non-exact, unusable UUID 결과를 fail clos
   }
 });
 
+test('getTimeTravelBookmark는 fixed bookmark GET과 strict opaque 결과만 허용한다', async () => {
+  const requests = [];
+  const bookmark = '00000085-0000024c-00004c6d-8e61117bf38d7adb71b934ebbf891683';
+  const client = createCloudflareD1RestClient({
+    accountId: ACCOUNT_ID,
+    apiToken: API_TOKEN,
+    baseUrl: BASE_URL,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ success: true, result: { bookmark } });
+    },
+  });
+
+  assert.equal(await client.getTimeTravelBookmark(DATABASE_ID), bookmark);
+  assert.deepEqual(requests, [{
+    url: `${BASE_URL}/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/time_travel/bookmark`,
+    init: {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    },
+  }]);
+});
+
+test('getTimeTravelBookmark는 malformed bookmark response를 fail closed 한다', async (t) => {
+  const cases = [
+    { name: 'missing result', result: undefined },
+    { name: 'null result', result: null },
+    { name: 'array result', result: [] },
+    { name: 'missing bookmark', result: {} },
+    { name: 'empty bookmark', result: { bookmark: '' } },
+    { name: 'whitespace bookmark', result: { bookmark: 'bookmark value' } },
+    { name: 'control bookmark', result: { bookmark: 'bookmark\nvalue' } },
+    { name: 'path bookmark', result: { bookmark: '../restore' } },
+    { name: 'non-string bookmark', result: { bookmark: 42 } },
+    { name: 'oversized bookmark', result: { bookmark: 'a'.repeat(513) } },
+    { name: 'extra result field', result: { bookmark: 'abc-123', database: 'sensitive' } },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const client = createCloudflareD1RestClient({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        baseUrl: BASE_URL,
+        fetchImpl: async () => jsonResponse({
+          success: true,
+          ...(scenario.result === undefined ? {} : { result: scenario.result }),
+        }),
+      });
+
+      await assert.rejects(
+        client.getTimeTravelBookmark(DATABASE_ID),
+        (error) => {
+          assert.equal(error.message, 'Cloudflare D1 bookmark response was invalid.');
+          assert.doesNotMatch(error.message, /sensitive/);
+          assert.doesNotMatch(error.message, new RegExp(API_TOKEN));
+          assert.doesNotMatch(error.message, new RegExp(ACCOUNT_ID));
+          return true;
+        },
+      );
+    });
+  }
+});
+
+test('getTimeTravelBookmark는 HTTP/envelope 실패 detail을 노출하지 않는다', async (t) => {
+  const sensitiveDetail = `${ACCOUNT_ID}/${API_TOKEN}/bookmark-detail`;
+  const cases = [
+    {
+      name: 'non-2xx response',
+      status: 403,
+      body: { success: true, result: { bookmark: 'abc-123' } },
+    },
+    {
+      name: 'successful HTTP with rejected envelope',
+      status: 200,
+      body: { success: false, errors: [{ message: sensitiveDetail }] },
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const client = createCloudflareD1RestClient({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        baseUrl: BASE_URL,
+        fetchImpl: async () => jsonResponse(scenario.body, { status: scenario.status }),
+      });
+
+      await assert.rejects(
+        client.getTimeTravelBookmark(DATABASE_ID),
+        (error) => {
+          assert.match(error.message, /^Cloudflare D1 request failed with HTTP \d{3}\.$/);
+          assert.doesNotMatch(error.message, /bookmark-detail/);
+          assert.doesNotMatch(error.message, new RegExp(API_TOKEN));
+          assert.doesNotMatch(error.message, new RegExp(ACCOUNT_ID));
+          return true;
+        },
+      );
+    });
+  }
+});
+
 test('database operation은 canonical UUID가 아니면 fetch 전에 거부한다', async () => {
   let fetchCalls = 0;
   const client = createCloudflareD1RestClient({
@@ -288,6 +393,10 @@ test('database operation은 canonical UUID가 아니면 fetch 전에 거부한�
     );
     await assert.rejects(
       client.queryAllowingFailure(databaseId, { sql: 'SELECT 1', params: [] }),
+      /database identifier was invalid/,
+    );
+    await assert.rejects(
+      client.getTimeTravelBookmark(databaseId),
       /database identifier was invalid/,
     );
   }

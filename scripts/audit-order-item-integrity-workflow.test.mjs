@@ -44,7 +44,7 @@ const CANONICAL_WORKFLOW = [
   '      - name: Set up Node.js',
   '        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0',
   '        with:',
-  '          node-version: \'22\'',
+  '          node-version: \'22.23.1\'',
   '          cache: \'npm\'',
   '',
   '      - name: Install dependencies',
@@ -124,11 +124,15 @@ test('workflow는 pinned action과 exact summary command 및 허용된 secret만
   )].sort();
 
   assert.deepEqual(actions, [CHECKOUT_ACTION, SETUP_NODE_ACTION]);
+  for (const action of actions) {
+    assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/);
+  }
   assert.deepEqual(commands, [
     'npm ci',
     'npm run db:audit:order-items -- --remote --summary',
   ]);
   assert.match(workflow, /^          persist-credentials: false$/m);
+  assert.match(workflow, /^          node-version: '22\.23\.1'$/m);
   assert.match(
     workflow,
     /^          CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_D1_READ_TOKEN \|\| secrets\.CLOUDFLARE_API_TOKEN \}\}$/m,
