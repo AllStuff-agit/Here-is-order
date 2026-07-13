@@ -74,6 +74,20 @@ ADMIN_PASSWORD='12자-이상의-비밀번호' npm run db:seed:admin:remote
 
 원격 품목 seed 명령은 검토자가 전달한 SHA-256, report의 `seedSha256`, 실제 SQL의 SHA-256이 모두 일치할 때만 Wrangler를 호출합니다. 운영 품목 seed SQL을 Wrangler로 직접 적용하지 않습니다.
 
+### 운영 비밀번호 복구
+
+로그인 가능한 관리자가 있으면 앱의 **설정 → 계정 관리**에서 다른 사용자의 비밀번호를 초기화합니다. 모든 관리자가 잠긴 경우에만 신뢰할 수 있는 운영자가 저장소 루트의 interactive TTY에서 다음 명령을 실행합니다.
+
+```bash
+npm run db:recover-password -- --remote --username admin
+```
+
+작업자 환경에는 대상 계정의 `CLOUDFLARE_ACCOUNT_ID`와 D1 읽기·쓰기가 가능한 `CLOUDFLARE_API_TOKEN`이 필요합니다. Cloudflare custom token은 대상 계정의 **Account / D1 / Edit** 권한으로 제한합니다.
+
+명령은 대상 데이터베이스와 사용자 이름을 표시하고 `RECOVER hereisorder admin`을 정확히 입력받습니다. 이어서 12자 이상의 새 비밀번호와 확인값을 echo 없이 입력받아 일치 여부를 확인하고, 성공하면 대상 사용자의 모든 세션을 폐기한 뒤 운영자 비밀번호 복구 감사를 기록합니다.
+
+복구할 비밀번호는 웹 hash 도구, 채팅, 이슈 또는 shell argument에 입력하지 않습니다. D1 콘솔에서 계정을 직접 수정하는 방식도 복구 경로가 아닙니다.
+
 ## 3. 수동 배포
 
 API를 먼저 배포합니다.
@@ -106,19 +120,23 @@ API_PROXY_URL='https://hereisorder.<subdomain>.workers.dev' npm run preview --pr
 3. 프론트엔드 `npm ci`, lint, Next.js build
 4. OpenNext Cloudflare build
 
-검증이 성공한 `main` push는 별도 입력이나 승인 없이 아래 순서로 production에 반영됩니다. `workflow_dispatch`는 같은 workflow를 다시 실행하는 복구 경로입니다.
+위 품질 게이트는 `verify` job에서 실행됩니다. 검증이 성공한 `main` push는 별도 입력이나 승인 없이 아래 순서로 production에 반영됩니다. `workflow_dispatch`는 같은 workflow를 다시 실행하는 복구 경로입니다.
 
-1. 원격 D1 migration 적용
-2. API Worker 배포
-3. API `GET /health` 200 및 응답 계약 확인
-4. Wrangler Action의 API `deployment-url`을 `API_PROXY_URL`로 주입해 웹 Worker build/deploy
-5. 웹 `GET /login` 200과 세션 없는 `GET /api/users/me` 401로 same-origin proxy 확인
+1. `verify` 완료
+2. 일회용 원격 D1 rollback contract에서 named CHECK 실패와 선행 update rollback을 확인하고 데이터베이스 삭제
+3. production D1 migration 적용
+4. API Worker 배포
+5. API `GET /health` 200 및 응답 계약 확인
+6. Wrangler Action의 API `deployment-url`을 `API_PROXY_URL`로 주입해 웹 Worker build/deploy
+7. 웹 `GET /login` 200과 세션 없는 `GET /api/users/me` 401로 same-origin proxy 확인
+
+rollback contract가 production migration보다 먼저 일회용 데이터베이스를 만들고 `finally`에서 삭제하므로, repository token에는 Workers 배포와 migration 권한 외에 D1 생성·삭제 권한이 필요합니다. 생성이나 삭제 권한이 없거나 정확한 rollback 증거를 확인하지 못하면 운영 migration 전에 배포가 중단됩니다.
 
 GitHub Actions repository secret에 다음 두 값만 설정합니다.
 
 | 종류 | 이름 | 값 |
 | --- | --- | --- |
-| Secret | `CLOUDFLARE_API_TOKEN` | Workers 배포와 D1 migration 권한을 가진 API token |
+| Secret | `CLOUDFLARE_API_TOKEN` | Workers 배포, D1 migration, 일회용 D1 생성·삭제 권한을 가진 API token |
 | Secret | `CLOUDFLARE_ACCOUNT_ID` | 대상 Cloudflare account ID |
 
 `main`의 모든 push가 production 배포를 시작합니다. API Worker의 실제 URL은 Wrangler Action의 `deployment-url` output으로 웹 job에 전달되므로 `PRODUCTION_API_PROXY_URL` 변수와 GitHub Environment 승인은 설정하지 않습니다. 브라우저 코드에도 API origin을 직접 넣지 않습니다.

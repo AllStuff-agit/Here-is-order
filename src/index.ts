@@ -222,13 +222,27 @@ async function getSessionUser(c: any): Promise<SessionUser | null> {
       WHERE s.token = ?
         AND u.is_active = 1
         AND u.is_deleted = 0
-        AND s.expires_at > datetime('now')`
+        AND unixepoch(s.expires_at) > unixepoch('now')`
   )
     .bind(sid)
     .first();
 
   if (!row) return null;
   return row as SessionUser;
+}
+
+function scheduleExpiredSessionCleanup(c: any) {
+  c.executionCtx.waitUntil(
+    c.env.DB.prepare(
+      `DELETE FROM sessions
+        WHERE unixepoch(expires_at) IS NULL
+           OR unixepoch(expires_at) <= unixepoch('now')`,
+    )
+      .run()
+      .catch((error: unknown) => {
+        console.error('expired session cleanup failed', error);
+      }),
+  );
 }
 
 function requireAdmin(c: any) {
@@ -334,19 +348,19 @@ app.post('/api/auth/login', async (c) => {
   }
 
   const sid = crypto.randomUUID();
-  const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000).toISOString();
 
   await c.env.DB.batch([
     c.env.DB.prepare(
-      `INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`
-    ).bind(sid, user.id, expiresAt),
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))`,
+    ).bind(sid, user.id, SESSION_SECONDS),
     auditStatement(c.env.DB, user.id, 'login', 'user', user.id, undefined, { username: user.username }),
   ]);
 
   const [header, value] = authSetCookie(sid, new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
 
-  void c.env.DB.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now')`).run().catch(() => {});
+  scheduleExpiredSessionCleanup(c);
 
   return c.json(apiOk({ user: { id: user.id, username: user.username, name: user.name, role: user.role } }));
 });
@@ -365,7 +379,7 @@ app.post('/api/auth/logout', async (c) => {
   const [header, value] = authClearCookie(new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
 
-  void c.env.DB.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now')`).run().catch(() => {});
+  scheduleExpiredSessionCleanup(c);
 
   return c.json(apiOk({ loggedOut: true }));
 });

@@ -272,52 +272,6 @@ export default function SettingsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 비밀번호 분실 메뉴얼 */}
-      <Card>
-        <CardHeader>
-          <CardTitle>비밀번호를 잊어버렸을 때</CardTitle>
-          <CardDescription>Cloudflare D1 콘솔에서 직접 비밀번호를 초기화하는 방법입니다.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4 text-sm">
-          <ol className="space-y-3 leading-relaxed">
-            <li className="flex gap-2">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">1</span>
-              <span><a href="https://dash.cloudflare.com" target="_blank" rel="noreferrer" className="underline underline-offset-2">dash.cloudflare.com</a> 에 로그인합니다.</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">2</span>
-              <span>좌측 메뉴에서 <strong>Storage &amp; Databases → D1 SQL Database</strong> 를 클릭합니다.</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">3</span>
-              <span><strong>hereisorder</strong> 데이터베이스를 클릭합니다.</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">4</span>
-              <span>상단 <strong>Console</strong> 탭을 클릭합니다.</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">5</span>
-              <div className="flex-1 space-y-2">
-                <span>아래 SQL을 입력하고 <strong>Execute</strong> 버튼을 누릅니다.</span>
-                <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">① 새 비밀번호의 SHA-256 해시를 구합니다.</p>
-                  <p className="text-xs text-muted-foreground">→ <a href="https://emn178.github.io/online-tools/sha256.html" target="_blank" rel="noreferrer" className="underline underline-offset-2">SHA-256 온라인 도구</a> 에서 새 비밀번호를 입력하면 해시값이 나옵니다.</p>
-                </div>
-                <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs leading-relaxed">
-{`UPDATE users
-SET password_hash = '여기에_SHA256_해시값_붙여넣기'
-WHERE username = '아이디';`}
-                </pre>
-              </div>
-            </li>
-            <li className="flex gap-2">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">6</span>
-              <span>앱으로 돌아와 새 비밀번호로 로그인합니다.</span>
-            </li>
-          </ol>
-        </CardContent>
-      </Card>
     </div>
   );
 }

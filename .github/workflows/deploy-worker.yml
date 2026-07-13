@@ -59,10 +59,36 @@ jobs:
       - name: Validate Cloudflare web bundle
         run: npm run build:cloudflare --prefix frontend
 
+  d1-rest-batch-contract:
+    name: Verify remote D1 REST batch rollback
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify D1 REST batch rollback
+        run: npm run test:d1-rest-batch-contract
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONTRACT_RUN_ID: ${{ github.run_id }}
+          CONTRACT_RUN_ATTEMPT: ${{ github.run_attempt }}
+
   deploy-api:
     name: Deploy API Worker
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: verify
+    needs:
+      - verify
+      - d1-rest-batch-contract
     runs-on: ubuntu-latest
     outputs:
       api-url: ${{ steps.deploy-api.outputs.deployment-url }}
