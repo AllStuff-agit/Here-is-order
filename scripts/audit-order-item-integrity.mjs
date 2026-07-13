@@ -287,7 +287,7 @@ export function executeD1Audit({
     target === 'remote' ? '--remote' : '--local',
     '--json',
     `--config=${WRANGLER_CONFIG}`,
-    `--file=${sqlPath}`,
+    target === 'remote' ? `--command=${sql}` : `--file=${sqlPath}`,
   ];
   if (persistTo !== null) args.push('--persist-to', persistTo);
 
