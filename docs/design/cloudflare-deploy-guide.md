@@ -132,7 +132,7 @@ API_PROXY_URL='https://hereisorder.<subdomain>.workers.dev' npm run preview --pr
 
 rollback contract가 production migration보다 먼저 일회용 데이터베이스를 만들고 `finally`에서 삭제하므로, repository token에는 Workers 배포와 migration 권한 외에 D1 생성·삭제 권한이 필요합니다. 생성이나 삭제 권한이 없거나 정확한 rollback 증거를 확인하지 못하면 운영 migration 전에 배포가 중단됩니다.
 
-GitHub Actions repository secret에 다음 두 값만 설정합니다.
+GitHub Actions repository secret에는 배포용으로 다음 두 값을 설정합니다. 운영 무결성 감사에 권장하는 별도 read token은 6절을 따릅니다.
 
 | 종류 | 이름 | 값 |
 | --- | --- | --- |
@@ -149,3 +149,39 @@ GitHub Actions repository secret에 다음 두 값만 설정합니다.
 - `/api/dashboard`, 품목 수정, 발주 생성과 부분입고를 smoke test
 - 휴대폰 브라우저에서 레이아웃과 로그인 쿠키 동작 확인
 - 관리자 계정으로 계정 관리와 감사로그 접근, staff 계정의 관리자 API `403` 확인
+
+## 6. 운영 발주 품목 무결성 감사
+
+이 감사는 배포와 migration에서 분리된 수동 read-only 절차입니다. GitHub Actions에서 **Audit production order item integrity** workflow를 `main` 대상으로 실행하고, 필수 `request_id`에는 이 실행을 추적할 비민감 식별자(예: `wave-0d-20260713-01`)를 입력합니다. `request_id`는 실행 간 상관관계 확인용일 뿐 승인, 권한 부여 또는 SQL 입력이 아닙니다. secret이나 개인정보를 넣지 않습니다.
+
+Workflow는 저장소에 고정된 다음 summary 명령만 실행하며 row details나 raw Wrangler 출력을 artifact로 만들지 않습니다.
+
+```bash
+npm run db:audit:order-items -- --remote --summary
+```
+
+실행 URL, `request_id`, `queryVersion`, `executedAt`, aggregate summary를 함께 보관하고 결과를 다음처럼 판정합니다.
+
+- `clean`: 모든 active defect count와 `maskedOrders`가 0입니다. `deletedOverreceivedRows`는 삭제된 legacy row에 대한 참고값이므로 단독으로 수선을 요구하지 않습니다.
+- `repair_required`: CLI가 exit 2를 반환해 workflow가 실패로 표시될 수 있지만 이는 감사 발견 사항입니다. 배포된 0A–0C hotfix를 유지하고 ledger와 업무 증거를 검토하는 별도 승인 repair spec을 만듭니다.
+- `outcome`을 포함한 허용 목록 summary JSON 없이 실패한 경우에는 판정하지 않습니다. credential 또는 실행 오류를 해결한 뒤 새 `request_id`로 다시 실행합니다.
+
+감사 workflow에는 Account / D1 / Read로 제한한 repository secret `CLOUDFLARE_D1_READ_TOKEN`을 권장합니다. Workflow는 `${{ secrets.CLOUDFLARE_D1_READ_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}` 순서로 token을 선택하므로, read token이 없으면 더 넓은 mutation 권한을 가진 기존 배포 token으로 fallback합니다. 고정·검토된 read-only SQL, 수동 main workflow와 버전 고정 Actions는 코드 수준 보호 장치이지 credential 최소권한을 대신하지 않습니다.
+
+Row 단위 증거가 꼭 필요할 때만 CI 밖의 보호된 운영자 terminal에서 details를 실행합니다. `CLOUDFLARE_ACCOUNT_ID`와 전용 D1 Read token을 준비하고, 저장소 밖의 mode `0700` 디렉터리와 아직 존재하지 않는 절대 출력 경로를 사용합니다.
+
+```bash
+DETAIL_DIR="$HOME/.local/share/hereisorder-audit"
+AUDIT_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$DETAIL_DIR"
+chmod 700 "$DETAIL_DIR"
+
+CLOUDFLARE_API_TOKEN="$CLOUDFLARE_D1_READ_TOKEN" \
+npm run db:audit:order-items -- \
+  --remote --details \
+  --output "$DETAIL_DIR/order-item-integrity-$AUDIT_TIMESTAMP.json"
+```
+
+Details 명령은 CI, 상대 경로, 저장소 내부 경로와 기존 파일 덮어쓰기를 거부하며 새 파일을 mode `0600`으로 만듭니다. 파일을 GitHub artifact, Git commit, PR, issue, chat 또는 공용 terminal log에 올리지 않습니다. 승인된 암호화 저장소에서 필요한 기간만 보관한 뒤 운영 보존 정책에 따라 삭제합니다.
+
+Summary와 details는 수선 증거일 뿐 mutation 승인이 아닙니다. 이 결과만으로 `received_qty`를 clamp하거나 `stock_transactions`를 삭제·수정하거나 `items.current_stock`을 재계산해 덮어쓰지 않습니다. 모든 production 수선은 별도 spec, 승인, backup 및 ledger·업무 증거를 거쳐야 합니다.
