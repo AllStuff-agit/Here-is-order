@@ -22,14 +22,33 @@
 }
 ```
 
-- 공개 엔드포인트: `GET /health`, `POST /api/auth/login`
+- 공개 엔드포인트: `GET /health`, `GET /ready`, `POST /api/auth/login`
 - 그 외 `/api/*`: 유효한 세션 필요. 없으면 `401 UNAUTHORIZED`
 - 역할: `admin | staff`
 - 관리자 전용 API에 staff가 접근하면 `403 FORBIDDEN`
 - 로그인 성공 시 JSON token을 반환하지 않습니다. `isorder_sid` 쿠키를 설정합니다.
 - 세션 쿠키: `HttpOnly`, `SameSite=Strict`, `Path=/`, 30일 만료, HTTPS에서는 `Secure`
 
-대표 상태 코드는 `200`, 생성 `201`, 입력 오류 `400`, 미인증 `401`, 권한 없음 `403`, 찾을 수 없음 `404`, 중복/동시성 충돌 `409`입니다.
+대표 상태 코드는 `200`, 생성 `201`, 입력 오류 `400`, 미인증 `401`, 권한 없음 `403`, 찾을 수 없음 `404`, 중복/동시성 충돌 `409`, 운영 준비 안 됨 `503`입니다.
+
+### 운영 상태
+
+- `GET /health`: Worker liveness를 확인하며 D1을 조회하지 않습니다.
+- `GET /ready`: 실제 D1에서 `d1-required-schema-v1`의 required table/column을 production row 없이 compile-check합니다.
+
+Ready 응답:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "ready": true,
+    "schemaVersion": "d1-required-schema-v1"
+  }
+}
+```
+
+D1 binding/query/schema를 확인할 수 없으면 내부 상세 없이 HTTP `503 NOT_READY`를 반환합니다. 두 readiness 응답 모두 `Cache-Control: no-store`입니다.
 
 ## 2. 인증과 사용자
 
