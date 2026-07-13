@@ -135,11 +135,13 @@ Workflow는 다음 순서를 벗어나지 않습니다.
 3. production recovery checkpoint
 4. production D1 migration
 5. API Worker 배포
-6. API `GET /health` smoke
-7. API URL을 주입한 웹 Worker build/deploy
-8. 웹/API proxy smoke
+6. API active version 검증
+7. API `GET /health`와 `GET /ready` smoke
+8. 검증된 API URL을 주입한 웹 Worker build/deploy
+9. 웹 active version 검증
+10. 웹/API proxy smoke
 
-rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 rollback을 확인하고 데이터베이스를 삭제합니다. production recovery checkpoint는 현재 D1 Time Travel bookmark, migration 적용 이력, 기존 API/web Worker version을 읽어 GitHub job summary에 남깁니다. 두 gate가 모두 성공해야 production D1 migration이 시작됩니다. 따라서 배포 token에는 Workers 배포와 migration 권한뿐 아니라 D1 생성·삭제 권한과 D1/Worker 상태 조회 권한도 필요합니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
+rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 rollback을 확인하고 데이터베이스를 삭제합니다. production recovery checkpoint는 현재 D1 Time Travel bookmark, migration 적용 이력, 기존 API/web Worker version을 읽어 GitHub job summary에 남깁니다. 두 gate가 모두 성공해야 production D1 migration이 시작됩니다. 각 Worker는 lockfile의 exact Wrangler로 배포하고, machine deploy evidence의 version ID와 Cloudflare의 단일 100% active version 및 exact Git SHA message가 일치해야 smoke를 시작합니다. API readiness는 실제 D1 required schema를 compile-only read로 확인합니다. 따라서 배포 token에는 Workers 배포와 migration 권한뿐 아니라 D1 생성·삭제 권한과 D1/Worker 상태 조회 권한도 필요합니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
 
 실패 단계별 forward repair, Worker rollback, 예외적인 D1 restore 판단은 [Cloudflare 배포 가이드의 배포 복구 runbook](docs/design/cloudflare-deploy-guide.md#52-failure-phase별-복구)을 따릅니다. Workflow는 Worker rollback이나 D1 restore를 자동 실행하지 않습니다.
 

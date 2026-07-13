@@ -168,7 +168,8 @@ node --test scripts/verify-worker-deployment.test.mjs scripts/production-preflig
 
 - Modify: `.github/workflows/deploy-worker.yml`
 - Modify: `scripts/deploy-workflow.test.mjs`
-- Modify: `docs/deployment.md`
+- Modify: `README.md`
+- Modify: `docs/design/cloudflare-deploy-guide.md`
 - Modify: `scripts/delivery-recovery-docs.test.mjs`
 
 **RED tests:**

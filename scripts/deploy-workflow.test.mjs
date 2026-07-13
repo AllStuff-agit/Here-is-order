@@ -11,8 +11,6 @@ const CHECKOUT_ACTION =
   'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0';
 const SETUP_NODE_ACTION =
   'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e';
-const WRANGLER_ACTION =
-  'cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0';
 
 function listItemBlocks(source) {
   const lines = source.split(/\r?\n/);
@@ -51,14 +49,11 @@ test('every main push deploys without a path filter or approval gate', () => {
   assert.doesNotMatch(workflow, /PRODUCTION_API_PROXY_URL/);
 });
 
-test('official Wrangler Actions pass the API deployment URL to the web job', () => {
-  const actionUses = workflow.match(
-    new RegExp(`uses: ${WRANGLER_ACTION}`, 'g'),
-  ) ?? [];
-  assert.equal(actionUses.length, 2);
+test('verified Wrangler evidence is the only API deployment URL source', () => {
+  assert.doesNotMatch(workflow, /cloudflare\/wrangler-action/);
   assert.match(
     workflow,
-    /api-url: \$\{\{ steps\.deploy-api\.outputs\.deployment-url \}\}/,
+    /api-url: \$\{\{ steps\.verify-api\.outputs\.deployment-url \}\}/,
   );
   assert.match(
     workflow,
@@ -72,7 +67,7 @@ test('all delivery actions are immutable and checkout never persists credentials
   assert.ok(actions.length > 0);
   assert.deepEqual(
     [...new Set(actions)],
-    [CHECKOUT_ACTION, SETUP_NODE_ACTION, WRANGLER_ACTION],
+    [CHECKOUT_ACTION, SETUP_NODE_ACTION],
   );
   for (const action of actions) {
     assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/);
@@ -143,6 +138,70 @@ test('production jobs are ordered and smoke-tested', () => {
   assert.match(workflow, /smoke-deployment\.mjs api/);
   assert.match(workflow, /smoke-deployment\.mjs web/);
   assert.match(workflow, /cancel-in-progress: false/);
+});
+
+test('API and web deploy with exact SHA evidence before active-version verification and smoke', () => {
+  const jobs = jobBlocks(workflow);
+  const api = jobs.find(({ name }) => name === 'deploy-api')?.body ?? '';
+  const web = jobs.find(({ name }) => name === 'deploy-web')?.body ?? '';
+
+  const expected = [
+    {
+      body: api,
+      target: 'api',
+      deployName: 'Deploy API Worker',
+      verifyName: 'Verify API active Worker version',
+      smokeName: 'Smoke test API deployment',
+      evidencePath: '${{ runner.temp }}/hereisorder-api-deploy.ndjson',
+    },
+    {
+      body: web,
+      target: 'web',
+      deployName: 'Deploy web Worker',
+      verifyName: 'Verify web active Worker version',
+      smokeName: 'Smoke test web deployment and API proxy',
+      evidencePath: '${{ runner.temp }}/hereisorder-web-deploy.ndjson',
+    },
+  ];
+
+  for (const scenario of expected) {
+    const deploy = listItemBlocks(scenario.body)
+      .find((block) => block.includes(`name: ${scenario.deployName}`)) ?? '';
+    const verify = listItemBlocks(scenario.body)
+      .find((block) => block.includes(`name: ${scenario.verifyName}`)) ?? '';
+    const smoke = listItemBlocks(scenario.body)
+      .find((block) => block.includes(`name: ${scenario.smokeName}`)) ?? '';
+
+    assert.ok(deploy, `${scenario.target} deploy step must exist`);
+    assert.ok(verify, `${scenario.target} verification step must exist`);
+    assert.ok(smoke, `${scenario.target} smoke step must exist`);
+    assert.match(
+      deploy,
+      /^\s+run: npm exec -- wrangler deploy --message "\$GITHUB_SHA" --strict$/m,
+    );
+    assert.match(
+      deploy,
+      new RegExp(`^\\s+WRANGLER_OUTPUT_FILE_PATH: ${scenario.evidencePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
+    );
+    assert.match(deploy, /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
+    assert.match(deploy, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ID \}\}/);
+    assert.match(verify, new RegExp(`^\\s+run: node scripts/verify-worker-deployment\\.mjs ${scenario.target}$`, 'm'));
+    assert.match(verify, new RegExp(`^\\s+id: verify-${scenario.target}$`, 'm'));
+    assert.match(verify, /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
+    assert.match(verify, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ID \}\}/);
+    assert.match(
+      verify,
+      new RegExp(`^\\s+WRANGLER_OUTPUT_FILE_PATH: ${scenario.evidencePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
+    );
+
+    assert.ok(scenario.body.indexOf(scenario.deployName) < scenario.body.indexOf(scenario.verifyName));
+    assert.ok(scenario.body.indexOf(scenario.verifyName) < scenario.body.indexOf(scenario.smokeName));
+    assert.doesNotMatch(`${deploy}\n${verify}\n${smoke}`, /continue-on-error|always\(|failure\(|\|\|\s*true|set\s+\+e/);
+  }
+
+  assert.match(api, /DEPLOYMENT_URL: \$\{\{ steps\.verify-api\.outputs\.deployment-url \}\}/);
+  assert.match(web, /DEPLOYMENT_URL: \$\{\{ steps\.verify-web\.outputs\.deployment-url \}\}/);
+  assert.doesNotMatch(workflow, /command-output|deployments status --json|upload-artifact|download-artifact/);
 });
 
 test('production preflight is the strict main-only gate before mutation', () => {
