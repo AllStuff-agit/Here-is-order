@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url';
 
 const DEFAULT_ATTEMPTS = 10;
 const DEFAULT_DELAY_MS = 3_000;
+const D1_READINESS_SCHEMA_VERSION = 'd1-required-schema-v1';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -47,6 +48,21 @@ async function retry(check, options) {
   throw lastError;
 }
 
+function hasExactKeys(value, expectedKeys) {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === [...expectedKeys].sort().join(',');
+}
+
+function isExactReadinessBody(body) {
+  return hasExactKeys(body, ['ok', 'data'])
+    && body.ok === true
+    && hasExactKeys(body.data, ['ready', 'schemaVersion'])
+    && body.data.ready === true
+    && body.data.schemaVersion === D1_READINESS_SCHEMA_VERSION;
+}
+
 export async function smokeApi(origin, options = {}) {
   const baseUrl = validateDeploymentOrigin(origin);
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -60,6 +76,21 @@ export async function smokeApi(origin, options = {}) {
     const body = await response.json();
     if (body?.ok !== true || body?.data?.ok !== true) {
       throw new Error('API health returned an unexpected response.');
+    }
+
+    const readinessResponse = await fetchImpl(new URL('/ready', baseUrl), { redirect: 'manual' });
+    if (readinessResponse.status !== 200) {
+      throw new Error(`API readiness returned HTTP ${readinessResponse.status}.`);
+    }
+
+    let readinessBody;
+    try {
+      readinessBody = await readinessResponse.json();
+    } catch {
+      throw new Error('API readiness returned an unexpected response.');
+    }
+    if (!isExactReadinessBody(readinessBody)) {
+      throw new Error('API readiness returned an unexpected response.');
     }
   }, options);
 }

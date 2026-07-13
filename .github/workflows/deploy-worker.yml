@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      api-url: ${{ steps.deploy-api.outputs.deployment-url }}
+      api-url: ${{ steps.verify-api.outputs.deployment-url }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -145,25 +145,24 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy API Worker
-        id: deploy-api
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
-          packageManager: npm
+        run: npm exec -- wrangler deploy --message "$GITHUB_SHA" --strict
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/hereisorder-api-deploy.ndjson
+
+      - name: Verify API active Worker version
+        id: verify-api
+        run: node scripts/verify-worker-deployment.mjs api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/hereisorder-api-deploy.ndjson
 
       - name: Smoke test API deployment
         env:
-          DEPLOYMENT_URL: ${{ steps.deploy-api.outputs.deployment-url }}
+          DEPLOYMENT_URL: ${{ steps.verify-api.outputs.deployment-url }}
         run: node scripts/smoke-deployment.mjs api "$DEPLOYMENT_URL"
-
-      - name: Record API deployment
-        env:
-          DEPLOYMENT_URL: ${{ steps.deploy-api.outputs.deployment-url }}
-        run: |
-          echo "### API Worker" >> "$GITHUB_STEP_SUMMARY"
-          echo "$DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-web:
     name: Deploy web Worker
@@ -193,23 +192,22 @@ jobs:
           API_PROXY_URL: ${{ needs.deploy-api.outputs.api-url }}
 
       - name: Deploy web Worker
-        id: deploy-web
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
-          workingDirectory: frontend
-          packageManager: npm
+        working-directory: frontend
+        run: npm exec -- wrangler deploy --message "$GITHUB_SHA" --strict
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/hereisorder-web-deploy.ndjson
+
+      - name: Verify web active Worker version
+        id: verify-web
+        run: node scripts/verify-worker-deployment.mjs web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/hereisorder-web-deploy.ndjson
 
       - name: Smoke test web deployment and API proxy
         env:
-          DEPLOYMENT_URL: ${{ steps.deploy-web.outputs.deployment-url }}
+          DEPLOYMENT_URL: ${{ steps.verify-web.outputs.deployment-url }}
         run: node scripts/smoke-deployment.mjs web "$DEPLOYMENT_URL"
-
-      - name: Record web deployment
-        env:
-          DEPLOYMENT_URL: ${{ steps.deploy-web.outputs.deployment-url }}
-        run: |
-          echo "### Web Worker" >> "$GITHUB_STEP_SUMMARY"
-          echo "$DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"
