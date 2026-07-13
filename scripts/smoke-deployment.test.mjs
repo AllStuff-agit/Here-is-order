@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  SMOKE_RETRY_POLICY,
   smokeApi,
   smokeWeb,
   validateDeploymentOrigin,
@@ -30,6 +31,84 @@ const READINESS_BODY = {
     schemaVersion: 'd1-required-schema-v1',
   },
 };
+
+test('default smoke retry policy tolerates a 120-second edge propagation window', async () => {
+  assert.deepEqual(SMOKE_RETRY_POLICY, {
+    attempts: 41,
+    delayMs: 3_000,
+    propagationWaitMs: 120_000,
+    timeoutMs: 130_000,
+  });
+
+  const paths = [];
+  const delays = [];
+  let readinessAttempts = 0;
+  const fetchImpl = async (url) => {
+    paths.push(url.pathname);
+    if (url.pathname === '/health') return jsonResponse(HEALTH_BODY);
+    readinessAttempts += 1;
+    return readinessAttempts <= 24
+      ? jsonResponse({ ok: false }, 404)
+      : jsonResponse(READINESS_BODY);
+  };
+
+  await smokeApi('https://api.example.com', {
+    fetchImpl,
+    sleepImpl: async (delayMs) => delays.push(delayMs),
+  });
+
+  assert.equal(readinessAttempts, 25);
+  assert.deepEqual(paths, Array.from(
+    { length: 25 },
+    () => ['/health', '/ready'],
+  ).flat());
+  assert.deepEqual(delays, Array.from({ length: 24 }, () => 3_000));
+  assert.equal(delays.reduce((total, delayMs) => total + delayMs, 0), 72_000);
+});
+
+test('default smoke retry policy stops after the 120-second propagation boundary', async () => {
+  let readinessAttempts = 0;
+  const delays = [];
+  const fetchImpl = async (url) => {
+    if (url.pathname === '/health') return jsonResponse(HEALTH_BODY);
+    readinessAttempts += 1;
+    return jsonResponse({ ok: false }, 404);
+  };
+
+  await assert.rejects(
+    smokeApi('https://api.example.com', {
+      fetchImpl,
+      sleepImpl: async (delayMs) => delays.push(delayMs),
+    }),
+    /HTTP 404/,
+  );
+
+  assert.equal(readinessAttempts, 41);
+  assert.deepEqual(delays, Array.from({ length: 40 }, () => 3_000));
+  assert.equal(delays.reduce((total, delayMs) => total + delayMs, 0), 120_000);
+});
+
+test('smokeApi aborts a pending fetch at the module-level timeout', async () => {
+  const outcome = await Promise.race([
+    smokeApi('https://api.example.com', {
+      timeoutMs: 20,
+      fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          reject(new Error('request aborted'));
+        }, { once: true });
+      }),
+    }).then(
+      () => ({ status: 'resolved' }),
+      (error) => ({ status: 'rejected', error }),
+    ),
+    new Promise((resolve) => {
+      setTimeout(() => resolve({ status: 'hung' }), 200);
+    }),
+  ]);
+
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(outcome.error.message, 'Deployment smoke timed out.');
+});
 
 test('smokeApi checks health then exact D1 readiness on the same origin', async () => {
   const requests = [];

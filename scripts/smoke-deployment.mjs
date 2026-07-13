@@ -1,10 +1,36 @@
 import { pathToFileURL } from 'node:url';
 
-const DEFAULT_ATTEMPTS = 10;
+const DEFAULT_ATTEMPTS = 41;
 const DEFAULT_DELAY_MS = 3_000;
+const DEFAULT_PROPAGATION_WAIT_MS = (DEFAULT_ATTEMPTS - 1) * DEFAULT_DELAY_MS;
+const DEFAULT_TIMEOUT_MS = DEFAULT_PROPAGATION_WAIT_MS + 10_000;
 const D1_READINESS_SCHEMA_VERSION = 'd1-required-schema-v1';
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const SMOKE_RETRY_POLICY = Object.freeze({
+  attempts: DEFAULT_ATTEMPTS,
+  delayMs: DEFAULT_DELAY_MS,
+  propagationWaitMs: DEFAULT_PROPAGATION_WAIT_MS,
+  timeoutMs: DEFAULT_TIMEOUT_MS,
+});
+
+const createTimeoutError = () => new Error('Deployment smoke timed out.');
+
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const onAbort = () => {
+    clearTimeout(timeoutHandle);
+    reject(createTimeoutError());
+  };
+  const timeoutHandle = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+
+  if (signal?.aborted) {
+    onAbort();
+  } else {
+    signal?.addEventListener('abort', onAbort, { once: true });
+  }
+});
 
 export function validateDeploymentOrigin(value) {
   if (typeof value !== 'string' || !value.trim()) {
@@ -29,23 +55,44 @@ export function validateDeploymentOrigin(value) {
 }
 
 async function retry(check, options) {
-  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
-  const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
-  let lastError;
+  const attempts = options.attempts ?? SMOKE_RETRY_POLICY.attempts;
+  const delayMs = options.delayMs ?? SMOKE_RETRY_POLICY.delayMs;
+  const timeoutMs = options.timeoutMs ?? SMOKE_RETRY_POLICY.timeoutMs;
+  const sleepImpl = options.sleepImpl ?? sleep;
+  const controller = new AbortController();
+  let timeoutHandle;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      controller.abort();
+      reject(createTimeoutError());
+    }, timeoutMs);
+  });
+  const retryPromise = (async () => {
+    let lastError;
 
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      await check();
-      return;
-    } catch (error) {
-      lastError = error;
-      if (attempt < attempts) {
-        await sleep(delayMs);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await check(controller.signal);
+        return;
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw createTimeoutError();
+        }
+        lastError = error;
+        if (attempt < attempts) {
+          await sleepImpl(delayMs, controller.signal);
+        }
       }
     }
-  }
 
-  throw lastError;
+    throw lastError;
+  })();
+
+  try {
+    await Promise.race([retryPromise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 function hasExactKeys(value, expectedKeys) {
@@ -67,8 +114,11 @@ export async function smokeApi(origin, options = {}) {
   const baseUrl = validateDeploymentOrigin(origin);
   const fetchImpl = options.fetchImpl ?? fetch;
 
-  await retry(async () => {
-    const response = await fetchImpl(new URL('/health', baseUrl), { redirect: 'manual' });
+  await retry(async (signal) => {
+    const response = await fetchImpl(new URL('/health', baseUrl), {
+      redirect: 'manual',
+      signal,
+    });
     if (response.status !== 200) {
       throw new Error(`API health returned HTTP ${response.status}.`);
     }
@@ -78,7 +128,10 @@ export async function smokeApi(origin, options = {}) {
       throw new Error('API health returned an unexpected response.');
     }
 
-    const readinessResponse = await fetchImpl(new URL('/ready', baseUrl), { redirect: 'manual' });
+    const readinessResponse = await fetchImpl(new URL('/ready', baseUrl), {
+      redirect: 'manual',
+      signal,
+    });
     if (readinessResponse.status !== 200) {
       throw new Error(`API readiness returned HTTP ${readinessResponse.status}.`);
     }
@@ -99,13 +152,19 @@ export async function smokeWeb(origin, options = {}) {
   const baseUrl = validateDeploymentOrigin(origin);
   const fetchImpl = options.fetchImpl ?? fetch;
 
-  await retry(async () => {
-    const loginResponse = await fetchImpl(new URL('/login', baseUrl), { redirect: 'manual' });
+  await retry(async (signal) => {
+    const loginResponse = await fetchImpl(new URL('/login', baseUrl), {
+      redirect: 'manual',
+      signal,
+    });
     if (loginResponse.status !== 200) {
       throw new Error(`Web login returned HTTP ${loginResponse.status}.`);
     }
 
-    const proxyResponse = await fetchImpl(new URL('/api/users/me', baseUrl), { redirect: 'manual' });
+    const proxyResponse = await fetchImpl(new URL('/api/users/me', baseUrl), {
+      redirect: 'manual',
+      signal,
+    });
     if (proxyResponse.status !== 401) {
       throw new Error(`Web API proxy returned HTTP ${proxyResponse.status}; expected 401.`);
     }
