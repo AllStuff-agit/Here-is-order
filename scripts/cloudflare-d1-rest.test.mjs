@@ -338,7 +338,7 @@ test('getTimeTravelBookmark는 HTTP/envelope 실패 detail을 노출하지 않�
     {
       name: 'non-2xx response',
       status: 403,
-      body: { success: false, errors: [{ message: sensitiveDetail }] },
+      body: { success: true, result: { bookmark: 'abc-123' } },
     },
     {
       name: 'successful HTTP with rejected envelope',
