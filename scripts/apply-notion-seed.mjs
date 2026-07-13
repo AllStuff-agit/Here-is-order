@@ -50,7 +50,8 @@ export function verifyNotionSeed(options) {
 function createPrivateSeedSnapshot(seedBytes) {
   let snapshotDirectory;
   try {
-    snapshotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'hio-notion-seed-'));
+    const snapshotPrefix = path.resolve(os.tmpdir(), 'hio-notion-seed-');
+    snapshotDirectory = fs.mkdtempSync(snapshotPrefix);
     fs.chmodSync(snapshotDirectory, 0o700);
     const snapshotPath = path.join(snapshotDirectory, 'seed_categories_items.sql');
     const snapshotFile = fs.openSync(snapshotPath, 'wx', 0o600);

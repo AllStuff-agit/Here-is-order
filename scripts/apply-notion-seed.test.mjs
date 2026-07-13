@@ -93,6 +93,46 @@ test('seed SQL의 raw bytes hash가 일치하지 않으면 Wrangler를 호출하
   assert.equal(calls.length, 0);
 });
 
+test('relative TMPDIR에서도 Wrangler에 absolute snapshot path를 전달한다', async (t) => {
+  const systemTempRoot = path.resolve(os.tmpdir());
+  const relativeTempRoot = fs.mkdtempSync(path.join(systemTempRoot, 'hio-relative-tmp-root-'));
+  const cwd = fs.mkdtempSync(path.join(systemTempRoot, 'hio-relative-tmp-cwd-'));
+  t.after(() => {
+    fs.rmSync(relativeTempRoot, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+  assert.notEqual(cwd, process.cwd());
+  fs.mkdirSync(path.join(cwd, 'data'));
+  const approvedBytes = Buffer.from('SELECT 1;', 'utf8');
+  const sha = createHash('sha256').update(approvedBytes).digest('hex');
+  fs.writeFileSync(path.join(cwd, 'data', 'seed_categories_items.sql'), approvedBytes);
+  fs.writeFileSync(path.join(cwd, 'data', 'import-report.json'), JSON.stringify({ seedSha256: sha }));
+  const relativeTmpdir = path.relative(process.cwd(), relativeTempRoot);
+  assert.equal(path.isAbsolute(relativeTmpdir), false);
+  const originalTmpdir = process.env.TMPDIR;
+  let snapshotPath;
+  let snapshotBytes;
+  try {
+    process.env.TMPDIR = relativeTmpdir;
+    await applyNotionSeed({
+      argv: ['--remote', '--expected-sha', sha], cwd,
+      runWrangler: (args) => {
+        snapshotPath = args.find((value) => value.startsWith('--file='))?.slice('--file='.length);
+        assert.equal(path.isAbsolute(snapshotPath), true);
+        snapshotBytes = fs.readFileSync(snapshotPath);
+        return { status: 0 };
+      },
+      log: () => {},
+    });
+  } finally {
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+  }
+  assert.deepEqual(snapshotBytes, approvedBytes);
+  assert.equal(fs.existsSync(snapshotPath), false);
+  assert.equal(fs.existsSync(path.dirname(snapshotPath)), false);
+});
+
 test('검증한 bytes의 private snapshot만 Wrangler에 한 번 전달하고 정리한다', async (t) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hio-apply-valid-'));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
@@ -152,6 +192,28 @@ test('검증한 bytes의 private snapshot만 Wrangler에 한 번 전달하고 �
   assert.equal(fs.existsSync(path.dirname(failureSnapshotPath)), false);
 
   fs.writeFileSync(seedPath, approvedBytes);
+  const returnedErrorLogs = [];
+  let returnedErrorSnapshotPath;
+  await assert.rejects(
+    applyNotionSeed({
+      argv: ['--remote', '--expected-sha', sha], cwd,
+      runWrangler: (args) => {
+        returnedErrorSnapshotPath = args.find((value) => value.startsWith('--file='))?.slice('--file='.length);
+        return {
+          error: new Error(
+            `attacker output ${returnedErrorSnapshotPath} ${approvedBytes.toString('utf8')}`,
+          ),
+        };
+      },
+      log: (message) => returnedErrorLogs.push(message),
+    }),
+    { message: 'Wrangler seed 적용을 시작하지 못했습니다.' },
+  );
+  assert.deepEqual(returnedErrorLogs, []);
+  assert.equal(fs.existsSync(returnedErrorSnapshotPath), false);
+  assert.equal(fs.existsSync(path.dirname(returnedErrorSnapshotPath)), false);
+
+  fs.writeFileSync(seedPath, approvedBytes);
   const thrownLogs = [];
   let thrownSnapshotPath;
   await assert.rejects(
@@ -168,4 +230,32 @@ test('검증한 bytes의 private snapshot만 Wrangler에 한 번 전달하고 �
   assert.deepEqual(thrownLogs, []);
   assert.equal(fs.existsSync(thrownSnapshotPath), false);
   assert.equal(fs.existsSync(path.dirname(thrownSnapshotPath)), false);
+
+  fs.writeFileSync(seedPath, approvedBytes);
+  const loggerError = new Error('LOGGER_SENTINEL');
+  const loggerMessages = [];
+  let loggerSnapshotPath;
+  await assert.rejects(
+    applyNotionSeed({
+      argv: ['--remote', '--expected-sha', sha], cwd,
+      runWrangler: (args) => {
+        loggerSnapshotPath = args.find((value) => value.startsWith('--file='))?.slice('--file='.length);
+        return { status: 0 };
+      },
+      log: (message) => {
+        loggerMessages.push(message);
+        throw loggerError;
+      },
+    }),
+    (error) => {
+      assert.equal(error, loggerError);
+      assert.equal(error.message, 'LOGGER_SENTINEL');
+      assert.equal(error.message.includes(loggerSnapshotPath), false);
+      assert.equal(error.message.includes(approvedBytes.toString('utf8')), false);
+      return true;
+    },
+  );
+  assert.deepEqual(loggerMessages, [`Reviewed Notion seed applied: sha256=${sha}`]);
+  assert.equal(fs.existsSync(loggerSnapshotPath), false);
+  assert.equal(fs.existsSync(path.dirname(loggerSnapshotPath)), false);
 });
