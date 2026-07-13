@@ -1,0 +1,103 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import test from 'node:test';
+
+import {
+  buildItemSeedSql,
+  buildNotionImportArtifacts,
+  compareCodePoints,
+} from './notion-import-core.mjs';
+
+const GENERATED_AT = '2026-07-13T00:00:00.000Z';
+const files = [
+  {
+    file: '02-injection.md',
+    content: '# x"); DROP TABLE users; --\n분류: 분류\'); DROP TABLE item_categories; --',
+  },
+  {
+    file: '01-quote.md',
+    content: "# O'Brien\n분류: 원두\n-- comment",
+  },
+  {
+    file: '03-formula.md',
+    content: '# =HYPERLINK("https://evil.invalid")\n',
+  },
+];
+
+test('악성 text를 SQL data로 보존하고 CSV formula를 중화한다', () => {
+  const artifacts = buildNotionImportArtifacts({
+    files,
+    sourceDir: 'fixture',
+    generatedAt: GENERATED_AT,
+  });
+
+  assert.match(artifacts.sql, /'x"\); DROP TABLE users; --'/);
+  assert.match(artifacts.sql, /'분류''\); DROP TABLE item_categories; --'/);
+  assert.match(artifacts.sql, /'O''Brien'/);
+  assert.match(artifacts.sql, /VALUES \(NULL, '=HYPERLINK/);
+  assert.match(artifacts.csv, /"'=HYPERLINK\(""https:\/\/evil\.invalid""\)"/);
+  assert.equal(
+    artifacts.report.seedSha256,
+    createHash('sha256').update(artifacts.sql, 'utf8').digest('hex'),
+  );
+});
+
+test('입력 순서와 ICU locale에 관계없이 artifact를 결정론적으로 만든다', () => {
+  const forward = buildNotionImportArtifacts({
+    files,
+    sourceDir: 'fixture',
+    generatedAt: GENERATED_AT,
+  });
+  const reverse = buildNotionImportArtifacts({
+    files: [...files].reverse(),
+    sourceDir: 'fixture',
+    generatedAt: GENERATED_AT,
+  });
+  assert.equal(reverse.sql, forward.sql);
+  assert.equal(reverse.csv, forward.csv);
+  assert.deepEqual(reverse.report, forward.report);
+  assert.deepEqual(
+    ['😀.md', '가.md', 'a.md', 'A.md'].sort(compareCodePoints),
+    ['A.md', 'a.md', '가.md', '😀.md'],
+  );
+});
+
+test('빈 export, NUL, 최종 identity 충돌을 쓰기 전에 거부한다', () => {
+  assert.throws(
+    () => buildNotionImportArtifacts({ files: [], sourceDir: 'empty', generatedAt: GENERATED_AT }),
+    /Markdown 파일이 없습니다/,
+  );
+  assert.throws(
+    () => buildNotionImportArtifacts({
+      files: [{ file: 'nul.md', content: '# bad\0name' }],
+      sourceDir: 'fixture',
+      generatedAt: GENERATED_AT,
+    }),
+    /nul\.md.*name.*NUL/,
+  );
+  assert.throws(
+    () => buildNotionImportArtifacts({
+      files: [
+        { file: 'a.md', content: '# same\n분류: beans' },
+        { file: 'b.md', content: '# same\n분류: beans' },
+        { file: 'c.md', content: '# same\n분류: beans' },
+      ],
+      sourceDir: 'fixture',
+      generatedAt: GENERATED_AT,
+    }),
+    /same::변형-beans.*b\.md.*c\.md/,
+  );
+});
+
+test('public item SQL builder도 모든 숫자 field를 검증한다', () => {
+  const item = {
+    file: 'numeric.md', name: 'numeric', category: '', spec: '', recommended_unit: '개',
+    safety_stock: 0, min_stock: 0, current_stock: 0, unit_price: 0, memo: '',
+  };
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => buildItemSeedSql([{ ...item, unit_price: invalid }]),
+      /unit_price는 0 이상의 안전한 정수/,
+    );
+  }
+});
