@@ -168,15 +168,14 @@ describe('세션 만료 형식', () => {
 
     const session = await env.DB.prepare(
       `SELECT expires_at,
-              unixepoch(expires_at) - unixepoch('now') AS lifetime_seconds
+              unixepoch(expires_at) - unixepoch(created_at) AS lifetime_seconds
          FROM sessions
         WHERE token = ?`,
     ).bind(token).first<{ expires_at: string; lifetime_seconds: number }>();
     expect(session?.expires_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(session?.expires_at).not.toContain('T');
     expect(session?.expires_at).not.toContain('Z');
-    expect(session?.lifetime_seconds).toBeGreaterThanOrEqual(2_591_998);
-    expect(session?.lifetime_seconds).toBeLessThanOrEqual(2_592_000);
+    expect(session?.lifetime_seconds).toBe(2_592_000);
 
     const staleSessions = await env.DB.prepare(
       `SELECT COUNT(*) AS count
