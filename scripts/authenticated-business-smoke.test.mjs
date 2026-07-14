@@ -1,7 +1,22 @@
 import assert from 'node:assert/strict';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
+  AUTHENTICATED_SMOKE_VERSION,
+  buildAuthenticatedSmokeReport,
+  parseAuthenticatedSmokeEnvironment,
+  renderAuthenticatedSmokeSummary,
+  runAuthenticatedBusinessSmoke,
   validateAuthenticatedSmokeOrigin,
   verifyAuthenticatedBusinessTransaction,
 } from './authenticated-business-smoke.mjs';
@@ -15,6 +30,24 @@ const USER = {
   role: 'staff',
 };
 const COOKIE = 'isorder_sid=11111111-1111-4111-8111-111111111111';
+const BASE_ENV = {
+  CI: 'true',
+  GITHUB_ACTIONS: 'true',
+  GITHUB_EVENT_NAME: 'push',
+  GITHUB_REF: 'refs/heads/main',
+  GITHUB_SHA: 'a'.repeat(40),
+  GITHUB_RUN_ID: '12345',
+  GITHUB_RUN_ATTEMPT: '2',
+  GITHUB_STEP_SUMMARY: '/tmp/authenticated-smoke-summary.md',
+  DEPLOYMENT_URL: ORIGIN,
+  PRODUCTION_SMOKE_PASSWORD: PASSWORD,
+};
+const REPORT_INPUT = {
+  executedAt: '2026-07-13T19:00:00.000Z',
+  gitSha: 'a'.repeat(40),
+  runId: '12345',
+  runAttempt: 2,
+};
 const PURCHASE_ORDER_SUMMARY = {
   id: 7,
   title: 'Sentinel collision',
@@ -51,6 +84,161 @@ test('origin accepts only the fixed canonical production web Worker shape', () =
     'https://hereisorder-web.accountslug.workers.dev?next=evil',
   ]) {
     assert.throws(() => validateAuthenticatedSmokeOrigin(value), /origin was invalid/);
+  }
+});
+
+test('environment accepts ambient keys but returns only the frozen strict CI projection', () => {
+  for (const eventName of ['push', 'workflow_dispatch']) {
+    const parsed = parseAuthenticatedSmokeEnvironment({
+      ...BASE_ENV,
+      GITHUB_EVENT_NAME: eventName,
+      AMBIENT_VALUE: 'must-not-enter-the-projection',
+    });
+    assert.deepEqual(parsed, {
+      origin: ORIGIN,
+      password: PASSWORD,
+      gitSha: 'a'.repeat(40),
+      runId: '12345',
+      runAttempt: 2,
+      summaryPath: '/tmp/authenticated-smoke-summary.md',
+    });
+    assert.deepEqual(Object.keys(parsed), [
+      'origin',
+      'password',
+      'gitSha',
+      'runId',
+      'runAttempt',
+      'summaryPath',
+    ]);
+    assert.equal(Object.isFrozen(parsed), true);
+    assert.throws(() => {
+      parsed.runAttempt = 3;
+    }, TypeError);
+  }
+
+  const invalidPatches = [
+    { CI: 'false' },
+    { GITHUB_ACTIONS: 'false' },
+    { GITHUB_EVENT_NAME: 'pull_request' },
+    { GITHUB_REF: 'refs/heads/feature' },
+    { GITHUB_SHA: 'A'.repeat(40) },
+    { GITHUB_SHA: 'short' },
+    { GITHUB_RUN_ID: '0' },
+    { GITHUB_RUN_ID: '01' },
+    { GITHUB_RUN_ID: 12345 },
+    { GITHUB_RUN_ATTEMPT: '0' },
+    { GITHUB_RUN_ATTEMPT: '01' },
+    { GITHUB_RUN_ATTEMPT: '1.5' },
+    { GITHUB_RUN_ATTEMPT: 2 },
+    { GITHUB_RUN_ATTEMPT: String(Number.MAX_SAFE_INTEGER + 1) },
+    { GITHUB_STEP_SUMMARY: 'relative.md' },
+    { GITHUB_STEP_SUMMARY: '/tmp/authenticated-smoke/../summary.md' },
+    { DEPLOYMENT_URL: 'https://evil.example' },
+    { PRODUCTION_SMOKE_PASSWORD: 'short' },
+  ];
+  for (const patch of invalidPatches) {
+    assert.throws(
+      () => parseAuthenticatedSmokeEnvironment({ ...BASE_ENV, ...patch }),
+      (error) => error.message === 'Authenticated smoke environment was invalid.'
+        && !error.message.includes(PASSWORD)
+        && !error.message.includes(ORIGIN),
+    );
+  }
+  assert.throws(
+    () => parseAuthenticatedSmokeEnvironment(undefined),
+    (error) => error.message === 'Authenticated smoke environment was invalid.',
+  );
+});
+
+test('report and summary expose an immutable exact ordered whitelist', () => {
+  const report = buildAuthenticatedSmokeReport(REPORT_INPUT);
+  const expected = {
+    smokeVersion: 'authenticated-business-smoke-v1',
+    executedAt: '2026-07-13T19:00:00.000Z',
+    gitSha: 'a'.repeat(40),
+    runId: '12345',
+    runAttempt: 2,
+    target: 'web',
+    outcome: 'verified',
+  };
+  assert.equal(AUTHENTICATED_SMOKE_VERSION, 'authenticated-business-smoke-v1');
+  assert.deepEqual(report, expected);
+  assert.deepEqual(Object.keys(report), [
+    'smokeVersion',
+    'executedAt',
+    'gitSha',
+    'runId',
+    'runAttempt',
+    'target',
+    'outcome',
+  ]);
+  assert.equal(Object.isFrozen(report), true);
+  assert.throws(() => {
+    report.outcome = 'tampered';
+  }, TypeError);
+
+  const summary = renderAuthenticatedSmokeSummary(report);
+  assert.match(summary, /^## Authenticated business smoke\n\n```json\n/);
+  assert.equal(summary.endsWith('\n```\n'), true);
+  assert.deepEqual(JSON.parse(summary.match(/```json\n([\s\S]+)\n```/)[1]), expected);
+  for (const forbidden of [
+    'deployment-smoke',
+    PASSWORD,
+    COOKIE,
+    ORIGIN,
+    'purchase-orders',
+    'hio-runtime-smoke',
+    'raw row',
+  ]) {
+    assert.equal(summary.includes(forbidden), false);
+  }
+
+  assert.throws(
+    () => buildAuthenticatedSmokeReport({ ...REPORT_INPUT, secret: PASSWORD }),
+    (error) => error.message === 'Authenticated smoke report was invalid.'
+      && !error.message.includes(PASSWORD),
+  );
+  assert.throws(
+    () => buildAuthenticatedSmokeReport({ ...REPORT_INPUT, executedAt: 'not-a-date' }),
+    (error) => error.message === 'Authenticated smoke report was invalid.'
+      && !error.message.includes('Invalid time value'),
+  );
+  for (const invalidInput of [
+    { ...REPORT_INPUT, gitSha: 'A'.repeat(40) },
+    { ...REPORT_INPUT, runId: '012345' },
+    { ...REPORT_INPUT, runId: 12345 },
+    { ...REPORT_INPUT, runAttempt: Number.MAX_SAFE_INTEGER + 1 },
+    { ...REPORT_INPUT, runAttempt: '2' },
+    { ...REPORT_INPUT, executedAt: '2026-07-13T19:00:00Z' },
+    { gitSha: REPORT_INPUT.gitSha, runId: REPORT_INPUT.runId, runAttempt: 2 },
+  ]) {
+    assert.throws(
+      () => buildAuthenticatedSmokeReport(invalidInput),
+      (error) => error.message === 'Authenticated smoke report was invalid.',
+    );
+  }
+
+  const { outcome: _outcome, ...missing } = report;
+  const reordered = {
+    executedAt: report.executedAt,
+    smokeVersion: report.smokeVersion,
+    gitSha: report.gitSha,
+    runId: report.runId,
+    runAttempt: report.runAttempt,
+    target: report.target,
+    outcome: report.outcome,
+  };
+  for (const invalidReport of [
+    { ...report, extra: 'forbidden' },
+    missing,
+    reordered,
+    { ...report, target: 'api' },
+    { ...report, outcome: 'failed' },
+  ]) {
+    assert.throws(
+      () => renderAuthenticatedSmokeSummary(invalidReport),
+      (error) => error.message === 'Authenticated smoke report was invalid.',
+    );
   }
 });
 
@@ -342,4 +530,168 @@ test('timeout policy is bounded and an aborted request fails generically', async
     randomUuid: () => '22222222-2222-4222-8222-222222222222',
     requestTimeoutMs: 1,
   }), (error) => error.message === 'Authenticated business transaction failed.');
+});
+
+test('runner verifies once, ignores transaction output, then emits only safe evidence', async () => {
+  const events = [];
+  const report = await runAuthenticatedBusinessSmoke({
+    env: { ...BASE_ENV, AMBIENT_VALUE: 'ignored' },
+    now: () => new Date(REPORT_INPUT.executedAt),
+    verifyTransaction: async ({
+      origin,
+      password,
+      fetchImpl,
+      randomUuid,
+      requestTimeoutMs,
+    }) => {
+      assert.equal(origin, ORIGIN);
+      assert.equal(password, PASSWORD);
+      assert.equal(typeof fetchImpl, 'function');
+      assert.equal(typeof randomUuid, 'function');
+      assert.equal(requestTimeoutMs, 10_000);
+      events.push(['transaction']);
+      return {
+        password: PASSWORD,
+        cookie: COOKIE,
+        origin: ORIGIN,
+        row: PURCHASE_ORDER_SUMMARY,
+      };
+    },
+    appendSummary: async (summaryPath, contents) => {
+      assert.equal(summaryPath, BASE_ENV.GITHUB_STEP_SUMMARY);
+      events.push(['summary', contents]);
+    },
+    log: async (contents) => events.push(['log', contents]),
+  });
+
+  assert.deepEqual(events.map(([kind]) => kind), ['transaction', 'summary', 'log']);
+  assert.deepEqual(report, {
+    smokeVersion: AUTHENTICATED_SMOKE_VERSION,
+    ...REPORT_INPUT,
+    target: 'web',
+    outcome: 'verified',
+  });
+  assert.equal(Object.isFrozen(report), true);
+  assert.deepEqual(JSON.parse(events[2][1]), report);
+  const evidence = JSON.stringify({ events, report });
+  for (const forbidden of [
+    PASSWORD,
+    COOKIE,
+    ORIGIN,
+    'deployment-smoke',
+    'hio-runtime-smoke',
+    'Sentinel collision',
+    '/api/',
+  ]) {
+    assert.equal(evidence.includes(forbidden), false);
+  }
+});
+
+test('invalid environment fails before transaction and every output dependency', async () => {
+  const calls = [];
+  await assert.rejects(runAuthenticatedBusinessSmoke({
+    env: { ...BASE_ENV, GITHUB_SHA: 'A'.repeat(40) },
+    verifyTransaction: async () => calls.push('transaction'),
+    now: () => {
+      calls.push('now');
+      return new Date(REPORT_INPUT.executedAt);
+    },
+    appendSummary: async () => calls.push('summary'),
+    log: async () => calls.push('log'),
+  }), (error) => error.message === 'Authenticated business smoke failed.'
+    && !error.message.includes(PASSWORD)
+    && !error.message.includes(ORIGIN));
+  assert.deepEqual(calls, []);
+});
+
+test('raw verify, now, summary, or log errors stay generic without a success log', async (t) => {
+  const rawFailure = `${PASSWORD} ${COOKIE} ${ORIGIN} raw row`;
+  const cases = [
+    ['verify', {
+      verifyTransaction: async () => { throw new Error(rawFailure); },
+    }],
+    ['now throws', {
+      verifyTransaction: async () => {},
+      now: () => { throw new Error(rawFailure); },
+    }],
+    ['now returns invalid date', {
+      verifyTransaction: async () => {},
+      now: () => new Date('not-a-date'),
+    }],
+    ['summary', {
+      verifyTransaction: async () => {},
+      now: () => new Date(REPORT_INPUT.executedAt),
+      appendSummary: async () => { throw new Error(rawFailure); },
+    }],
+    ['log', {
+      verifyTransaction: async () => {},
+      now: () => new Date(REPORT_INPUT.executedAt),
+      appendSummary: async () => {},
+      log: async () => { throw new Error(rawFailure); },
+    }],
+  ];
+
+  for (const [name, overrides] of cases) {
+    await t.test(name, async () => {
+      const logs = [];
+      await assert.rejects(runAuthenticatedBusinessSmoke({
+        env: BASE_ENV,
+        appendSummary: async () => {},
+        log: async (contents) => logs.push(contents),
+        ...overrides,
+      }), (error) => error.message === 'Authenticated business smoke failed.'
+        && !error.message.includes(PASSWORD)
+        && !error.message.includes(COOKIE)
+        && !error.message.includes(ORIGIN)
+        && !error.message.includes('raw row')
+        && !error.message.includes('Invalid time value'));
+      assert.deepEqual(logs, []);
+    });
+  }
+});
+
+test('CLI rejects arguments before fetch and emits no summary or sensitive output', () => {
+  const temporaryDirectory = mkdtempSync(path.join(tmpdir(), 'hio-authenticated-smoke-'));
+  const summaryPath = path.join(temporaryDirectory, 'summary.md');
+  const fetchMarkerPath = path.join(temporaryDirectory, 'fetch-called');
+  const preloadPath = path.join(temporaryDirectory, 'preload.mjs');
+  const scriptPath = fileURLToPath(
+    new URL('./authenticated-business-smoke.mjs', import.meta.url),
+  );
+  writeFileSync(preloadPath, [
+    "import { appendFileSync } from 'node:fs';",
+    'globalThis.fetch = async () => {',
+    "  appendFileSync(process.env.AUTHENTICATED_SMOKE_FETCH_MARKER, 'called\\n');",
+    "  throw new Error('raw fetch failure');",
+    '};',
+    '',
+  ].join('\n'), 'utf8');
+
+  try {
+    for (const args of [['unexpected'], ['one', 'two']]) {
+      rmSync(summaryPath, { force: true });
+      rmSync(fetchMarkerPath, { force: true });
+      const result = spawnSync(process.execPath, [scriptPath, ...args], {
+        env: {
+          ...process.env,
+          ...BASE_ENV,
+          GITHUB_STEP_SUMMARY: summaryPath,
+          AUTHENTICATED_SMOKE_FETCH_MARKER: fetchMarkerPath,
+          NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
+          NODE_NO_WARNINGS: '1',
+        },
+        encoding: 'utf8',
+      });
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, 'Authenticated business smoke failed.\n');
+      assert.equal(existsSync(summaryPath), false);
+      assert.equal(existsSync(fetchMarkerPath), false);
+      for (const forbidden of [PASSWORD, COOKIE, ORIGIN, ...args]) {
+        assert.equal(`${result.stdout}${result.stderr}`.includes(forbidden), false);
+      }
+    }
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });

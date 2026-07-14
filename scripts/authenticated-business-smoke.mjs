@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   apiErrorEnvelopeSchema,
@@ -14,10 +17,47 @@ import {
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const RUN_ID_PATTERN = /^[1-9]\d*$/;
+const REPORT_INPUT_KEYS = [
+  'executedAt',
+  'gitSha',
+  'runId',
+  'runAttempt',
+];
+const REPORT_KEYS = [
+  'smokeVersion',
+  'executedAt',
+  'gitSha',
+  'runId',
+  'runAttempt',
+  'target',
+  'outcome',
+];
+
+export const AUTHENTICATED_SMOKE_VERSION = 'authenticated-business-smoke-v1';
 
 function exactKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+}
+
+function exactOrderedKeys(value, keys) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).join(',') === keys.join(',');
+}
+
+function matchesString(value, pattern) {
+  return typeof value === 'string' && pattern.test(value);
+}
+
+function isCanonicalTimestamp(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
 }
 
 export function validateAuthenticatedSmokeOrigin(value) {
@@ -39,6 +79,82 @@ export function validateAuthenticatedSmokeOrigin(value) {
     return url;
   } catch {
     throw new Error('Authenticated smoke origin was invalid.');
+  }
+}
+
+export function parseAuthenticatedSmokeEnvironment(env) {
+  try {
+    const runAttempt = Number(env?.GITHUB_RUN_ATTEMPT);
+    if (!env
+      || typeof env !== 'object'
+      || Array.isArray(env)
+      || env.CI !== 'true'
+      || env.GITHUB_ACTIONS !== 'true'
+      || !['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME)
+      || env.GITHUB_REF !== 'refs/heads/main'
+      || !matchesString(env.GITHUB_SHA, GIT_SHA_PATTERN)
+      || !matchesString(env.GITHUB_RUN_ID, RUN_ID_PATTERN)
+      || !matchesString(env.GITHUB_RUN_ATTEMPT, RUN_ID_PATTERN)
+      || !Number.isSafeInteger(runAttempt)
+      || runAttempt < 1
+      || !path.isAbsolute(env.GITHUB_STEP_SUMMARY)
+      || path.normalize(env.GITHUB_STEP_SUMMARY) !== env.GITHUB_STEP_SUMMARY) {
+      throw new Error('invalid environment');
+    }
+    return Object.freeze({
+      origin: validateAuthenticatedSmokeOrigin(env.DEPLOYMENT_URL).origin,
+      password: validateSmokeIdentityPassword(env.PRODUCTION_SMOKE_PASSWORD),
+      gitSha: env.GITHUB_SHA,
+      runId: env.GITHUB_RUN_ID,
+      runAttempt,
+      summaryPath: env.GITHUB_STEP_SUMMARY,
+    });
+  } catch {
+    throw new Error('Authenticated smoke environment was invalid.');
+  }
+}
+
+export function buildAuthenticatedSmokeReport(input) {
+  try {
+    if (!exactKeys(input, REPORT_INPUT_KEYS)
+      || !isCanonicalTimestamp(input.executedAt)
+      || !matchesString(input.gitSha, GIT_SHA_PATTERN)
+      || !matchesString(input.runId, RUN_ID_PATTERN)
+      || !Number.isSafeInteger(input.runAttempt)
+      || input.runAttempt < 1) {
+      throw new Error('invalid report');
+    }
+    return Object.freeze({
+      smokeVersion: AUTHENTICATED_SMOKE_VERSION,
+      executedAt: input.executedAt,
+      gitSha: input.gitSha,
+      runId: input.runId,
+      runAttempt: input.runAttempt,
+      target: 'web',
+      outcome: 'verified',
+    });
+  } catch {
+    throw new Error('Authenticated smoke report was invalid.');
+  }
+}
+
+export function renderAuthenticatedSmokeSummary(report) {
+  try {
+    if (!exactOrderedKeys(report, REPORT_KEYS)
+      || report.smokeVersion !== AUTHENTICATED_SMOKE_VERSION
+      || report.target !== 'web'
+      || report.outcome !== 'verified') {
+      throw new Error('invalid report');
+    }
+    buildAuthenticatedSmokeReport({
+      executedAt: report.executedAt,
+      gitSha: report.gitSha,
+      runId: report.runId,
+      runAttempt: report.runAttempt,
+    });
+    return `## Authenticated business smoke\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
+  } catch {
+    throw new Error('Authenticated smoke report was invalid.');
   }
 }
 
@@ -212,4 +328,55 @@ export async function verifyAuthenticatedBusinessTransaction({
   if (failed || cleanupFailed) {
     throw new Error('Authenticated business transaction failed.');
   }
+}
+
+export async function runAuthenticatedBusinessSmoke({
+  env = process.env,
+  fetchImpl = fetch,
+  randomUuid = randomUUID,
+  now = () => new Date(),
+  verifyTransaction = verifyAuthenticatedBusinessTransaction,
+  appendSummary = (filePath, contents) => fs.appendFileSync(filePath, contents, 'utf8'),
+  log = (contents) => console.log(contents),
+} = {}) {
+  try {
+    const environment = parseAuthenticatedSmokeEnvironment(env);
+    await verifyTransaction({
+      origin: environment.origin,
+      password: environment.password,
+      fetchImpl,
+      randomUuid,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    const currentTime = now();
+    if (!(currentTime instanceof Date) || !Number.isFinite(currentTime.getTime())) {
+      throw new Error('invalid time');
+    }
+    const report = buildAuthenticatedSmokeReport({
+      executedAt: currentTime.toISOString(),
+      gitSha: environment.gitSha,
+      runId: environment.runId,
+      runAttempt: environment.runAttempt,
+    });
+    await appendSummary(
+      environment.summaryPath,
+      renderAuthenticatedSmokeSummary(report),
+    );
+    await log(JSON.stringify(report));
+    return report;
+  } catch {
+    throw new Error('Authenticated business smoke failed.');
+  }
+}
+
+const isMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  const invocation = process.argv.slice(2).length === 0
+    ? runAuthenticatedBusinessSmoke()
+    : Promise.reject(new Error('invalid arguments'));
+  invocation.catch(() => {
+    console.error('Authenticated business smoke failed.');
+    process.exitCode = 1;
+  });
 }
