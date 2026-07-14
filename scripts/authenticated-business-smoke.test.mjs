@@ -15,9 +15,25 @@ const USER = {
   role: 'staff',
 };
 const COOKIE = 'isorder_sid=11111111-1111-4111-8111-111111111111';
+const PURCHASE_ORDER_SUMMARY = {
+  id: 7,
+  title: 'Sentinel collision',
+  status: 'draft',
+  order_date: '2026-07-14',
+  external_order_ref: null,
+  note: null,
+  created_at: '2026-07-14 00:00:00',
+  updated_at: '2026-07-14 00:00:00',
+  ordered_qty: 0,
+  received_qty: 0,
+};
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), {
   status,
   headers: { 'content-type': 'application/json', ...headers },
+});
+const html = (body = 'ok') => new Response(body, {
+  status: 200,
+  headers: { 'content-type': 'text/html; charset=utf-8' },
 });
 
 test('origin accepts only the fixed canonical production web Worker shape', () => {
@@ -52,7 +68,7 @@ test('transaction performs exactly six same-origin requests and returns no sensi
       body: init.body,
       signal: init.signal,
     });
-    if (url.pathname === '/login') return new Response('<!doctype html>', { status: 200 });
+    if (url.pathname === '/login') return html('<!doctype html>');
     if (url.pathname === '/api/auth/login') {
       return json({ ok: true, data: { user: USER } }, 200, {
         'set-cookie': `${COOKIE}; HttpOnly; Path=/; Max-Age=2592000; SameSite=Strict; Secure`,
@@ -107,7 +123,7 @@ function makeTransactionFetch({ path, occurrence = 1, response }) {
       const count = (seen.get(url.pathname) ?? 0) + 1;
       seen.set(url.pathname, count);
       if (url.pathname === path && count === occurrence) return response();
-      if (url.pathname === '/login') return new Response('ok', { status: 200 });
+      if (url.pathname === '/login') return html();
       if (url.pathname === '/api/auth/login') {
         return json({ ok: true, data: { user: USER } }, 200, {
           'set-cookie': `${COOKIE}; HttpOnly; Path=/; Secure`,
@@ -127,39 +143,53 @@ function makeTransactionFetch({ path, occurrence = 1, response }) {
 }
 
 test('every strict response boundary fails closed', async (t) => {
-  const cases = [
-    ['login page redirect', '/login', 1, () => new Response(null, { status: 302, headers: { location: '/other' } })],
-    ['login missing cookie', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER } })],
-    ['login wrong cookie name', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER } }, 200, { 'set-cookie': 'other=1; Path=/; Secure' })],
-    ['login redirect', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER } }, 302, { 'set-cookie': `${COOKIE}; Path=/; Secure`, location: '/other' })],
-    ['login malformed json', '/api/auth/login', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json', 'set-cookie': `${COOKIE}; Path=/; Secure` } })],
-    ['login missing user', '/api/auth/login', 1, () => json({ ok: true, data: {} }, 200, { 'set-cookie': `${COOKIE}; Path=/; Secure` })],
-    ['login extra key', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER }, extra: true }, 200, { 'set-cookie': `${COOKIE}; Path=/; Secure` })],
-    ['me redirect', '/api/users/me', 1, () => json({ ok: true, data: USER }, 302, { location: '/login' })],
-    ['me wrong media type', '/api/users/me', 1, () => new Response(JSON.stringify({ ok: true, data: USER }), { status: 200, headers: { 'content-type': 'application/jsonx' } })],
-    ['me malformed json', '/api/users/me', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })],
-    ['me missing data', '/api/users/me', 1, () => json({ ok: true })],
-    ['me extra key', '/api/users/me', 1, () => json({ ok: true, data: USER, extra: true })],
-    ['me wrong role', '/api/users/me', 1, () => json({ ok: true, data: { ...USER, role: 'admin' } })],
-    ['me changed id', '/api/users/me', 1, () => json({ ok: true, data: { ...USER, id: 42 } })],
-    ['business redirect', '/api/purchase-orders', 1, () => new Response(null, { status: 302, headers: { location: '/login' } })],
-    ['business malformed json', '/api/purchase-orders', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })],
-    ['business missing data', '/api/purchase-orders', 1, () => json({ ok: true })],
-    ['business extra key', '/api/purchase-orders', 1, () => json({ ok: true, data: [], extra: true })],
-    ['business error', '/api/purchase-orders', 1, () => json({ ok: false, error: { code: 'FAILED', message: 'no' } }, 500)],
-    ['business invalid row', '/api/purchase-orders', 1, () => json({ ok: true, data: [{ id: -1 }] })],
-    ['logout redirect', '/api/auth/logout', 1, () => new Response(null, { status: 302, headers: { location: '/login' } })],
-    ['logout malformed json', '/api/auth/logout', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })],
-    ['logout missing data', '/api/auth/logout', 1, () => json({ ok: true })],
-    ['logout extra key', '/api/auth/logout', 1, () => json({ ok: true, data: { loggedOut: true, extra: true } })],
-    ['revoked redirect', '/api/users/me', 2, () => new Response(null, { status: 302, headers: { location: '/login' } })],
-    ['revoked malformed json', '/api/users/me', 2, () => new Response('not-json', { status: 401, headers: { 'content-type': 'application/json' } })],
-    ['revoked missing error', '/api/users/me', 2, () => json({ ok: false }, 401)],
-    ['revoked extra key', '/api/users/me', 2, () => json({ ok: false, error: { code: 'UNAUTHORIZED', message: '로그인이 필요합니다.' }, extra: true }, 401)],
-    ['revoked wrong code', '/api/users/me', 2, () => json({ ok: false, error: { code: 'FORBIDDEN', message: '로그인이 필요합니다.' } }, 401)],
-    ['revoked wrong status', '/api/users/me', 2, () => json({ ok: false, error: { code: 'UNAUTHORIZED', message: '로그인이 필요합니다.' } }, 200)],
+  const loginPageFailurePaths = ['/login'];
+  const loginFailurePaths = ['/login', '/api/auth/login'];
+  const loginCleanupPaths = [...loginFailurePaths, '/api/auth/logout'];
+  const meCleanupPaths = [...loginFailurePaths, '/api/users/me', '/api/auth/logout'];
+  const businessOrLogoutFailurePaths = [
+    ...loginFailurePaths,
+    '/api/users/me',
+    '/api/purchase-orders',
+    '/api/auth/logout',
   ];
-  for (const [name, path, occurrence, response] of cases) {
+  const revokedFailurePaths = [...businessOrLogoutFailurePaths, '/api/users/me'];
+  const cases = [
+    ['login page redirect', '/login', 1, () => new Response(null, { status: 302, headers: { location: '/other' } }), loginPageFailurePaths],
+    ['login page non-Response', '/login', 1, () => ({ status: 200, headers: new Headers({ 'content-type': 'text/html' }) }), loginPageFailurePaths],
+    ['login page wrong media type', '/login', 1, () => new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } }), loginPageFailurePaths],
+    ['login missing cookie', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER } }), loginFailurePaths],
+    ['login wrong cookie name', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER } }, 200, { 'set-cookie': 'other=1; Path=/; Secure' }), loginFailurePaths],
+    ['login redirect', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER } }, 302, { 'set-cookie': `${COOKIE}; Path=/; Secure`, location: '/other' }), loginCleanupPaths],
+    ['login malformed json', '/api/auth/login', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json', 'set-cookie': `${COOKIE}; Path=/; Secure` } }), loginCleanupPaths],
+    ['login missing user', '/api/auth/login', 1, () => json({ ok: true, data: {} }, 200, { 'set-cookie': `${COOKIE}; Path=/; Secure` }), loginCleanupPaths],
+    ['login extra key', '/api/auth/login', 1, () => json({ ok: true, data: { user: USER }, extra: true }, 200, { 'set-cookie': `${COOKIE}; Path=/; Secure` }), loginCleanupPaths],
+    ['me redirect', '/api/users/me', 1, () => json({ ok: true, data: USER }, 302, { location: '/login' }), meCleanupPaths],
+    ['me wrong media type', '/api/users/me', 1, () => new Response(JSON.stringify({ ok: true, data: USER }), { status: 200, headers: { 'content-type': 'application/jsonx' } }), meCleanupPaths],
+    ['me malformed json', '/api/users/me', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } }), meCleanupPaths],
+    ['me missing data', '/api/users/me', 1, () => json({ ok: true }), meCleanupPaths],
+    ['me extra key', '/api/users/me', 1, () => json({ ok: true, data: USER, extra: true }), meCleanupPaths],
+    ['me wrong role', '/api/users/me', 1, () => json({ ok: true, data: { ...USER, role: 'admin' } }), meCleanupPaths],
+    ['me changed id', '/api/users/me', 1, () => json({ ok: true, data: { ...USER, id: 42 } }), meCleanupPaths],
+    ['business redirect', '/api/purchase-orders', 1, () => new Response(null, { status: 302, headers: { location: '/login' } }), businessOrLogoutFailurePaths],
+    ['business malformed json', '/api/purchase-orders', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } }), businessOrLogoutFailurePaths],
+    ['business missing data', '/api/purchase-orders', 1, () => json({ ok: true }), businessOrLogoutFailurePaths],
+    ['business extra key', '/api/purchase-orders', 1, () => json({ ok: true, data: [], extra: true }), businessOrLogoutFailurePaths],
+    ['business error', '/api/purchase-orders', 1, () => json({ ok: false, error: { code: 'FAILED', message: 'no' } }, 500), businessOrLogoutFailurePaths],
+    ['business invalid row', '/api/purchase-orders', 1, () => json({ ok: true, data: [{ id: -1 }] }), businessOrLogoutFailurePaths],
+    ['business schema-valid nonempty row', '/api/purchase-orders', 1, () => json({ ok: true, data: [PURCHASE_ORDER_SUMMARY] }), businessOrLogoutFailurePaths],
+    ['logout redirect', '/api/auth/logout', 1, () => new Response(null, { status: 302, headers: { location: '/login' } }), businessOrLogoutFailurePaths],
+    ['logout malformed json', '/api/auth/logout', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } }), businessOrLogoutFailurePaths],
+    ['logout missing data', '/api/auth/logout', 1, () => json({ ok: true }), businessOrLogoutFailurePaths],
+    ['logout extra key', '/api/auth/logout', 1, () => json({ ok: true, data: { loggedOut: true, extra: true } }), businessOrLogoutFailurePaths],
+    ['revoked redirect', '/api/users/me', 2, () => new Response(null, { status: 302, headers: { location: '/login' } }), revokedFailurePaths],
+    ['revoked malformed json', '/api/users/me', 2, () => new Response('not-json', { status: 401, headers: { 'content-type': 'application/json' } }), revokedFailurePaths],
+    ['revoked missing error', '/api/users/me', 2, () => json({ ok: false }, 401), revokedFailurePaths],
+    ['revoked extra key', '/api/users/me', 2, () => json({ ok: false, error: { code: 'UNAUTHORIZED', message: '로그인이 필요합니다.' }, extra: true }, 401), revokedFailurePaths],
+    ['revoked wrong code', '/api/users/me', 2, () => json({ ok: false, error: { code: 'FORBIDDEN', message: '로그인이 필요합니다.' } }, 401), revokedFailurePaths],
+    ['revoked wrong status', '/api/users/me', 2, () => json({ ok: false, error: { code: 'UNAUTHORIZED', message: '로그인이 필요합니다.' } }, 200), revokedFailurePaths],
+  ];
+  for (const [name, path, occurrence, response, expectedPaths] of cases) {
     await t.test(name, async () => {
       const scenario = makeTransactionFetch({ path, occurrence, response });
       await assert.rejects(
@@ -169,7 +199,12 @@ test('every strict response boundary fails closed', async (t) => {
         }),
         (error) => error.message === 'Authenticated business transaction failed.',
       );
+      assert.deepEqual(scenario.calls, expectedPaths);
       assert.equal(scenario.calls.filter((value) => value === '/api/auth/login').length <= 1, true);
+      assert.equal(
+        scenario.calls.filter((value) => value === '/api/auth/logout').length,
+        expectedPaths.includes('/api/auth/logout') ? 1 : 0,
+      );
     });
   }
 });
@@ -178,7 +213,7 @@ test('business failure attempts one logout, does not retry login, and exposes no
   const paths = [];
   const fetchImpl = async (url) => {
     paths.push(url.pathname);
-    if (url.pathname === '/login') return new Response('ok', { status: 200 });
+    if (url.pathname === '/login') return html();
     if (url.pathname === '/api/auth/login') {
       return json({ ok: true, data: { user: USER } }, 200, {
         'set-cookie': `${COOKIE}; HttpOnly; Path=/; Secure`,
@@ -252,7 +287,25 @@ test('multiple session cookies fail before me without comma splitting', async ()
     origin: ORIGIN, password: PASSWORD, fetchImpl: scenario.fetchImpl,
     randomUuid: () => '22222222-2222-4222-8222-222222222222',
   }));
-  assert.equal(scenario.calls.includes('/api/users/me'), false);
+  assert.deepEqual(scenario.calls, ['/login', '/api/auth/login']);
+});
+
+test('a combined ambiguous session cookie field fails closed without comma splitting', async () => {
+  const combinedCookie = `${COOKIE}; Path=/, isorder_sid=33333333-3333-4333-8333-333333333333; Path=/`;
+  const response = new Response(JSON.stringify({ ok: true, data: { user: USER } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'set-cookie': combinedCookie },
+  });
+  assert.deepEqual(response.headers.getSetCookie(), [combinedCookie]);
+  const scenario = makeTransactionFetch({
+    path: '/api/auth/login', occurrence: 1,
+    response: () => response,
+  });
+  await assert.rejects(verifyAuthenticatedBusinessTransaction({
+    origin: ORIGIN, password: PASSWORD, fetchImpl: scenario.fetchImpl,
+    randomUuid: () => '22222222-2222-4222-8222-222222222222',
+  }), (error) => error.message === 'Authenticated business transaction failed.');
+  assert.deepEqual(scenario.calls, ['/login', '/api/auth/login']);
 });
 
 test('invalid random sentinel fails before the first fetch', async () => {

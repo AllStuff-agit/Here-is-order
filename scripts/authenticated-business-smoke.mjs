@@ -42,10 +42,14 @@ export function validateAuthenticatedSmokeOrigin(value) {
   }
 }
 
-async function exactJson(response) {
-  const mediaType = response instanceof Response
+function responseMediaType(response) {
+  return response instanceof Response
     ? response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
     : null;
+}
+
+async function exactJson(response) {
+  const mediaType = responseMediaType(response);
   if (!(response instanceof Response)
     || mediaType !== 'application/json') {
     throw new Error('invalid response');
@@ -70,6 +74,7 @@ function optionalSessionCookie(response) {
   const matching = values.filter((value) => value.startsWith('isorder_sid='));
   if (matching.length === 0) return null;
   if (matching.length !== 1) throw new Error('invalid cookie');
+  if (matching[0].includes(',')) throw new Error('invalid cookie');
   const pair = matching[0].split(';', 1)[0];
   if (!/^isorder_sid=[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(pair)) {
     throw new Error('invalid cookie');
@@ -128,7 +133,11 @@ export async function verifyAuthenticatedBusinessTransaction({
     const page = await fetchOnce(fetchImpl, new URL('/login', baseUrl), {
       timeoutMs: requestTimeoutMs,
     });
-    if (page.status !== 200) throw new Error('invalid login page');
+    if (!(page instanceof Response)
+      || page.status !== 200
+      || responseMediaType(page) !== 'text/html') {
+      throw new Error('invalid login page');
+    }
 
     const login = await fetchOnce(fetchImpl, new URL('/api/auth/login', baseUrl), {
       method: 'POST',
@@ -167,7 +176,9 @@ export async function verifyAuthenticatedBusinessTransaction({
       purchaseOrderSummaryListSchema,
       businessBody,
     );
-    if (business.status !== 200 || businessEnvelope.ok !== true) {
+    if (business.status !== 200
+      || businessEnvelope.ok !== true
+      || businessEnvelope.data.length !== 0) {
       throw new Error('invalid business read');
     }
 
