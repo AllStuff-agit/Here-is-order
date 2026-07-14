@@ -158,10 +158,105 @@ const LIFECYCLE_ACTIONS = ['provision', 'disable', 'rotate'];
 const WORKFLOW_DISPATCH = 'gh workflow run manage-smoke-identity.yml';
 const OPERATION_COMMAND_PATTERN =
   /\bgh\s+workflow\s+run\s+manage-smoke-identity\.yml\b|\bgh\s+run\s+(?:watch|view)\b|(?:^|\s)-f\s+(?:action|confirmation)=|(?:provision|disable|rotate)_(?:run_(?:url|id)|report_(?:matches|count))=/im;
+const STANDALONE_GH_TOKEN_PATTERN =
+  /(?:^|[^a-z0-9_-])gh(?=$|[^a-z0-9_-])/i;
 const DIRECT_DATABASE_COMMAND_PATTERN =
   /\bwrangler\s+d1\b|\b(?:curl|wget|sqlite3)\b/i;
 const SQL_STATEMENT_PATTERN =
-  /\b(?:insert\s+into|update\s+(?:"[^"\n]+"|`[^`\n]+`|\[[^\]\n]+\]|(?:(?:main|temp)\.)?[a-z_][a-z0-9_]*)|delete\s+from|merge\s+into|replace\s+into|upsert\s+into|create\s+(?:table|index|view|trigger)|alter\s+table|drop\s+(?:table|index|view|trigger)|truncate\s+(?:table\s+)?[a-z_][a-z0-9_]*|pragma\s+[a-z_][a-z0-9_]*|attach\s+database|detach\s+database|with\s+[a-z_][a-z0-9_]*\s+as\s*\(|select\b[^\n;]{0,500}\bfrom\b|vacuum(?:\s+[a-z_][a-z0-9_]*)?\s*;|reindex(?:\s+[a-z_][a-z0-9_]*)?\s*;|begin(?:\s+(?:transaction|immediate|exclusive|deferred))?\s*;|commit\s*;|rollback\s*;)/i;
+  /\b(?:insert\s+(?:or\s+(?:rollback|abort|replace|fail|ignore)\s+)?into|update\s+(?:or\s+(?:rollback|abort|replace|fail|ignore)\s+)?(?:"[^"\n]+"|`[^`\n]+`|\[[^\]\n]+\]|(?:(?:main|temp)\.)?[a-z_][a-z0-9_]*)|delete\s+from|merge\s+into|replace\s+into|upsert\s+into|create\s+(?:or\s+replace\s+)?(?:(?:temp|temporary)\s+)?(?:unique\s+)?(?:virtual\s+)?(?:table|index|view|trigger)\b|alter\s+(?:table|index|view|trigger)\b|drop\s+(?:table|index|view|trigger)\b|rename\s+(?:table|index|view|trigger)\b|comment\s+on\s+(?:table|index|view|trigger)\b|truncate\s+(?:table\s+)?[a-z_][a-z0-9_]*|pragma\s+[a-z_][a-z0-9_]*|attach\s+database|detach\s+database|with\s+[a-z_][a-z0-9_]*\s+as\s*\(|select\b[^\n;]{0,500}\bfrom\b|analyze(?:\s+[a-z_][a-z0-9_.]*)?\s*;|vacuum(?:\s+[a-z_][a-z0-9_]*)?(?:\s+into\s+(?:'[^'\n]+'|"[^"\n]+"|`[^`\n]+`|[a-z_][a-z0-9_.-]*))?\s*;|reindex(?:\s+[a-z_][a-z0-9_]*)?\s*;|begin(?:\s+(?:deferred|immediate|exclusive))?(?:\s+(?:transaction|work))?\s*;|end(?:\s+(?:transaction|work))?\s*;|savepoint\s+[a-z_][a-z0-9_]*\s*;|release(?:\s+savepoint)?\s+[a-z_][a-z0-9_]*\s*;|commit(?:\s+(?:transaction|work))?\s*;|rollback(?:\s+(?:transaction|work))?(?:\s+to(?:\s+savepoint)?\s+[a-z_][a-z0-9_]*)?\s*;)/i;
+const GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE =
+  'Identity lifecycle은 main의 `manage-smoke-identity.yml` 수동 workflow로만 수행하며 D1 콘솔이나 임의 SQL로 변경하지 않는다.';
+const README_D1_CONSOLE_PROHIBITION_SENTENCE =
+  'Identity lifecycle은 main의 `Manage production smoke identity` 수동 workflow만 사용하며 D1 콘솔이나 임의 SQL로 변경하지 않습니다.';
+const D1_CONSOLE_REFERENCE_SOURCE = String.raw`D1\s*(?:console|콘솔)`;
+const UNAPPROVED_D1_CONSOLE_REFERENCE_PATTERN = new RegExp(
+  D1_CONSOLE_REFERENCE_SOURCE,
+  'i',
+);
+
+const EXPECTED_CREDENTIAL_BODY = [
+  'set +x',
+  'set -euo pipefail',
+  String.raw`smoke_password="$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')"`,
+  'test "${#smoke_password}" -ge 32',
+  `printf '%s' "$smoke_password" | gh secret set PRODUCTION_SMOKE_PASSWORD --repo AllStuff-agit/Here-is-order`,
+  'unset smoke_password',
+  '',
+].join('\n');
+
+const EXPECTED_PROVISION_BODY = [
+  'set -euo pipefail',
+  'provision_run_url="$(gh workflow run manage-smoke-identity.yml --ref main \\',
+  '  -f action=provision \\',
+  `  -f confirmation='MANAGE hereisorder deployment-smoke provision')"`,
+  String.raw`if [[ ! "$provision_run_url" =~ ^https://github\.com/AllStuff-agit/Here-is-order/actions/runs/([1-9][0-9]*)$ ]]; then`,
+  '  exit 1',
+  'fi',
+  'provision_run_id="${BASH_REMATCH[1]}"',
+  'gh run watch "$provision_run_id" --exit-status',
+  `test "$(gh run view "$provision_run_id" --json databaseId --jq '.databaseId')" = "$provision_run_id"`,
+  `test "$(gh run view "$provision_run_id" --json event --jq '.event')" = 'workflow_dispatch'`,
+  `test "$(gh run view "$provision_run_id" --json headBranch --jq '.headBranch')" = 'main'`,
+  `test "$(gh run view "$provision_run_id" --json workflowName --jq '.workflowName')" = 'Manage production smoke identity'`,
+  `test "$(gh run view "$provision_run_id" --json url --jq '.url')" = "$provision_run_url"`,
+  String.raw`provision_report_matches="$(gh run view "$provision_run_id" --log | rg -o '\{"operationVersion":"production-smoke-identity-operation-v1","executedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","databaseName":"hereisorder","action":"provision","outcome":"completed"\}')"`,
+  String.raw`provision_report_count="$(printf '%s\n' "$provision_report_matches" | sed '/^$/d' | wc -l | tr -d ' ')"`,
+  'test "$provision_report_count" -eq 1',
+  'unset provision_report_matches provision_report_count',
+  '',
+].join('\n');
+
+const EXPECTED_DISABLE_BODY = [
+  'set -euo pipefail',
+  'disable_run_url="$(gh workflow run manage-smoke-identity.yml --ref main \\',
+  '  -f action=disable \\',
+  `  -f confirmation='MANAGE hereisorder deployment-smoke disable')"`,
+  String.raw`if [[ ! "$disable_run_url" =~ ^https://github\.com/AllStuff-agit/Here-is-order/actions/runs/([1-9][0-9]*)$ ]]; then`,
+  '  exit 1',
+  'fi',
+  'disable_run_id="${BASH_REMATCH[1]}"',
+  'gh run watch "$disable_run_id" --exit-status',
+  `test "$(gh run view "$disable_run_id" --json databaseId --jq '.databaseId')" = "$disable_run_id"`,
+  `test "$(gh run view "$disable_run_id" --json event --jq '.event')" = 'workflow_dispatch'`,
+  `test "$(gh run view "$disable_run_id" --json headBranch --jq '.headBranch')" = 'main'`,
+  `test "$(gh run view "$disable_run_id" --json workflowName --jq '.workflowName')" = 'Manage production smoke identity'`,
+  `test "$(gh run view "$disable_run_id" --json url --jq '.url')" = "$disable_run_url"`,
+  String.raw`disable_report_matches="$(gh run view "$disable_run_id" --log | rg -o '\{"operationVersion":"production-smoke-identity-operation-v1","executedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","databaseName":"hereisorder","action":"disable","outcome":"completed"\}')"`,
+  String.raw`disable_report_count="$(printf '%s\n' "$disable_report_matches" | sed '/^$/d' | wc -l | tr -d ' ')"`,
+  'test "$disable_report_count" -eq 1',
+  'unset disable_report_matches disable_report_count',
+  '',
+].join('\n');
+
+const EXPECTED_ROTATE_BODY = [
+  'set -euo pipefail',
+  'rotate_run_url="$(gh workflow run manage-smoke-identity.yml --ref main \\',
+  '  -f action=rotate \\',
+  `  -f confirmation='MANAGE hereisorder deployment-smoke rotate')"`,
+  String.raw`if [[ ! "$rotate_run_url" =~ ^https://github\.com/AllStuff-agit/Here-is-order/actions/runs/([1-9][0-9]*)$ ]]; then`,
+  '  exit 1',
+  'fi',
+  'rotate_run_id="${BASH_REMATCH[1]}"',
+  'gh run watch "$rotate_run_id" --exit-status',
+  `test "$(gh run view "$rotate_run_id" --json databaseId --jq '.databaseId')" = "$rotate_run_id"`,
+  `test "$(gh run view "$rotate_run_id" --json event --jq '.event')" = 'workflow_dispatch'`,
+  `test "$(gh run view "$rotate_run_id" --json headBranch --jq '.headBranch')" = 'main'`,
+  `test "$(gh run view "$rotate_run_id" --json workflowName --jq '.workflowName')" = 'Manage production smoke identity'`,
+  `test "$(gh run view "$rotate_run_id" --json url --jq '.url')" = "$rotate_run_url"`,
+  String.raw`rotate_report_matches="$(gh run view "$rotate_run_id" --log | rg -o '\{"operationVersion":"production-smoke-identity-operation-v1","executedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","databaseName":"hereisorder","action":"rotate","outcome":"completed"\}')"`,
+  String.raw`rotate_report_count="$(printf '%s\n' "$rotate_report_matches" | sed '/^$/d' | wc -l | tr -d ' ')"`,
+  'test "$rotate_report_count" -eq 1',
+  'unset rotate_report_matches rotate_report_count',
+  '',
+].join('\n');
+
+const EXPECTED_LIFECYCLE_BODIES = [
+  EXPECTED_CREDENTIAL_BODY,
+  EXPECTED_PROVISION_BODY,
+  EXPECTED_DISABLE_BODY,
+  EXPECTED_CREDENTIAL_BODY,
+  EXPECTED_ROTATE_BODY,
+];
 
 const LIFECYCLE_TOKENS = [
   ['fixed identity', 'deployment-smoke'],
@@ -514,11 +609,17 @@ function assertCredentialSafety(contents) {
   assert.match(contents, /stdout, argv, file, chat, issue, PR 또는 commit/);
 }
 
-function assertNoDirectDatabaseMutation(contents, label) {
-  const blocks = fencedBlocks(contents);
+function assertNoDirectDatabaseMutation(contents, label, prohibitionSentence) {
+  assert.equal(
+    countOccurrences(contents, prohibitionSentence),
+    1,
+    `${label}: exact D1 console prohibition sentence is required once`,
+  );
+  const neutralizedContents = contents.replace(prohibitionSentence, '');
+  const blocks = fencedBlocks(neutralizedContents);
   const scanTargets = [
     ...blocks.map(({ body }, index) => [`fence ${index + 1}`, body]),
-    ...nonFenceSegments(contents, blocks).map((body, index) => [
+    ...nonFenceSegments(neutralizedContents, blocks).map((body, index) => [
       `inline section ${index + 1}`,
       body,
     ]),
@@ -528,6 +629,11 @@ function assertNoDirectDatabaseMutation(contents, label) {
       body,
       DIRECT_DATABASE_COMMAND_PATTERN,
       `${label}: direct Wrangler D1 commands are forbidden in ${target}`,
+    );
+    assert.doesNotMatch(
+      body,
+      UNAPPROVED_D1_CONSOLE_REFERENCE_PATTERN,
+      `${label}: unapproved D1 console references are forbidden in ${target}`,
     );
     assert.doesNotMatch(
       body,
@@ -643,6 +749,11 @@ function assertLifecycleBlockStructure(contents) {
       OPERATION_COMMAND_PATTERN,
       `lifecycle block shape: operation commands are forbidden outside fences at segment ${index + 1}`,
     );
+    assert.doesNotMatch(
+      segment,
+      STANDALONE_GH_TOKEN_PATTERN,
+      `lifecycle block shape: unowned gh commands are forbidden outside exact lifecycle bodies at segment ${index + 1}`,
+    );
   }
 
   const operationBlocks = new Map();
@@ -651,6 +762,13 @@ function assertLifecycleBlockStructure(contents) {
       operationBlocks.set(kind, blocks[index]);
       assertOperationEvidence(blocks[index].body, kind);
     }
+  }
+  for (const [index, block] of blocks.entries()) {
+    assert.equal(
+      block.body,
+      EXPECTED_LIFECYCLE_BODIES[index],
+      `lifecycle command allowlist: ${kinds[index]} block must match its exact expected body`,
+    );
   }
 
   const provision = markdownSection(contents, PROVISION_HEADING);
@@ -712,7 +830,16 @@ test('credential blocks disable tracing and install exact 48-byte URL-safe secre
 
 test('lifecycle runbook forbids direct database mutation and unsafe evidence inspection', () => {
   const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
-  assertNoDirectDatabaseMutation(lifecycle, 'deployment guide lifecycle');
+  assertNoDirectDatabaseMutation(
+    lifecycle,
+    'deployment guide lifecycle',
+    GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE,
+  );
+  assertNoDirectDatabaseMutation(
+    markdownSection(readme, README_LIFECYCLE_HEADING),
+    'README lifecycle',
+    README_D1_CONSOLE_PROHIBITION_SENTENCE,
+  );
   assertEvidenceSafety(lifecycle, 'deployment guide lifecycle');
   assertNoRawLogExposure(lifecycle);
 });
@@ -735,7 +862,11 @@ test('database mutation semantic check rejects lowercase SQL DML in a bash fence
   const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
   const mutated = lifecycle.replace('```bash\n', '```bash\nupdate users set active = 0;\n');
   assert.throws(
-    () => assertNoDirectDatabaseMutation(mutated, 'lowercase DML mutation'),
+    () => assertNoDirectDatabaseMutation(
+      mutated,
+      'lowercase DML mutation',
+      GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE,
+    ),
     /lowercase DML mutation: SQL DML\/DDL is forbidden/,
   );
 });
@@ -821,7 +952,11 @@ test('database mutation invariant scans non-bash, untagged, uppercase, and tilde
         `${PROVISION_HEADING}\n\n${fence}`,
       );
       assert.throws(
-        () => assertNoDirectDatabaseMutation(mutated, `${name} mutation`),
+        () => assertNoDirectDatabaseMutation(
+          mutated,
+          `${name} mutation`,
+          GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE,
+        ),
         /SQL DML\/DDL is forbidden/,
       );
     });
@@ -848,7 +983,11 @@ test('database mutation invariant scans inline lifecycle commands case-insensiti
         `${PROVISION_HEADING}\n\n\`${command}\``,
       );
       assert.throws(
-        () => assertNoDirectDatabaseMutation(mutated, `${name} mutation`),
+        () => assertNoDirectDatabaseMutation(
+          mutated,
+          `${name} mutation`,
+          GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE,
+        ),
         expected,
       );
     });
@@ -890,6 +1029,31 @@ test('lifecycle block shape rejects operation commands outside classified blocks
     () => assertLifecycleBlockStructure(mutated),
     /operation commands are forbidden outside fences/,
   );
+});
+
+test('lifecycle block shape rejects every standalone gh command outside fences', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  for (const [name, command] of [
+    [
+      'quoted workflow ID',
+      `gh workflow run "manage-smoke-identity.yml" --ref main --raw-field action=rotate`,
+    ],
+    [
+      'repository selector before workflow',
+      `gh -R AllStuff-agit/Here-is-order workflow run 123456789 --ref main`,
+    ],
+  ]) {
+    await t.test(name, () => {
+      const mutated = lifecycle.replace(
+        PROVISION_HEADING,
+        `${PROVISION_HEADING}\n\n\`${command}\``,
+      );
+      assert.throws(
+        () => assertLifecycleBlockStructure(mutated),
+        /unowned gh commands are forbidden outside exact lifecycle bodies/,
+      );
+    });
+  }
 });
 
 test('lifecycle block shape rejects an early duplicate rotate dispatch', () => {
@@ -961,4 +1125,228 @@ test('lifecycle block shape rejects operation markers split across fences', () =
     () => assertLifecycleBlockStructure(mutated),
     /lifecycle block shape: exactly five fenced blocks are required/,
   );
+});
+
+test('lifecycle command allowlist rejects unowned commands and formatting changes', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const provisionBlock = fencedBashBlocks(lifecycle).find(({ body }) =>
+    body.includes('-f action=provision'),
+  );
+  assert.ok(provisionBlock, 'provision block must exist before allowlist mutations');
+  const watch = 'gh run watch "$provision_run_id" --exit-status';
+  for (const [name, mutatedBody] of [
+    [
+      'literal watch for an unowned run',
+      provisionBlock.body.replace(watch, `gh run watch 123456789 --exit-status\n${watch}`),
+    ],
+    [
+      'reformatted strict-mode command',
+      provisionBlock.body.replace('set -euo pipefail', 'set  -euo pipefail'),
+    ],
+    [
+      'direct curl command',
+      provisionBlock.body.replace(watch, `curl https://example.invalid\n${watch}`),
+    ],
+    [
+      'direct SQL command',
+      provisionBlock.body.replace(watch, `UPDATE users SET active = 0;\n${watch}`),
+    ],
+    [
+      'unowned shell command',
+      provisionBlock.body.replace(watch, `printf '%s\\n' unexpected\n${watch}`),
+    ],
+  ]) {
+    await t.test(name, () => {
+      const mutatedBlock = provisionBlock.full.replace(
+        provisionBlock.body,
+        mutatedBody,
+      );
+      const mutated = lifecycle.replace(provisionBlock.full, mutatedBlock);
+      assert.throws(
+        () => assertLifecycleBlockStructure(mutated),
+        /lifecycle command allowlist: provision block must match its exact expected body/,
+      );
+    });
+  }
+});
+
+test('lifecycle command allowlist rejects alternate workflow dispatch spellings', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const disableBlock = fencedBashBlocks(lifecycle).find(({ body }) =>
+    body.includes('-f action=disable'),
+  );
+  const provisionBlock = fencedBashBlocks(lifecycle).find(({ body }) =>
+    body.includes('-f action=provision'),
+  );
+  assert.ok(disableBlock, 'disable block must exist before alternate dispatch mutation');
+  assert.ok(provisionBlock, 'provision block must exist before long-form flag mutation');
+
+  await t.test('early double-spaced raw-field rotate dispatch', () => {
+    const earlyRotate = "gh  workflow run manage-smoke-identity.yml --ref main --raw-field action=rotate --raw-field confirmation='MANAGE hereisorder deployment-smoke rotate'";
+    const mutatedBody = disableBlock.body.replace(
+      'set -euo pipefail',
+      `set -euo pipefail\n${earlyRotate}`,
+    );
+    const mutated = lifecycle.replace(
+      disableBlock.full,
+      disableBlock.full.replace(disableBlock.body, mutatedBody),
+    );
+    assert.throws(
+      () => assertLifecycleBlockStructure(mutated),
+      /lifecycle command allowlist: disable block must match its exact expected body/,
+    );
+  });
+
+  for (const [name, extraFlags] of [
+    [
+      'short typed field',
+      "  -F action=provision \\\n  -F confirmation='MANAGE hereisorder deployment-smoke provision' \\",
+    ],
+    [
+      'long typed field',
+      "  --field action=provision \\\n  --field confirmation='MANAGE hereisorder deployment-smoke provision' \\",
+    ],
+    [
+      'long raw field',
+      "  --raw-field action=provision \\\n  --raw-field confirmation='MANAGE hereisorder deployment-smoke provision' \\",
+    ],
+  ]) {
+    await t.test(`duplicate ${name} action and confirmation`, () => {
+      const canonicalConfirmation =
+        "  -f confirmation='MANAGE hereisorder deployment-smoke provision')\"";
+      const mutatedBody = provisionBlock.body.replace(
+        canonicalConfirmation,
+        `${extraFlags}\n${canonicalConfirmation}`,
+      );
+      const mutated = lifecycle.replace(
+        provisionBlock.full,
+        provisionBlock.full.replace(provisionBlock.body, mutatedBody),
+      );
+      assert.throws(
+        () => assertLifecycleBlockStructure(mutated),
+        /lifecycle command allowlist: provision block must match its exact expected body/,
+      );
+    });
+  }
+});
+
+test('database invariant rejects affirmative D1 console mutation instructions', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  for (const [name, instruction] of [
+    [
+      'Korean instruction',
+      '운영자는 D1 콘솔에서 deployment-smoke 사용자 row를 직접 변경한다.',
+    ],
+    [
+      'English instruction',
+      'Use the D1 console to modify the deployment-smoke user.',
+    ],
+    [
+      'Korean management instruction',
+      '운영자는 D1 콘솔에서 deployment-smoke 사용자 row를 직접 관리한다.',
+    ],
+  ]) {
+    await t.test(name, () => {
+      const mutated = lifecycle.replace(
+        PROVISION_HEADING,
+        `${PROVISION_HEADING}\n\n${instruction}`,
+      );
+      assert.throws(
+        () => assertNoDirectDatabaseMutation(
+          mutated,
+          `${name} mutation`,
+          GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE,
+        ),
+        /unapproved D1 console references are forbidden/,
+      );
+    });
+  }
+});
+
+test('database invariant scans the README lifecycle for D1 console instructions', () => {
+  const lifecycle = markdownSection(readme, README_LIFECYCLE_HEADING);
+  assert.doesNotThrow(() =>
+    assertNoDirectDatabaseMutation(
+      lifecycle,
+      'README lifecycle',
+      README_D1_CONSOLE_PROHIBITION_SENTENCE,
+    ),
+  );
+  const mutated = lifecycle.replace(
+    README_LIFECYCLE_HEADING,
+    `${README_LIFECYCLE_HEADING}\n\n운영자는 D1 콘솔에서 deployment-smoke 사용자를 직접 변경합니다.`,
+  );
+  assert.throws(
+    () => assertNoDirectDatabaseMutation(
+      mutated,
+      'README lifecycle mutation',
+      README_D1_CONSOLE_PROHIBITION_SENTENCE,
+    ),
+    /unapproved D1 console references are forbidden/,
+  );
+});
+
+test('database invariant rejects conflict-clause and expanded DDL statements', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  for (const [name, payload] of [
+    [
+      'non-fence CREATE TEMP TABLE',
+      '`CREATE TEMP TABLE smoke_probe(id INTEGER);`',
+    ],
+    [
+      'alternate-fence CREATE TEMP TABLE',
+      '~~~sql\nCREATE TEMP TABLE smoke_probe(id INTEGER);\n~~~',
+    ],
+    [
+      'INSERT OR IGNORE INTO',
+      '`INSERT OR IGNORE INTO users(id) VALUES (1);`',
+    ],
+    [
+      'CREATE UNIQUE INDEX',
+      '```SQL\nCREATE UNIQUE INDEX smoke_probe_idx ON users(id);\n```',
+    ],
+    [
+      'CREATE TEMPORARY VIEW',
+      '```text\nCREATE TEMPORARY VIEW smoke_probe AS SELECT 1;\n```',
+    ],
+    [
+      'ALTER TRIGGER',
+      '`ALTER TRIGGER smoke_probe ENABLE;`',
+    ],
+    [
+      'ANALYZE',
+      '`ANALYZE users;`',
+    ],
+    [
+      'VACUUM INTO',
+      "`VACUUM INTO 'smoke-backup.db';`",
+    ],
+    [
+      'END TRANSACTION',
+      '`END TRANSACTION;`',
+    ],
+    [
+      'SAVEPOINT',
+      '`SAVEPOINT smoke_probe;`',
+    ],
+    [
+      'RELEASE SAVEPOINT',
+      '`RELEASE SAVEPOINT smoke_probe;`',
+    ],
+  ]) {
+    await t.test(name, () => {
+      const mutated = lifecycle.replace(
+        PROVISION_HEADING,
+        `${PROVISION_HEADING}\n\n${payload}`,
+      );
+      assert.throws(
+        () => assertNoDirectDatabaseMutation(
+          mutated,
+          `${name} mutation`,
+          GUIDE_D1_CONSOLE_PROHIBITION_SENTENCE,
+        ),
+        /SQL DML\/DDL is forbidden/,
+      );
+    });
+  }
 });
