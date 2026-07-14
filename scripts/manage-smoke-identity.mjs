@@ -24,6 +24,15 @@ function nonblank(value) {
     && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
+function isExactIsoTimestamp(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
 export function parseSmokeIdentityEnvironment({ env, action }) {
   try {
     const needsPassword = action !== 'disable';
@@ -63,8 +72,7 @@ export function buildSmokeIdentityOperationReport({ executedAt, action }) {
     action,
     outcome: 'completed',
   };
-  if (typeof executedAt !== 'string'
-    || new Date(executedAt).toISOString() !== executedAt
+  if (!isExactIsoTimestamp(executedAt)
     || !SMOKE_IDENTITY_ACTIONS.includes(action)) {
     throw new Error('Smoke identity report was invalid.');
   }
@@ -96,7 +104,7 @@ export function renderSmokeIdentityOperationSummary(report) {
     || report.databaseName !== SMOKE_IDENTITY.databaseName
     || !SMOKE_IDENTITY_ACTIONS.includes(report.action)
     || report.outcome !== 'completed'
-    || new Date(report.executedAt).toISOString() !== report.executedAt) {
+    || !isExactIsoTimestamp(report.executedAt)) {
     throw new Error('Smoke identity report was invalid.');
   }
   return `## Production smoke identity operation\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;

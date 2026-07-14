@@ -298,6 +298,42 @@ test('report and summary contain only exact safe evidence', () => {
   );
 });
 
+const INVALID_EXECUTED_AT_CASES = [
+  ['invalid string', 'private-invalid-report-date'],
+  ['non-string', undefined],
+  ['impossible ISO date', '2026-02-30T00:00:00.000Z'],
+];
+
+test('report builder rejects invalid dates with the exact generic error', async (t) => {
+  for (const [name, executedAt] of INVALID_EXECUTED_AT_CASES) {
+    await t.test(name, () => {
+      assert.throws(
+        () => buildSmokeIdentityOperationReport({ executedAt, action: 'provision' }),
+        (error) => error.message === 'Smoke identity report was invalid.'
+          && !error.message.includes(String(executedAt)),
+      );
+    });
+  }
+});
+
+test('summary renderer rejects invalid dates with the exact generic error', async (t) => {
+  for (const [name, executedAt] of INVALID_EXECUTED_AT_CASES) {
+    await t.test(name, () => {
+      assert.throws(
+        () => renderSmokeIdentityOperationSummary({
+          operationVersion: 'production-smoke-identity-operation-v1',
+          executedAt,
+          databaseName: 'hereisorder',
+          action: 'provision',
+          outcome: 'completed',
+        }),
+        (error) => error.message === 'Smoke identity report was invalid.'
+          && !error.message.includes(String(executedAt)),
+      );
+    });
+  }
+});
+
 test('binding and remote validation stop hashing and lifecycle', async () => {
   const cases = [
     {
