@@ -122,7 +122,7 @@ npm run db:recover-password -- --remote --username admin
 
 ## Cloudflare 자동 배포
 
-GitHub Actions에 `CLOUDFLARE_API_TOKEN`과 `CLOUDFLARE_ACCOUNT_ID` repository secret을 한 번 등록한 뒤에는 `main` push만으로 배포됩니다.
+S2-ready 자동 배포에는 GitHub Actions의 세 repository secret인 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `PRODUCTION_SMOKE_PASSWORD`와 create-only provision exact whitelist evidence 확인 완료가 모두 필요합니다. 이 선행 조건이 갖춰진 뒤에는 `main` push만으로 verify부터 authenticated business smoke까지 전체 배포가 자동 실행됩니다.
 
 ```bash
 git push origin main
