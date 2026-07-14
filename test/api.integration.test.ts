@@ -1,7 +1,9 @@
 import { env, exports } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { purchaseOrderDetailSchema } from '@here-is-order/http-contract/purchase-orders';
+import { Buffer } from 'node:buffer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPasswordHash } from '../scripts/generate-admin-seed.mjs';
 import worker from '../src/index';
 import { withTestTrigger } from './helpers/test-trigger';
 
@@ -215,6 +217,73 @@ describe('세션 만료 형식', () => {
     expect(login.status).toBe(200);
     expect(login.headers.get('Set-Cookie') ?? '').toContain('; Secure');
     await waitOnExecutionContext(ctx);
+  });
+
+  it('비밀번호 검증 뒤 hash가 교체되면 stale login session과 audit을 만들지 않는다', async () => {
+    const username = `rotate-login-${crypto.randomUUID()}`;
+    const password = `verified-${crypto.randomUUID()}`;
+    const verifiedHash = createPasswordHash(password, Buffer.alloc(16, 7));
+    const inserted = await env.DB.prepare(
+      `INSERT INTO users (username, password_hash, name, role)
+       VALUES (?, ?, '회전 로그인 테스트', 'staff')`,
+    ).bind(username, verifiedHash).run();
+    const userId = Number(inserted.meta.last_row_id);
+    const rotatedHash = createPasswordHash(
+      `rotated-${crypto.randomUUID()}`,
+      Buffer.alloc(16, 8),
+    );
+    let rotationInjected = false;
+    const rotatingDb = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            rotationInjected = true;
+            await target.prepare(
+              `UPDATE users
+                  SET password_hash = ?, updated_at = datetime('now')
+                WHERE id = ?`,
+            ).bind(rotatedHash, userId).run();
+            return target.batch(statements);
+          };
+        }
+
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      loginRequest(username, password),
+      { DB: rotatingDb },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const sessionCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM sessions WHERE user_id = ?',
+    ).bind(userId).first<{ count: number }>();
+    const loginAuditCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+         FROM audit_logs
+        WHERE actor_user_id = ? AND action = 'login'`,
+    ).bind(userId).first<{ count: number }>();
+    const storedHash = await env.DB.prepare(
+      'SELECT password_hash FROM users WHERE id = ?',
+    ).bind(userId).first<{ password_hash: string }>();
+
+    expect(rotationInjected).toBe(true);
+    expect(response.status).toBe(401);
+    expect(response.headers.get('Set-Cookie')).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_CREDENTIALS',
+        message: '아이디 또는 비밀번호가 올바르지 않습니다.',
+      },
+    });
+    expect(sessionCount?.count).toBe(0);
+    expect(loginAuditCount?.count).toBe(0);
+    expect(storedHash?.password_hash).toBe(rotatedHash);
   });
 
   it('logout은 session을 삭제하고 cookie를 지워 token 재사용을 거부한다', async () => {

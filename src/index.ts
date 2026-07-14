@@ -354,21 +354,40 @@ app.post('/api/auth/login', async (c) => {
     return c.json(apiErr('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 올바르지 않습니다.'), 401);
   }
 
-  if (passwordCheck.upgradedHash) {
-    await c.env.DB.prepare('UPDATE users SET password_hash = ?, updated_at = datetime("now") WHERE id = ?')
-      .bind(passwordCheck.upgradedHash, user.id)
-      .run();
-  }
-
   const sid = crypto.randomUUID();
-
-  await c.env.DB.batch([
+  const loginStatements: D1PreparedStatement[] = [
     c.env.DB.prepare(
       `INSERT INTO sessions (token, user_id, expires_at)
-       VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))`,
-    ).bind(sid, user.id, SESSION_SECONDS),
-    auditStatement(c.env.DB, user.id, 'login', 'user', user.id, undefined, { username: user.username }),
-  ]);
+       SELECT ?, id, datetime('now', '+' || ? || ' seconds')
+         FROM users
+        WHERE id = ?
+          AND password_hash = ?
+          AND is_active = 1
+          AND is_deleted = 0`,
+    ).bind(sid, SESSION_SECONDS, user.id, user.password_hash),
+    c.env.DB.prepare(
+      `INSERT INTO audit_logs
+         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+       SELECT ?, 'login', 'user', ?, NULL, ? WHERE changes() = 1`,
+    ).bind(user.id, user.id, JSON.stringify({ username: user.username })),
+  ];
+  if (passwordCheck.upgradedHash) {
+    loginStatements.push(
+      c.env.DB.prepare(
+        `UPDATE users
+            SET password_hash = ?, updated_at = datetime('now')
+          WHERE id = ?
+            AND password_hash = ?
+            AND is_active = 1
+            AND is_deleted = 0`,
+      ).bind(passwordCheck.upgradedHash, user.id, user.password_hash),
+    );
+  }
+
+  const loginResult = await c.env.DB.batch(loginStatements);
+  if ((loginResult[0] as D1Result).meta.changes !== 1) {
+    return c.json(apiErr('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 올바르지 않습니다.'), 401);
+  }
 
   const [header, value] = authSetCookie(sid, new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
