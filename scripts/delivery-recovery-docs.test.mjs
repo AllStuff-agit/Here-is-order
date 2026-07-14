@@ -4,6 +4,13 @@ import test from 'node:test';
 
 const readme = fs.readFileSync('README.md', 'utf8');
 const guide = fs.readFileSync('docs/design/cloudflare-deploy-guide.md', 'utf8');
+const AUTHENTICATED_SMOKE_SEQUENCE =
+  'login → me → purchase-order read → logout → old-cookie 401';
+const AUTHENTICATED_SMOKE_STAGE =
+  `authenticated business smoke: \`${AUTHENTICATED_SMOKE_SEQUENCE}\``;
+const AUTHENTICATED_EVIDENCE_HEADING =
+  '#### Authenticated business smoke evidence';
+const ORPHAN_RECOVERY_HEADING = '#### Orphan session recovery';
 
 function section(contents, start, end) {
   const startIndex = contents.indexOf(start);
@@ -13,14 +20,48 @@ function section(contents, start, end) {
   return contents.slice(startIndex, endIndex);
 }
 
+function numberedListAfter(contents, leadIn) {
+  const leadInIndex = contents.indexOf(leadIn);
+  assert.ok(leadInIndex >= 0, `${leadIn} lead-in must exist`);
+  const lines = contents
+    .slice(leadInIndex + leadIn.length)
+    .trimStart()
+    .split(/\r?\n/);
+  const items = [];
+  for (const line of lines) {
+    const match = /^([1-9][0-9]*)\. (.+)$/.exec(line);
+    if (!match) {
+      if (items.length > 0) {
+        break;
+      }
+      continue;
+    }
+    items.push({ number: Number(match[1]), text: match[2] });
+  }
+  return items;
+}
+
 test('자동 배포 문서는 checkpoint가 production mutation보다 앞선 exact order를 고정한다', () => {
   const sections = [
-    section(readme, '## Cloudflare 자동 배포', '### 수동 복구 배포'),
-    section(
-      guide,
-      '## 4. GitHub Actions 자동 배포',
-      '## 5. 배포 후 확인',
-    ),
+    {
+      contents: section(
+        readme,
+        '## Cloudflare 자동 배포',
+        '### 수동 복구 배포',
+      ),
+      leadIn: 'Workflow는 다음 순서를 벗어나지 않습니다.',
+      label: 'README',
+    },
+    {
+      contents: section(
+        guide,
+        '## 4. GitHub Actions 자동 배포',
+        '## 5. 배포 후 확인',
+      ),
+      leadIn:
+        '위 품질 게이트는 `verify` job에서 실행됩니다. 검증이 성공한 `main` push는 별도 입력이나 승인 없이 아래 순서로 production에 반영됩니다. `workflow_dispatch`는 같은 workflow를 다시 실행하는 복구 경로입니다.',
+      label: 'deployment guide',
+    },
   ];
   const orderedStages = [
     'verify',
@@ -33,15 +74,32 @@ test('자동 배포 문서는 checkpoint가 production mutation보다 앞선 exa
     '웹 Worker build/deploy',
     '웹 active version 검증',
     '웹/API proxy smoke',
+    AUTHENTICATED_SMOKE_STAGE,
   ];
 
-  for (const contents of sections) {
-    let previous = -1;
-    for (const stage of orderedStages) {
-      const index = contents.indexOf(stage);
-      assert.ok(index > previous, `${stage}가 자동 배포 순서에 있어야 합니다.`);
-      previous = index;
+  for (const { contents, label, leadIn } of sections) {
+    const items = numberedListAfter(contents, leadIn);
+    assert.equal(
+      items.length,
+      orderedStages.length,
+      `${label}: automatic deployment list must contain exactly eleven stages`,
+    );
+    for (const [index, stage] of orderedStages.entries()) {
+      assert.equal(
+        items[index].number,
+        index + 1,
+        `${label}: automatic deployment stages must retain exact numbering`,
+      );
+      assert.ok(
+        items[index].text.includes(stage),
+        `${label}: stage ${index + 1} must include ${stage}`,
+      );
     }
+    assert.equal(
+      items.at(-1).text,
+      AUTHENTICATED_SMOKE_STAGE,
+      `${label}: authenticated business smoke must be the literal final stage`,
+    );
   }
 });
 
@@ -103,6 +161,10 @@ test('runbook은 API와 web의 status 및 version-specific rollback 명령을 �
 });
 
 test('phase table은 모든 마지막 성공 지점의 기본 복구 결정을 포함한다', () => {
+  const failureRunbook = markdownSection(
+    guide,
+    '### 5.2 Failure phase별 복구',
+  );
   const phases = [
     '`verified`',
     '`remote_contract_verified`',
@@ -114,13 +176,292 @@ test('phase table은 모든 마지막 성공 지점의 기본 복구 결정을 �
     '`web_deployed`',
     '`web_version_verified`',
     '`web_proxy_smoked`',
+    '`authenticated_business_smoked`',
   ];
   let previous = -1;
   for (const phase of phases) {
-    const index = guide.indexOf(`| ${phase} |`);
+    const index = failureRunbook.indexOf(`| ${phase} |`);
     assert.ok(index > previous, `${phase} phase row가 순서대로 필요합니다.`);
     previous = index;
   }
+});
+
+test('repository secret 문서는 initial provision readiness 순서와 workflow 최소 scope를 고정한다', () => {
+  const readmeAutomatic = section(
+    readme,
+    '## Cloudflare 자동 배포',
+    '### 수동 복구 배포',
+  );
+  const guideAutomatic = section(
+    guide,
+    '## 4. GitHub Actions 자동 배포',
+    '## 5. 배포 후 확인',
+  );
+  for (const [label, contents] of [
+    ['README automatic deployment', readmeAutomatic],
+    ['deployment guide automatic deployment', guideAutomatic],
+  ]) {
+    for (const required of [
+      'PRODUCTION_SMOKE_PASSWORD',
+      'authenticated-business-smoke-v1',
+      AUTHENTICATED_SMOKE_SEQUENCE,
+      'deploy workflow의 마지막 authenticated business smoke step',
+      'lifecycle workflow의 provision/rotate step',
+      'disable에는 전달하지',
+    ]) {
+      assert.ok(contents.includes(required), `${label}: ${required} is required`);
+    }
+  }
+
+  const secretRows = guideAutomatic.match(
+    /^\| Secret \| `PRODUCTION_SMOKE_PASSWORD` \| .* \|$/gm,
+  ) ?? [];
+  assert.equal(
+    secretRows.length,
+    1,
+    'deployment guide secret table needs exactly one production smoke password row',
+  );
+  assertOrderedMarkers(secretRows[0], 'production smoke secret readiness', [
+    ['base lifecycle deployment', 'base lifecycle deployment 성공'],
+    ['stdin-only installation', 'stdin-only'],
+    ['create-only provision evidence', 'create-only provision exact whitelist evidence'],
+    ['initial provision readiness', 'initial provision readiness'],
+    ['authenticated gate activation', 'authenticated gate activation'],
+    ['deploy step scope', 'deploy workflow의 마지막 authenticated business smoke step'],
+    ['lifecycle step scope', 'lifecycle workflow의 provision/rotate step'],
+  ]);
+});
+
+test('README 자동 배포 lead-in은 authenticated gate secret과 provision 증거를 모두 요구한다', () => {
+  const readmeAutomatic = section(
+    readme,
+    '## Cloudflare 자동 배포',
+    '### 수동 복구 배포',
+  );
+  const firstFence = readmeAutomatic.indexOf('```bash');
+  assert.ok(firstFence >= 0, 'README automatic deployment command fence is required');
+  const leadIn = readmeAutomatic.slice(0, firstFence);
+
+  assertOrderedMarkers(leadIn, 'README authenticated gate prerequisites', [
+    ['Cloudflare API token', '`CLOUDFLARE_API_TOKEN`'],
+    ['Cloudflare account ID', '`CLOUDFLARE_ACCOUNT_ID`'],
+    ['authenticated smoke password', '`PRODUCTION_SMOKE_PASSWORD`'],
+    ['create-only provision evidence', 'create-only provision exact whitelist evidence'],
+    ['completed evidence check', '확인 완료'],
+    ['main push', '`main` push'],
+    ['fully automatic deployment', '전체 배포가 자동 실행됩니다'],
+  ]);
+  assert.doesNotMatch(
+    leadIn,
+    /`CLOUDFLARE_API_TOKEN`과 `CLOUDFLARE_ACCOUNT_ID` repository secret을 한 번 등록한 뒤에는 `main` push만으로 배포됩니다/,
+    'two Cloudflare secrets alone must not imply authenticated gate readiness',
+  );
+});
+
+test('README secret scope는 authenticated seven-field와 lifecycle five-field evidence를 구분한다', () => {
+  const readmeAutomatic = section(
+    readme,
+    '## Cloudflare 자동 배포',
+    '### 수동 복구 배포',
+  );
+  const secretScope = section(
+    readmeAutomatic,
+    'Repository secret `PRODUCTION_SMOKE_PASSWORD`',
+    '\n\nrollback contract',
+  );
+  assertOrderedMarkers(secretScope, 'README evidence distinction', [
+    ['authenticated-only evidence', 'Authenticated smoke 성공 evidence에만'],
+    ['authenticated report version', 'authenticated-business-smoke-v1'],
+    ['authenticated report shape', 'seven-field whitelist'],
+    ['lifecycle evidence', 'Lifecycle operation 성공 evidence는'],
+    ['lifecycle report version', 'production-smoke-identity-operation-v1'],
+    ['lifecycle report shape', 'five-field whitelist'],
+    ['raw values', 'raw secret/password/cookie/token 값'],
+    [
+      'forbidden surfaces',
+      'document, log, error message, summary, artifact, evidence 또는 delivery record',
+    ],
+  ]);
+});
+
+test('permanent delivery docs use durable lifecycle and authenticated-gate terminology', () => {
+  for (const [label, contents] of [
+    ['README', readme],
+    ['deployment guide', guide],
+  ]) {
+    assert.doesNotMatch(
+      contents,
+      /\b\x53\x31\b|\b\x53\x32\b/,
+      `${label}: transitional wave labels are forbidden`,
+    );
+    for (const required of [
+      'base lifecycle deployment',
+      'initial provision readiness',
+      'authenticated gate activation',
+      'subsequent deployment',
+    ]) {
+      assert.ok(contents.includes(required), `${label}: durable term ${required} is required`);
+    }
+  }
+});
+
+test('authenticated smoke evidence는 bounded section의 exact seven-field whitelist만 허용한다', () => {
+  const evidence = markdownSection(guide, AUTHENTICATED_EVIDENCE_HEADING);
+  const evidenceRows = [...evidence.matchAll(
+    /^\| `([^`]+)` \| ([^|\n]+) \|$/gm,
+  )];
+  assert.deepEqual(
+    evidenceRows.map((match) => match[1]),
+    [
+      'smokeVersion',
+      'executedAt',
+      'gitSha',
+      'runId',
+      'runAttempt',
+      'target',
+      'outcome',
+    ],
+    'authenticated smoke evidence must expose exactly seven ordered fields',
+  );
+  for (const required of [
+    'authenticated-business-smoke-v1',
+    '`target` | `web`',
+    '`outcome` | `verified`',
+    'seven-field whitelist',
+    'five-field lifecycle evidence',
+    'Password',
+    'cookie/token',
+    'identity projection',
+    'query sentinel',
+    'response header/body',
+    'business row/count',
+    'raw URL/error/exception',
+    'Cloudflare envelope',
+    'log, error message, summary, artifact, evidence 또는 delivery record',
+  ]) {
+    assert.ok(evidence.includes(required), `authenticated evidence must include ${required}`);
+  }
+  assert.doesNotMatch(
+    evidence,
+    /`(?:operationVersion|databaseName|action)`|`completed`/,
+    'authenticated evidence must stay distinct from lifecycle evidence fields',
+  );
+
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  assert.doesNotMatch(
+    lifecycle,
+    /`smokeVersion`|authenticated-business-smoke-v1|`runId`|`runAttempt`|`target`/,
+    'lifecycle evidence must not absorb authenticated evidence fields',
+  );
+});
+
+test('post-deploy checklist와 orphan recovery는 final gate와 exact revoke/rotate 순서를 고정한다', () => {
+  const checklist = section(
+    guide,
+    '## 5. 배포 후 확인',
+    '### 5.1 Production checkpoint 증거',
+  );
+  for (const required of [
+    AUTHENTICATED_SMOKE_SEQUENCE,
+    'authenticated-business-smoke-v1',
+    'seven-field whitelist evidence',
+  ]) {
+    assert.ok(checklist.includes(required), `post-deploy checklist needs ${required}`);
+  }
+
+  const failureRunbook = markdownSection(
+    guide,
+    '### 5.2 Failure phase별 복구',
+  );
+  const recovery = markdownSection(failureRunbook, ORPHAN_RECOVERY_HEADING);
+  assertOrderedMarkers(recovery, 'orphan session recovery', [
+    ['runner termination risk', 'Runner termination'],
+    ['orphan session', 'orphan session'],
+    ['lifecycle disable', 'lifecycle runbook의 `disable`'],
+    ['disable evidence', 'disable exact whitelist evidence'],
+    ['stdin-only replacement secret', '새 secret을 stdin-only'],
+    ['rotate evidence', 'rotate exact whitelist evidence'],
+    ['fresh main dispatch', 'fresh main `workflow_dispatch`'],
+    ['fresh run success', 'fresh run이 성공'],
+    [
+      'exact authenticated report',
+      'exactly one `authenticated-business-smoke-v1` seven-field report',
+    ],
+    [
+      'fresh run metadata match',
+      'report의 `gitSha`, `runId`, `runAttempt`가 fresh run',
+    ],
+    ['exact fresh metadata values', 'exact Git SHA, run ID, run attempt'],
+  ]);
+  assert.ok(
+    recovery.includes(
+      '이전 실패 run의 GitHub `Re-run jobs`와 `gh run rerun`을 사용하지 않습니다.',
+    ),
+    'orphan recovery must forbid both GitHub rerun mechanisms for the failed run',
+  );
+  for (const prohibition of [
+    'provision을 호출하지 않',
+    'sessions row를 직접 조회하거나 출력하지 않',
+  ]) {
+    assert.ok(recovery.includes(prohibition), `orphan recovery needs ${prohibition}`);
+  }
+  assert.doesNotMatch(
+    recovery,
+    /re-dispatch/,
+    'orphan recovery must use precise GitHub rerun terminology',
+  );
+  const failedFreshRunIndex = recovery.indexOf('fresh run이 실패');
+  assert.ok(failedFreshRunIndex >= 0, 'failed fresh run recovery must exist');
+  const failedFreshRun = recovery.slice(failedFreshRunIndex);
+  assertOrderedMarkers(failedFreshRun, 'failed fresh run fail-closed recovery', [
+    ['unresolved orphan risk', 'orphan risk를 fail-closed로 미해결'],
+    ['repeat disable evidence', 'disable exact whitelist evidence'],
+    ['repeat stdin-only secret', '새 secret stdin-only 설치'],
+    ['repeat rotate evidence', 'rotate exact whitelist evidence'],
+    ['separate fresh run', '별도의 fresh main `workflow_dispatch`'],
+  ]);
+  assert.equal(
+    fencedBlocks(recovery).length,
+    0,
+    'orphan recovery must refer to the lifecycle runbook without duplicating commands',
+  );
+});
+
+test('general deployment recovery는 authenticated/orphan recovery precedence를 보존한다', () => {
+  const failureRunbook = markdownSection(
+    guide,
+    '### 5.2 Failure phase별 복구',
+  );
+  const generalRecovery = markdownSection(
+    failureRunbook,
+    '#### General deployment recovery',
+  );
+  assertOrderedMarkers(generalRecovery, 'general recovery precedence', [
+    ['authenticated smoke started', 'authenticated business smoke가 시작됐거나'],
+    ['orphan risk unresolved', 'orphan risk를 배제할 수 없으면'],
+    ['exclusive orphan recovery', '앞의 **Orphan session recovery**만 적용'],
+    [
+      'failed run reruns remain forbidden',
+      '이전 run의 GitHub `Re-run jobs`와 `gh run rerun`은 계속 금지',
+    ],
+    ['general phase recovery', '일반 phase-specific rerun/recovery는'],
+    [
+      'pre-authenticated-only failures',
+      'authenticated business smoke가 시작되기 전 실패에만 제한',
+    ],
+    ['actual state first', '실제 Cloudflare 상태'],
+    ['last successful phase', '마지막 성공 phase'],
+  ]);
+  assert.doesNotMatch(
+    generalRecovery,
+    /실패한 run을 재실행하기 전/,
+    'general recovery must not leave rerun guidance unqualified',
+  );
+  assert.equal(
+    fencedBlocks(generalRecovery).length,
+    0,
+    'general recovery precedence needs no duplicated command block',
+  );
 });
 
 test('D1 restore는 보존기간·현재 bookmark·별도 승인을 요구하고 자동화하지 않는다', () => {
@@ -504,7 +845,7 @@ function assertExecutableActionOrder(contents) {
 
 function assertProvisionOrder(contents) {
   assertOrderedMarkers(contents, 'provision lifecycle order', [
-    ['S1 merge deployment', 'S1 merge deployment가 성공'],
+    ['base lifecycle deployment', 'base lifecycle deployment가 성공'],
     ['initial secret assignment', SECRET_ASSIGNMENT],
     ['initial secret install', SECRET_INSTALL],
     [
@@ -517,8 +858,8 @@ function assertProvisionOrder(contents) {
       'test "$provision_report_count" -eq 1',
     ],
     ['five-field JSON declaration', 'exactly one five-field whitelist JSON evidence'],
-    ['S1 ready declaration', 'S1 ready'],
-    ['S2 allowed', 'S2를 시작'],
+    ['initial provision readiness', 'initial provision readiness'],
+    ['authenticated gate activation', 'authenticated gate activation'],
   ]);
 }
 
@@ -790,16 +1131,16 @@ test('delivery docs keep every fixed lifecycle token inside exact bounded sectio
   );
 });
 
-test('README lifecycle summary fixes provision and rotation handoff ordering', () => {
+test('README lifecycle summary fixes initial provision and rotation handoff ordering', () => {
   const lifecycle = markdownSection(readme, README_LIFECYCLE_HEADING);
   assertOrderedMarkers(lifecycle, 'README provision order', [
-    ['S1 merge/deploy', 'S1 merge/deploy 성공'],
+    ['base lifecycle deployment', 'base lifecycle deployment 성공'],
     ['secret installation', 'secret 설치'],
     ['provision dispatch', 'MANAGE hereisorder deployment-smoke provision'],
     ['provision success', 'provision run 성공'],
     ['provision evidence', 'provision exact whitelist evidence'],
-    ['S1 ready', 'S1 ready'],
-    ['S2 allowed', 'S2'],
+    ['initial provision readiness', 'initial provision readiness'],
+    ['authenticated gate activation', 'authenticated gate activation'],
   ]);
   assertOrderedMarkers(lifecycle, 'README rotation order', [
     ['disable dispatch', 'MANAGE hereisorder deployment-smoke disable'],

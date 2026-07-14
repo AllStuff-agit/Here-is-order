@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { parseDocument } from 'yaml';
 
 const workflow = await readFile(
   new URL('../.github/workflows/deploy-worker.yml', import.meta.url),
@@ -11,6 +12,20 @@ const CHECKOUT_ACTION =
   'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0';
 const SETUP_NODE_ACTION =
   'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e';
+const AUTHENTICATED_SMOKE_SECRET =
+  '${{ secrets.PRODUCTION_SMOKE_PASSWORD }}';
+const AUTHENTICATED_SMOKE_FORBIDDEN =
+  /cloudflare_|username|cookie|continue-on-error|always\(|failure\(|cancelled\(|\|\|\s*true|set\s+\+e|upload-artifact|download-artifact|artifact/i;
+const DEPLOY_WEB_JOB_HEADER = [
+  '  deploy-web:',
+  '    name: Deploy web Worker',
+  "    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+  '    needs:',
+  '      - verify',
+  '      - deploy-api',
+  '    runs-on: ubuntu-latest',
+  '    timeout-minutes: 20',
+].join('\n');
 
 function listItemBlocks(source) {
   const lines = source.split(/\r?\n/);
@@ -38,6 +53,198 @@ function jobBlocks(source) {
       matches[index + 1]?.index ?? jobs.length,
     ),
   }));
+}
+
+function assertPlainMapping(value, message) {
+  assert.ok(
+    value !== null
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && Object.getPrototypeOf(value) === Object.prototype,
+    message,
+  );
+  return value;
+}
+
+function parseWorkflow(source) {
+  const document = parseDocument(source, {
+    merge: false,
+    schema: 'core',
+    uniqueKeys: true,
+  });
+  assert.deepEqual(
+    document.errors,
+    [],
+    'deployment workflow YAML must be duplicate-key-free and parse without errors',
+  );
+  assert.deepEqual(
+    document.warnings,
+    [],
+    'deployment workflow YAML must parse without warnings',
+  );
+  return assertPlainMapping(
+    document.toJS({ maxAliasCount: 0 }),
+    'deployment workflow must use a plain top-level mapping',
+  );
+}
+
+function assertAuthenticatedDeployWebGate(source) {
+  const parsed = parseWorkflow(source);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(parsed, 'env')
+      || Object.prototype.hasOwnProperty.call(parsed, 'defaults'),
+    false,
+    'deployment workflow top-level env and defaults are forbidden',
+  );
+  const jobs = assertPlainMapping(parsed.jobs, 'deployment jobs must be a mapping');
+  const web = assertPlainMapping(
+    jobs['deploy-web'],
+    'deploy-web job must be a mapping',
+  );
+  assert.equal(
+    web.if,
+    "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+    'deploy-web must retain the exact main push and dispatch condition',
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(web, 'env'),
+    false,
+    'deploy-web must not define job-level env',
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(web, 'continue-on-error'),
+    false,
+    'deploy-web must not define job-level continue-on-error',
+  );
+  assert.deepEqual(
+    Object.keys(web),
+    ['name', 'if', 'needs', 'runs-on', 'timeout-minutes', 'steps'],
+    'deploy-web job must have the exact execution contract',
+  );
+  assert.deepEqual(
+    {
+      name: web.name,
+      if: web.if,
+      needs: web.needs,
+      'runs-on': web['runs-on'],
+      'timeout-minutes': web['timeout-minutes'],
+    },
+    {
+      name: 'Deploy web Worker',
+      if: "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+      needs: ['verify', 'deploy-api'],
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 20,
+    },
+    'deploy-web job must have the exact execution contract',
+  );
+  assert.ok(Array.isArray(web.steps), 'deploy-web steps must be a sequence');
+
+  const steps = web.steps;
+  assert.deepEqual(
+    steps.map((step) => step.name ?? step.uses),
+    [
+      CHECKOUT_ACTION,
+      SETUP_NODE_ACTION,
+      'Install deployment dependencies',
+      'Install dependencies',
+      'Build production web Worker',
+      'Deploy web Worker',
+      'Verify web active Worker version',
+      'Smoke test web deployment and API proxy',
+      'Smoke test authenticated business flow',
+    ],
+    'deploy-web steps must preserve the exact deployment and smoke order',
+  );
+
+  assert.deepEqual(
+    steps[1],
+    {
+      uses: SETUP_NODE_ACTION,
+      with: {
+        'node-version': '22.23.1',
+        cache: 'npm',
+        'cache-dependency-path': 'package-lock.json\nfrontend/package-lock.json\n',
+      },
+    },
+    'deploy-web setup-node must cache both root and frontend lockfiles',
+  );
+
+  const runCommands = steps
+    .filter((step) => Object.prototype.hasOwnProperty.call(step, 'run'))
+    .map((step) => step.run);
+  assert.deepEqual(
+    runCommands,
+    [
+      'npm ci',
+      'npm ci --prefix frontend',
+      'npm run build:cloudflare --prefix frontend',
+      'npm exec -- opennextjs-cloudflare deploy --message "$GITHUB_SHA" --strict',
+      'node scripts/verify-worker-deployment.mjs web',
+      'node scripts/smoke-deployment.mjs web "$DEPLOYMENT_URL"',
+      'node scripts/authenticated-business-smoke.mjs',
+    ],
+    'deploy-web commands must use the exact install, deploy, verify, and smoke order',
+  );
+  assert.equal(
+    runCommands.filter((command) => command === 'npm ci').length,
+    1,
+    'deploy-web must install root dependencies exactly once',
+  );
+  assert.equal(
+    runCommands.filter((command) => command === 'npm ci --prefix frontend').length,
+    1,
+    'deploy-web must install frontend dependencies exactly once',
+  );
+
+  assert.deepEqual(
+    steps[6],
+    {
+      name: 'Verify web active Worker version',
+      id: 'verify-web',
+      run: 'node scripts/verify-worker-deployment.mjs web',
+      env: {
+        CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}',
+        CLOUDFLARE_ACCOUNT_ID: '${{ secrets.CLOUDFLARE_ACCOUNT_ID }}',
+        WRANGLER_OUTPUT_FILE_PATH: '${{ runner.temp }}/hereisorder-web-deploy.ndjson',
+      },
+    },
+    'verify-web step must be exact',
+  );
+  assert.deepEqual(
+    steps[7],
+    {
+      name: 'Smoke test web deployment and API proxy',
+      env: {
+        DEPLOYMENT_URL: '${{ steps.verify-web.outputs.deployment-url }}',
+      },
+      run: 'node scripts/smoke-deployment.mjs web "$DEPLOYMENT_URL"',
+    },
+    'public web smoke step must be exact',
+  );
+  const authenticated = steps.at(-1);
+  assert.doesNotMatch(
+    JSON.stringify(authenticated),
+    AUTHENTICATED_SMOKE_FORBIDDEN,
+    'authenticated smoke must expose no credential, identity, cookie, artifact, or failure-bypass surface',
+  );
+  assert.deepEqual(
+    authenticated,
+    {
+      name: 'Smoke test authenticated business flow',
+      env: {
+        DEPLOYMENT_URL: '${{ steps.verify-web.outputs.deployment-url }}',
+        PRODUCTION_SMOKE_PASSWORD: AUTHENTICATED_SMOKE_SECRET,
+      },
+      run: 'node scripts/authenticated-business-smoke.mjs',
+    },
+    'authenticated smoke must be the exact required final step',
+  );
+  assert.equal(
+    source.split('secrets.PRODUCTION_SMOKE_PASSWORD').length - 1,
+    1,
+    'deployment workflow must reference the production smoke password exactly once',
+  );
 }
 
 test('every main push deploys without a path filter or approval gate', () => {
@@ -300,4 +507,147 @@ test('verify job runs web checks in CI order', () => {
     runCommands.filter((command) => expectedWebCommands.includes(command)),
     expectedWebCommands,
   );
+});
+
+test('deploy-web structurally requires locked installs and authenticated smoke as the final gate', () => {
+  assertAuthenticatedDeployWebGate(workflow);
+});
+
+const dangerousDeployWebMutations = [
+  {
+    name: 'replaces public proxy smoke execution with a no-op shell',
+    expected: /public web smoke step must be exact/,
+    mutate(source) {
+      return source.replace(
+        '      - name: Smoke test web deployment and API proxy\n        env:',
+        '      - name: Smoke test web deployment and API proxy\n        shell: bash -c \'exit 0\' -- {0}\n        env:',
+      );
+    },
+  },
+  {
+    name: 'replaces verifier execution with an output-forging shell',
+    expected: /verify-web step must be exact/,
+    mutate(source) {
+      return source.replace(
+        '        id: verify-web\n        run: node scripts/verify-worker-deployment.mjs web',
+        '        id: verify-web\n        shell: bash -c \'echo "deployment-url=https://hereisorder-web.attacker.workers.dev" >> "$GITHUB_OUTPUT"\' -- {0}\n        run: node scripts/verify-worker-deployment.mjs web',
+      );
+    },
+  },
+  {
+    name: 'adds a deploy-web default shell that bypasses failures',
+    expected: /deploy-web job must have the exact execution contract/,
+    mutate(source) {
+      return source.replace(
+        `${DEPLOY_WEB_JOB_HEADER}\n    steps:`,
+        `${DEPLOY_WEB_JOB_HEADER}\n    defaults:\n      run:\n        shell: >-\n          bash -c 'source "$1" || true' -- {0}\n    steps:`,
+      );
+    },
+  },
+  {
+    name: 'adds quoted top-level Cloudflare credential environment',
+    expected: /deployment workflow top-level env and defaults are forbidden/,
+    mutate(source) {
+      return source.replace(
+        'permissions:\n  contents: read\n\nconcurrency:',
+        'permissions:\n  contents: read\n\n"env":\n  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n\nconcurrency:',
+      );
+    },
+  },
+  {
+    name: 'adds deploy-web container environment inheritance',
+    expected: /deploy-web job must have the exact execution contract/,
+    mutate(source) {
+      return source.replace(
+        `${DEPLOY_WEB_JOB_HEADER}\n    steps:`,
+        `${DEPLOY_WEB_JOB_HEADER}\n    container:\n      image: node:22\n      env:\n        CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}\n    steps:`,
+      );
+    },
+  },
+  {
+    name: 'adds a strategy matrix that duplicates deployment',
+    expected: /deploy-web job must have the exact execution contract/,
+    mutate(source) {
+      return source.replace(
+        `${DEPLOY_WEB_JOB_HEADER}\n    steps:`,
+        `${DEPLOY_WEB_JOB_HEADER}\n    strategy:\n      matrix:\n        replica: [one, two]\n    steps:`,
+      );
+    },
+  },
+  {
+    name: 'adds quoted top-level failure-bypassing defaults',
+    expected: /deployment workflow top-level env and defaults are forbidden/,
+    mutate(source) {
+      return source.replace(
+        'permissions:\n  contents: read\n\nconcurrency:',
+        `permissions:\n  contents: read\n\n"defaults":\n  run:\n    shell: >-\n      bash -c 'source "$1" || true' -- {0}\n\nconcurrency:`,
+      );
+    },
+  },
+  {
+    name: 'replaces the deploy-web main-only condition with quoted false',
+    expected: /deploy-web must retain the exact main push and dispatch condition/,
+    mutate(source) {
+      return source.replace(
+        "  deploy-web:\n    name: Deploy web Worker\n    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+        '  deploy-web:\n    name: Deploy web Worker\n    "if": false',
+      );
+    },
+  },
+  {
+    name: 'adds a quoted false condition to authenticated smoke',
+    expected: /authenticated smoke must be the exact required final step/,
+    mutate(source) {
+      return source.replace(
+        '      - name: Smoke test authenticated business flow\n        env:',
+        '      - name: Smoke test authenticated business flow\n        "if": false\n        env:',
+      );
+    },
+  },
+  {
+    name: 'adds a quoted job-level environment',
+    expected: /deploy-web must not define job-level env/,
+    mutate(source) {
+      return source.replace(
+        '  deploy-web:\n    name: Deploy web Worker\n',
+        '  deploy-web:\n    name: Deploy web Worker\n    "env":\n      LEAK: enabled\n',
+      );
+    },
+  },
+  {
+    name: 'adds job-level continue-on-error',
+    expected: /deploy-web must not define job-level continue-on-error/,
+    mutate(source) {
+      return source.replace(
+        '  deploy-web:\n    name: Deploy web Worker\n',
+        '  deploy-web:\n    name: Deploy web Worker\n    "continue-on-error": true\n',
+      );
+    },
+  },
+  {
+    name: 'adds mixed-case Cloudflare credentials to authenticated smoke',
+    expected: /authenticated smoke must expose no credential, identity, cookie, artifact, or failure-bypass surface/,
+    mutate(source) {
+      return source.replace(
+        '          PRODUCTION_SMOKE_PASSWORD: ${{ secrets.PRODUCTION_SMOKE_PASSWORD }}\n',
+        '          PRODUCTION_SMOKE_PASSWORD: ${{ secrets.PRODUCTION_SMOKE_PASSWORD }}\n          ClOuDfLaRe_ApI_ToKeN: forbidden\n',
+      );
+    },
+  },
+];
+
+test('semantic deploy-web gate rejects dangerous YAML mutations', async (t) => {
+  for (const { name, expected, mutate } of dangerousDeployWebMutations) {
+    await t.test(name, () => {
+      const mutated = mutate(workflow);
+      assert.notEqual(mutated, workflow, 'mutation fixture must change the workflow');
+      const document = parseDocument(mutated, {
+        merge: false,
+        schema: 'core',
+        uniqueKeys: true,
+      });
+      assert.deepEqual(document.errors, [], 'mutation fixture must be valid YAML');
+      assert.throws(() => assertAuthenticatedDeployWebGate(mutated), expected);
+    });
+  }
 });

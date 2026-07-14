@@ -122,7 +122,7 @@ npm run db:recover-password -- --remote --username admin
 
 ## Cloudflare 자동 배포
 
-GitHub Actions에 `CLOUDFLARE_API_TOKEN`과 `CLOUDFLARE_ACCOUNT_ID` repository secret을 한 번 등록한 뒤에는 `main` push만으로 배포됩니다.
+Authenticated gate 자동 배포에는 GitHub Actions의 세 repository secret인 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `PRODUCTION_SMOKE_PASSWORD`와 create-only provision exact whitelist evidence 확인 완료로 성립한 initial provision readiness가 모두 필요합니다. 이 선행 조건이 갖춰진 뒤에는 `main` push만으로 verify부터 authenticated business smoke까지 전체 배포가 자동 실행됩니다.
 
 ```bash
 git push origin main
@@ -140,6 +140,9 @@ Workflow는 다음 순서를 벗어나지 않습니다.
 8. 검증된 API URL을 주입한 웹 Worker build/deploy
 9. 웹 active version 검증
 10. 웹/API proxy smoke
+11. authenticated business smoke: `login → me → purchase-order read → logout → old-cookie 401`
+
+Repository secret `PRODUCTION_SMOKE_PASSWORD`는 base lifecycle deployment 성공 뒤 stdin-only로 설치해 lifecycle workflow의 create-only provision step에 먼저 전달합니다. create-only provision exact whitelist evidence로 initial provision readiness가 성립한 뒤에만 authenticated gate activation과 subsequent deployment가 이 secret을 사용합니다. 이후에도 deploy workflow의 마지막 authenticated business smoke step과 lifecycle workflow의 provision/rotate step에만 전달하며 disable에는 전달하지 않습니다. Authenticated smoke 성공 evidence에만 `authenticated-business-smoke-v1` seven-field whitelist를 사용합니다. Lifecycle operation 성공 evidence는 `production-smoke-identity-operation-v1` five-field whitelist로 유지합니다. raw secret/password/cookie/token 값은 document, log, error message, summary, artifact, evidence 또는 delivery record에 남기지 않습니다.
 
 rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 rollback을 확인하고 데이터베이스를 삭제합니다. production recovery checkpoint는 현재 D1 Time Travel bookmark, migration 적용 이력, 기존 API/web Worker version을 읽어 GitHub job summary에 남깁니다. 두 gate가 모두 성공해야 production D1 migration이 시작됩니다. 각 Worker는 lockfile의 exact Wrangler로 배포하고, machine deploy evidence의 version ID와 Cloudflare의 단일 100% active version 및 exact Git SHA message가 일치해야 smoke를 시작합니다. API readiness는 실제 D1 required schema를 compile-only read로 확인합니다. 따라서 배포 token에는 Workers 배포와 migration 권한뿐 아니라 D1 생성·삭제 권한과 D1/Worker 상태 조회 권한도 필요합니다. 별도 `PRODUCTION_API_PROXY_URL` 변수나 GitHub Environment 승인은 필요하지 않습니다.
 
@@ -149,9 +152,9 @@ rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 r
 
 Authenticated business smoke는 fixed `deployment-smoke` staff identity를 사용합니다. Identity lifecycle은 main의 `Manage production smoke identity` 수동 workflow만 사용하며 D1 콘솔이나 임의 SQL로 변경하지 않습니다. Repository secret `PRODUCTION_SMOKE_PASSWORD`에는 stdout·argv·파일을 거치지 않고 생성한 48-byte random credential을 저장합니다.
 
-최초 설정은 S1 merge/deploy 성공 → secret 설치 → `manage-smoke-identity.yml`의 `provision`과 `MANAGE hereisorder deployment-smoke provision` dispatch → provision run 성공 → provision exact whitelist evidence 확인 → S1 ready 기록 후 S2 허용 순서입니다.
+최초 설정은 base lifecycle deployment 성공 → secret 설치 → `manage-smoke-identity.yml`의 `provision`과 `MANAGE hereisorder deployment-smoke provision` dispatch → provision run 성공 → provision exact whitelist evidence 확인 → initial provision readiness 기록 후 authenticated gate activation 허용 순서입니다.
 
-Rotation은 `disable`/`MANAGE hereisorder deployment-smoke disable` dispatch → disable run 성공 → disable exact whitelist evidence로 모든 세션을 폐기했음을 확인 → 새 secret 설치 → `rotate`/`MANAGE hereisorder deployment-smoke rotate` dispatch → rotate run 성공 → rotate exact whitelist evidence 확인 순서입니다. Disable run과 evidence가 모두 성공하기 전에는 secret을 교체하지 않습니다. Password, hash, user/session row, raw production response는 evidence가 아닙니다. Lifecycle run이 실패하거나 whitelist evidence가 없거나 malformed이면 authenticated smoke gate 병합과 S2 진행을 중단합니다.
+Rotation은 `disable`/`MANAGE hereisorder deployment-smoke disable` dispatch → disable run 성공 → disable exact whitelist evidence로 모든 세션을 폐기했음을 확인 → 새 secret 설치 → `rotate`/`MANAGE hereisorder deployment-smoke rotate` dispatch → rotate run 성공 → rotate exact whitelist evidence 확인 순서입니다. Disable run과 evidence가 모두 성공하기 전에는 secret을 교체하지 않습니다. Password, hash, user/session row, raw production response는 evidence가 아닙니다. Lifecycle run이 실패하거나 whitelist evidence가 없거나 malformed이면 authenticated gate activation과 subsequent deployment를 중단합니다.
 
 ### 수동 복구 배포
 
