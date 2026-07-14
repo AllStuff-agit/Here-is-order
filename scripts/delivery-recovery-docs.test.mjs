@@ -145,3 +145,25 @@ test('D1 restore는 보존기간·현재 bookmark·별도 승인을 요구하고
   assert.doesNotMatch(guide, /CLOUDFLARE_API_TOKEN\s*=\s*['"][^<$\n]+/);
   assert.doesNotMatch(guide, /(?:api[_ -]?token|account[_ -]?id)\s*[:=]\s*[0-9a-z_-]{20,}/i);
 });
+
+test('delivery docs define the fixed smoke identity lifecycle without direct D1 edits', () => {
+  for (const file of ['README.md', 'docs/design/cloudflare-deploy-guide.md']) {
+    const contents = fs.readFileSync(file, 'utf8');
+    for (const required of [
+      'deployment-smoke',
+      'PRODUCTION_SMOKE_PASSWORD',
+      'manage-smoke-identity.yml',
+      'MANAGE hereisorder deployment-smoke provision',
+      'MANAGE hereisorder deployment-smoke disable',
+      'MANAGE hereisorder deployment-smoke rotate',
+      '모든 세션',
+    ]) {
+      assert.ok(contents.includes(required), `${file} must include ${required}`);
+    }
+    const sectionStart = contents.indexOf('운영 smoke identity');
+    assert.ok(sectionStart >= 0, `${file} must contain the lifecycle section`);
+    const section = contents.slice(sectionStart, sectionStart + 5000);
+    assert.ok(section.indexOf('disable') < section.indexOf('rotate'));
+    assert.doesNotMatch(section, /UPDATE users|DELETE FROM sessions|wrangler d1 execute/);
+  }
+});
