@@ -149,7 +149,9 @@ rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 r
 
 Authenticated business smoke는 fixed `deployment-smoke` staff identity를 사용합니다. Identity lifecycle은 main의 `Manage production smoke identity` 수동 workflow만 사용하며 D1 콘솔이나 임의 SQL로 변경하지 않습니다. Repository secret `PRODUCTION_SMOKE_PASSWORD`에는 stdout·argv·파일을 거치지 않고 생성한 48-byte random credential을 저장합니다.
 
-최초 설정은 S1 merge/deploy 성공 → secret 설치 → `manage-smoke-identity.yml`의 `provision`과 `MANAGE hereisorder deployment-smoke provision` 확인 → postflight evidence 확인 순서입니다. Rotation은 `disable`/`MANAGE hereisorder deployment-smoke disable`로 모든 세션을 폐기한 뒤 새 secret을 설치하고 `rotate`/`MANAGE hereisorder deployment-smoke rotate`로 재활성화합니다. Lifecycle run이 실패하면 authenticated smoke gate를 병합하지 않습니다.
+최초 설정은 S1 merge/deploy 성공 → secret 설치 → `manage-smoke-identity.yml`의 `provision`과 `MANAGE hereisorder deployment-smoke provision` dispatch → provision run 성공 → provision exact whitelist evidence 확인 → S1 ready 기록 후 S2 허용 순서입니다.
+
+Rotation은 `disable`/`MANAGE hereisorder deployment-smoke disable` dispatch → disable run 성공 → disable exact whitelist evidence로 모든 세션을 폐기했음을 확인 → 새 secret 설치 → `rotate`/`MANAGE hereisorder deployment-smoke rotate` dispatch → rotate run 성공 → rotate exact whitelist evidence 확인 순서입니다. Disable run과 evidence가 모두 성공하기 전에는 secret을 교체하지 않습니다. Password, hash, user/session row, raw production response는 evidence가 아닙니다. Lifecycle run이 실패하거나 whitelist evidence가 없거나 malformed이면 authenticated smoke gate 병합과 S2 진행을 중단합니다.
 
 ### 수동 복구 배포
 
