@@ -154,6 +154,14 @@ const SECRET_ASSIGNMENT =
   'smoke_password="$(openssl rand -base64 48 | tr \'+/\' \'-_\' | tr -d \'=\\n\')"';
 const SECRET_INSTALL =
   'printf \'%s\' "$smoke_password" | gh secret set PRODUCTION_SMOKE_PASSWORD --repo AllStuff-agit/Here-is-order';
+const LIFECYCLE_ACTIONS = ['provision', 'disable', 'rotate'];
+const WORKFLOW_DISPATCH = 'gh workflow run manage-smoke-identity.yml';
+const OPERATION_COMMAND_PATTERN =
+  /\bgh\s+workflow\s+run\s+manage-smoke-identity\.yml\b|\bgh\s+run\s+(?:watch|view)\b|(?:^|\s)-f\s+(?:action|confirmation)=|(?:provision|disable|rotate)_(?:run_(?:url|id)|report_(?:matches|count))=/im;
+const DIRECT_DATABASE_COMMAND_PATTERN =
+  /\bwrangler\s+d1\b|\b(?:curl|wget|sqlite3)\b/i;
+const SQL_STATEMENT_PATTERN =
+  /\b(?:insert\s+into|update\s+(?:"[^"\n]+"|`[^`\n]+`|\[[^\]\n]+\]|(?:(?:main|temp)\.)?[a-z_][a-z0-9_]*)|delete\s+from|merge\s+into|replace\s+into|upsert\s+into|create\s+(?:table|index|view|trigger)|alter\s+table|drop\s+(?:table|index|view|trigger)|truncate\s+(?:table\s+)?[a-z_][a-z0-9_]*|pragma\s+[a-z_][a-z0-9_]*|attach\s+database|detach\s+database|with\s+[a-z_][a-z0-9_]*\s+as\s*\(|select\b[^\n;]{0,500}\bfrom\b|vacuum(?:\s+[a-z_][a-z0-9_]*)?\s*;|reindex(?:\s+[a-z_][a-z0-9_]*)?\s*;|begin(?:\s+(?:transaction|immediate|exclusive|deferred))?\s*;|commit\s*;|rollback\s*;)/i;
 
 const LIFECYCLE_TOKENS = [
   ['fixed identity', 'deployment-smoke'],
@@ -192,13 +200,93 @@ function markdownSection(contents, exactHeading) {
   return contents.slice(headingMatch.index, end);
 }
 
+function markdownLines(contents) {
+  return [...contents.matchAll(/[^\n]*(?:\n|$)/g)]
+    .filter((match) => match[0].length > 0)
+    .map((match) => {
+      const text = match[0].endsWith('\n') ? match[0].slice(0, -1) : match[0];
+      return {
+        start: match.index,
+        end: match.index + match[0].length,
+        contentEnd: match.index + text.length,
+        text,
+      };
+    });
+}
+
+function fencedBlocks(contents) {
+  const lines = markdownLines(contents);
+  const blocks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const opening = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)\r?$/.exec(lines[index].text);
+    if (!opening) {
+      continue;
+    }
+
+    const fenceCharacter = opening[1][0];
+    const closingPattern = new RegExp(
+      `^ {0,3}${escapeRegExp(fenceCharacter)}{${opening[1].length},}[ \\t]*\\r?$`,
+    );
+    let closingIndex = -1;
+    for (let candidate = index + 1; candidate < lines.length; candidate += 1) {
+      if (closingPattern.test(lines[candidate].text)) {
+        closingIndex = candidate;
+        break;
+      }
+    }
+    assert.ok(
+      closingIndex >= 0,
+      `Markdown fence parser: fence at offset ${lines[index].start} must close`,
+    );
+
+    blocks.push({
+      body: contents.slice(lines[index].end, lines[closingIndex].start),
+      end: lines[closingIndex].end,
+      fenceCharacter,
+      full: contents.slice(lines[index].start, lines[closingIndex].contentEnd),
+      info: opening[2].trim(),
+      start: lines[index].start,
+    });
+    index = closingIndex;
+  }
+  return blocks;
+}
+
 function fencedBashBlocks(contents) {
-  return [...contents.matchAll(/^```bash[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm)].map(
-    (match) => ({
-      body: match[1],
-      full: match[0],
-    }),
+  return fencedBlocks(contents).filter(({ info }) => info === 'bash');
+}
+
+function nonFenceSegments(contents, blocks = fencedBlocks(contents)) {
+  const segments = [];
+  let cursor = 0;
+  for (const block of blocks) {
+    segments.push(contents.slice(cursor, block.start));
+    cursor = block.end;
+  }
+  segments.push(contents.slice(cursor));
+  return segments;
+}
+
+function countOccurrences(contents, marker) {
+  assert.notEqual(marker, '', 'occurrence marker must not be empty');
+  let count = 0;
+  let offset = 0;
+  while (true) {
+    const index = contents.indexOf(marker, offset);
+    if (index < 0) {
+      return count;
+    }
+    count += 1;
+    offset = index + marker.length;
+  }
+}
+
+function workflowInputValues(contents, name) {
+  const pattern = new RegExp(
+    `(?:^|\\s)-f[ \\t]+${escapeRegExp(name)}=([^\\s\\\\]+)`,
+    'g',
   );
+  return [...contents.matchAll(pattern)].map((match) => match[1]);
 }
 
 function assertLifecycleTokens(contents, label) {
@@ -287,8 +375,27 @@ function assertOperationEvidence(contents, action) {
     ],
   ];
 
+  assert.equal(
+    countOccurrences(contents, WORKFLOW_DISPATCH),
+    1,
+    `${action} operation uniqueness: one workflow dispatch is required`,
+  );
+  assert.equal(
+    workflowInputValues(contents, 'action').length,
+    1,
+    `${action} operation uniqueness: one action flag is required`,
+  );
+  assert.equal(
+    workflowInputValues(contents, 'confirmation').length,
+    1,
+    `${action} operation uniqueness: one confirmation is required`,
+  );
   for (const [name, marker] of required) {
-    assert.ok(contents.includes(marker), `${action} operation: ${name} is required`);
+    assert.equal(
+      countOccurrences(contents, marker),
+      1,
+      `${action} operation uniqueness: ${name} must appear exactly once`,
+    );
   }
   assertOrderedMarkers(contents, `${action} operation`, required);
 }
@@ -408,17 +515,26 @@ function assertCredentialSafety(contents) {
 }
 
 function assertNoDirectDatabaseMutation(contents, label) {
-  const bash = fencedBashBlocks(contents).map(({ body }) => body).join('\n');
-  assert.doesNotMatch(
-    bash,
-    /\bwrangler\s+d1\b|\b(?:curl|wget|sqlite3)\b/i,
-    `${label}: direct Wrangler D1 commands are forbidden`,
-  );
-  assert.doesNotMatch(
-    bash,
-    /\b(?:select|with|insert|update|delete|merge|replace|upsert|create|alter|drop|truncate|grant|revoke|pragma|vacuum|reindex|attach|detach|begin|commit|rollback)\b/i,
-    `${label}: SQL DML/DDL is forbidden`,
-  );
+  const blocks = fencedBlocks(contents);
+  const scanTargets = [
+    ...blocks.map(({ body }, index) => [`fence ${index + 1}`, body]),
+    ...nonFenceSegments(contents, blocks).map((body, index) => [
+      `inline section ${index + 1}`,
+      body,
+    ]),
+  ];
+  for (const [target, body] of scanTargets) {
+    assert.doesNotMatch(
+      body,
+      DIRECT_DATABASE_COMMAND_PATTERN,
+      `${label}: direct Wrangler D1 commands are forbidden in ${target}`,
+    );
+    assert.doesNotMatch(
+      body,
+      SQL_STATEMENT_PATTERN,
+      `${label}: SQL DML/DDL is forbidden in ${target}`,
+    );
+  }
 }
 
 function assertEvidenceSafety(contents, label) {
@@ -447,6 +563,102 @@ function assertNoRawLogExposure(contents) {
     allowedLines.toSorted(),
     'log safety: only three exact whitelist rg -o extractions may consume logs',
   );
+}
+
+function classifyLifecycleBlock(block, index) {
+  const credential =
+    /PRODUCTION_SMOKE_PASSWORD|smoke_password|openssl rand/.test(block.body);
+  const dispatchCount = countOccurrences(block.body, WORKFLOW_DISPATCH);
+  const actionFlags = workflowInputValues(block.body, 'action');
+
+  if (credential) {
+    assert.equal(
+      dispatchCount,
+      0,
+      `lifecycle block shape: credential block ${index + 1} must not dispatch`,
+    );
+    assert.doesNotMatch(
+      block.body,
+      OPERATION_COMMAND_PATTERN,
+      `lifecycle block shape: credential block ${index + 1} must contain no operation commands`,
+    );
+    return 'credential';
+  }
+
+  assert.equal(
+    dispatchCount,
+    1,
+    `lifecycle block shape: operation block ${index + 1} needs one dispatch`,
+  );
+  assert.equal(
+    actionFlags.length,
+    1,
+    `lifecycle block shape: operation block ${index + 1} needs one action flag`,
+  );
+  return actionFlags[0];
+}
+
+function assertLifecycleBlockStructure(contents) {
+  assert.equal(
+    countOccurrences(contents, WORKFLOW_DISPATCH),
+    3,
+    'lifecycle command uniqueness: exactly three workflow dispatches are required',
+  );
+  const blocks = fencedBlocks(contents);
+  assert.equal(
+    blocks.length,
+    5,
+    'lifecycle block shape: exactly five fenced blocks are required',
+  );
+  for (const [index, block] of blocks.entries()) {
+    assert.equal(
+      block.info,
+      'bash',
+      `lifecycle block shape: fence ${index + 1} must be tagged exactly bash`,
+    );
+  }
+
+  const kinds = blocks.map(classifyLifecycleBlock);
+  assert.deepEqual(
+    kinds,
+    ['credential', 'provision', 'disable', 'credential', 'rotate'],
+    'lifecycle block shape: ordered kinds must be credential/provision/disable/credential/rotate',
+  );
+  assert.equal(
+    kinds.filter((kind) => kind === 'credential').length,
+    2,
+    'lifecycle block shape: exactly two credential blocks are required',
+  );
+  for (const action of LIFECYCLE_ACTIONS) {
+    assert.equal(
+      kinds.filter((kind) => kind === action).length,
+      1,
+      `lifecycle block shape: exactly one ${action} block is required`,
+    );
+  }
+
+  for (const [index, segment] of nonFenceSegments(contents, blocks).entries()) {
+    assert.doesNotMatch(
+      segment,
+      OPERATION_COMMAND_PATTERN,
+      `lifecycle block shape: operation commands are forbidden outside fences at segment ${index + 1}`,
+    );
+  }
+
+  const operationBlocks = new Map();
+  for (const [index, kind] of kinds.entries()) {
+    if (kind !== 'credential') {
+      operationBlocks.set(kind, blocks[index]);
+      assertOperationEvidence(blocks[index].body, kind);
+    }
+  }
+
+  const provision = markdownSection(contents, PROVISION_HEADING);
+  const rotation = markdownSection(contents, ROTATION_HEADING);
+  assertCredentialSafety(contents);
+  assertProvisionOrder(provision);
+  assertRotationOrder(rotation);
+  return { blocks, kinds, operationBlocks };
 }
 
 test('delivery docs keep every fixed lifecycle token inside exact bounded sections', () => {
@@ -491,13 +703,7 @@ test('README lifecycle summary fixes provision and rotation handoff ordering', (
 
 test('deployment guide validates exact provision and rotation runs before progress', () => {
   const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
-  const provision = markdownSection(lifecycle, PROVISION_HEADING);
-  const rotation = markdownSection(lifecycle, ROTATION_HEADING);
-  assertOperationEvidence(provision, 'provision');
-  assertOperationEvidence(rotation, 'disable');
-  assertOperationEvidence(rotation, 'rotate');
-  assertProvisionOrder(provision);
-  assertRotationOrder(rotation);
+  assertLifecycleBlockStructure(lifecycle);
 });
 
 test('credential blocks disable tracing and install exact 48-byte URL-safe secrets only through stdin', () => {
@@ -556,10 +762,9 @@ test('rotation semantic check rejects swapped executable disable and rotate bloc
 });
 
 test('operation semantic checks reject missing watch and exact evidence', () => {
-  const provision = markdownSection(
-    markdownSection(guide, GUIDE_LIFECYCLE_HEADING),
-    PROVISION_HEADING,
-  );
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const { operationBlocks } = assertLifecycleBlockStructure(lifecycle);
+  const provision = operationBlocks.get('provision').body;
   assertOperationCompletionMarkers(provision, 'provision');
   const missingWatch = provision.replace(
     'gh run watch "$provision_run_id" --exit-status',
@@ -599,5 +804,161 @@ test('rotation semantic check rejects secret replacement before disable completi
   assert.throws(
     () => assertRotationOrder(mutated),
     /rotation lifecycle order: new secret assignment must follow disable exact whitelist evidence/,
+  );
+});
+
+test('database mutation invariant scans non-bash, untagged, uppercase, and tilde fences', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  for (const [name, fence] of [
+    ['sh-tagged lowercase DML', '```sh\nupdate users set active = 0;\n```'],
+    ['untagged lowercase DML', '```\nupdate users set active = 0;\n```'],
+    ['uppercase shell tag', '```BASH\nupdate users set active = 0;\n```'],
+    ['tilde shell fence', '~~~shell\nupdate users set active = 0;\n~~~'],
+  ]) {
+    await t.test(name, () => {
+      const mutated = lifecycle.replace(
+        PROVISION_HEADING,
+        `${PROVISION_HEADING}\n\n${fence}`,
+      );
+      assert.throws(
+        () => assertNoDirectDatabaseMutation(mutated, `${name} mutation`),
+        /SQL DML\/DDL is forbidden/,
+      );
+    });
+  }
+});
+
+test('database mutation invariant scans inline lifecycle commands case-insensitively', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  for (const [name, command, expected] of [
+    [
+      'mixed-case Wrangler D1',
+      'WrAnGlEr D1 execute hereisorder --remote',
+      /direct Wrangler D1 commands are forbidden/,
+    ],
+    [
+      'inline lowercase SQL',
+      'update users set active = 0;',
+      /SQL DML\/DDL is forbidden/,
+    ],
+  ]) {
+    await t.test(name, () => {
+      const mutated = lifecycle.replace(
+        PROVISION_HEADING,
+        `${PROVISION_HEADING}\n\n\`${command}\``,
+      );
+      assert.throws(
+        () => assertNoDirectDatabaseMutation(mutated, `${name} mutation`),
+        expected,
+      );
+    });
+  }
+});
+
+test('lifecycle block shape requires exact bash tags and accepts a tilde bash fence', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const [firstBlock] = fencedBlocks(lifecycle);
+  assert.ok(firstBlock, 'first lifecycle fence must exist before retagging');
+  for (const tag of ['sh', 'shell', 'BASH', '']) {
+    await t.test(`rejects ${tag || 'untagged'} fence`, () => {
+      const retagged = firstBlock.full.replace(/^```bash/m, `\`\`\`${tag}`);
+      const mutated = lifecycle.replace(firstBlock.full, retagged);
+      assert.throws(
+        () => assertLifecycleBlockStructure(mutated),
+        /must be tagged exactly bash/,
+      );
+    });
+  }
+
+  await t.test('accepts tilde fence tagged bash', () => {
+    const tildeBlock = firstBlock.full
+      .replace(/^```bash$/m, '~~~bash')
+      .replace(/^```$/m, '~~~');
+    const mutated = lifecycle.replace(firstBlock.full, tildeBlock);
+    assert.doesNotThrow(() => assertLifecycleBlockStructure(mutated));
+  });
+});
+
+test('lifecycle block shape rejects operation commands outside classified blocks', () => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const command = 'gh run watch "$provision_run_id" --exit-status';
+  const mutated = lifecycle.replace(
+    PROVISION_HEADING,
+    `${PROVISION_HEADING}\n\n\`${command}\``,
+  );
+  assert.throws(
+    () => assertLifecycleBlockStructure(mutated),
+    /operation commands are forbidden outside fences/,
+  );
+});
+
+test('lifecycle block shape rejects an early duplicate rotate dispatch', () => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const rotation = markdownSection(lifecycle, ROTATION_HEADING);
+  const blocks = fencedBashBlocks(rotation);
+  const disableBlock = blocks.find(({ body }) => body.includes('-f action=disable'));
+  const rotateBlock = blocks.find(({ body }) => body.includes('-f action=rotate'));
+  assert.ok(disableBlock, 'disable executable block must exist before duplication');
+  assert.ok(rotateBlock, 'rotate executable block must exist before duplication');
+  const mutated = lifecycle.replace(
+    disableBlock.full,
+    `${rotateBlock.full}\n\n${disableBlock.full}`,
+  );
+  assert.throws(
+    () => assertLifecycleBlockStructure(mutated),
+    /lifecycle command uniqueness: exactly three workflow dispatches are required/,
+  );
+});
+
+test('operation uniqueness rejects a duplicated provision watch', () => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const watch = 'gh run watch "$provision_run_id" --exit-status';
+  const mutated = lifecycle.replace(watch, `${watch}\n${watch}`);
+  assert.throws(
+    () => assertLifecycleBlockStructure(mutated),
+    /provision operation uniqueness: provision watch must appear exactly once/,
+  );
+});
+
+test('operation uniqueness rejects extra action and confirmation flags', async (t) => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  for (const [name, extraFlag, expected] of [
+    [
+      'action',
+      '-f action=unexpected \\',
+      /one action flag/,
+    ],
+    [
+      'confirmation',
+      "-f confirmation='unexpected')",
+      /provision operation uniqueness: one confirmation is required/,
+    ],
+  ]) {
+    await t.test(name, () => {
+      const mutated = lifecycle.replace(
+        '-f action=provision \\',
+        `-f action=provision \\\n${extraFlag}`,
+      );
+      assert.throws(() => assertLifecycleBlockStructure(mutated), expected);
+    });
+  }
+});
+
+test('lifecycle block shape rejects operation markers split across fences', () => {
+  const lifecycle = markdownSection(guide, GUIDE_LIFECYCLE_HEADING);
+  const provisionBlock = fencedBashBlocks(lifecycle).find(({ body }) =>
+    body.includes('-f action=provision'),
+  );
+  assert.ok(provisionBlock, 'provision executable block must exist before splitting');
+  const watch = 'gh run watch "$provision_run_id" --exit-status';
+  const splitIndex = provisionBlock.body.indexOf(watch);
+  assert.ok(splitIndex > 0, 'provision watch must exist before splitting');
+  const beforeWatch = provisionBlock.body.slice(0, splitIndex).trimEnd();
+  const fromWatch = provisionBlock.body.slice(splitIndex).trimEnd();
+  const splitBlocks = `\`\`\`bash\n${beforeWatch}\n\`\`\`\n\n\`\`\`bash\n${fromWatch}\n\`\`\``;
+  const mutated = lifecycle.replace(provisionBlock.full, splitBlocks);
+  assert.throws(
+    () => assertLifecycleBlockStructure(mutated),
+    /lifecycle block shape: exactly five fenced blocks are required/,
   );
 });
