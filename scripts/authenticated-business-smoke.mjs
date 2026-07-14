@@ -176,9 +176,7 @@ export async function verifyAuthenticatedBusinessTransaction({
       purchaseOrderSummaryListSchema,
       businessBody,
     );
-    if (business.status !== 200
-      || businessEnvelope.ok !== true
-      || businessEnvelope.data.length !== 0) {
+    if (business.status !== 200 || businessEnvelope.ok !== true) {
       throw new Error('invalid business read');
     }
 

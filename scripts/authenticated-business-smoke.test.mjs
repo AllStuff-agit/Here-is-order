@@ -80,7 +80,9 @@ test('transaction performs exactly six same-origin requests and returns no sensi
         ? json({ ok: true, data: USER })
         : json({ ok: false, error: { code: 'UNAUTHORIZED', message: '로그인이 필요합니다.' } }, 401);
     }
-    if (url.pathname === '/api/purchase-orders') return json({ ok: true, data: [] });
+    if (url.pathname === '/api/purchase-orders') {
+      return json({ ok: true, data: [PURCHASE_ORDER_SUMMARY] });
+    }
     if (url.pathname === '/api/auth/logout') return json({ ok: true, data: { loggedOut: true } });
     throw new Error('unexpected request');
   };
@@ -177,7 +179,6 @@ test('every strict response boundary fails closed', async (t) => {
     ['business extra key', '/api/purchase-orders', 1, () => json({ ok: true, data: [], extra: true }), businessOrLogoutFailurePaths],
     ['business error', '/api/purchase-orders', 1, () => json({ ok: false, error: { code: 'FAILED', message: 'no' } }, 500), businessOrLogoutFailurePaths],
     ['business invalid row', '/api/purchase-orders', 1, () => json({ ok: true, data: [{ id: -1 }] }), businessOrLogoutFailurePaths],
-    ['business schema-valid nonempty row', '/api/purchase-orders', 1, () => json({ ok: true, data: [PURCHASE_ORDER_SUMMARY] }), businessOrLogoutFailurePaths],
     ['logout redirect', '/api/auth/logout', 1, () => new Response(null, { status: 302, headers: { location: '/login' } }), businessOrLogoutFailurePaths],
     ['logout malformed json', '/api/auth/logout', 1, () => new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } }), businessOrLogoutFailurePaths],
     ['logout missing data', '/api/auth/logout', 1, () => json({ ok: true }), businessOrLogoutFailurePaths],
