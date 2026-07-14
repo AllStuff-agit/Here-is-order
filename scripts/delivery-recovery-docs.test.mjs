@@ -427,6 +427,43 @@ test('post-deploy checklist와 orphan recovery는 final gate와 exact revoke/rot
   );
 });
 
+test('general deployment recovery는 authenticated/orphan recovery precedence를 보존한다', () => {
+  const failureRunbook = markdownSection(
+    guide,
+    '### 5.2 Failure phase별 복구',
+  );
+  const generalRecovery = markdownSection(
+    failureRunbook,
+    '#### General deployment recovery',
+  );
+  assertOrderedMarkers(generalRecovery, 'general recovery precedence', [
+    ['authenticated smoke started', 'authenticated business smoke가 시작됐거나'],
+    ['orphan risk unresolved', 'orphan risk를 배제할 수 없으면'],
+    ['exclusive orphan recovery', '앞의 **Orphan session recovery**만 적용'],
+    [
+      'failed run reruns remain forbidden',
+      '이전 run의 GitHub `Re-run jobs`와 `gh run rerun`은 계속 금지',
+    ],
+    ['general phase recovery', '일반 phase-specific rerun/recovery는'],
+    [
+      'pre-authenticated-only failures',
+      'authenticated business smoke가 시작되기 전 실패에만 제한',
+    ],
+    ['actual state first', '실제 Cloudflare 상태'],
+    ['last successful phase', '마지막 성공 phase'],
+  ]);
+  assert.doesNotMatch(
+    generalRecovery,
+    /실패한 run을 재실행하기 전/,
+    'general recovery must not leave rerun guidance unqualified',
+  );
+  assert.equal(
+    fencedBlocks(generalRecovery).length,
+    0,
+    'general recovery precedence needs no duplicated command block',
+  );
+});
+
 test('D1 restore는 보존기간·현재 bookmark·별도 승인을 요구하고 자동화하지 않는다', () => {
   assert.match(guide, /Free[^\n]*7일/);
   assert.match(guide, /Paid[^\n]*30일/);
