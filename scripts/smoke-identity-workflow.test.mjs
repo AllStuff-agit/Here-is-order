@@ -11,7 +11,7 @@ const DEPLOY_WORKFLOW_URL = new URL(
   '../.github/workflows/deploy-worker.yml',
   import.meta.url,
 );
-const SHARED_CONCURRENCY = /^concurrency:\n  group: hereisorder-production-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m;
+const SHARED_CONCURRENCY = /^concurrency:\n  group: hereisorder-production-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false\n  queue: max$/m;
 const FAILURE_BYPASS = /continue-on-error|always\(|failure\(|\|\|\s*true|set\s+\+e/;
 const CHECKOUT_ACTION = 'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0';
 const SETUP_NODE_ACTION = 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e';
@@ -43,6 +43,7 @@ const CANONICAL_LIFECYCLE_WORKFLOW = [
   'concurrency:',
   '  group: hereisorder-production-${{ github.ref }}',
   '  cancel-in-progress: false',
+  '  queue: max',
   '',
   'jobs:',
   '  manage:',
@@ -200,8 +201,9 @@ function assertLifecycleSafety(contents) {
     {
       group: 'hereisorder-production-${{ github.ref }}',
       'cancel-in-progress': false,
+      queue: 'max',
     },
-    'concurrency must be exact and non-cancelling',
+    'concurrency must be exact, non-cancelling, and losslessly queued',
   );
 
   const jobs = assertPlainMapping(workflow.jobs, 'jobs must contain only manage');
@@ -486,7 +488,7 @@ test('lifecycle parser requires a plain top-level mapping', () => {
   );
 });
 
-test('deployment shares canonical non-cancelling repository/ref concurrency', () => {
+test('deployment shares canonical lossless repository/ref concurrency', () => {
   const workflow = readDeployWorkflow();
   assert.match(workflow, SHARED_CONCURRENCY);
   assert.doesNotMatch(workflow, /group: \$\{\{ github\.workflow \}\}/);

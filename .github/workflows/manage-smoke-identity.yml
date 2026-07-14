@@ -22,6 +22,7 @@ permissions:
 concurrency:
   group: hereisorder-production-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   manage:
