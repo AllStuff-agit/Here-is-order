@@ -242,6 +242,54 @@ test('report and summary expose an immutable exact ordered whitelist', () => {
   }
 });
 
+test('summary serializes a canonical whitelist instead of report toJSON hooks', () => {
+  const expected = { ...buildAuthenticatedSmokeReport(REPORT_INPUT) };
+  const serializationLeak = `${PASSWORD} ${COOKIE} raw serialization leak`;
+  const ownHook = { ...expected };
+  Object.defineProperty(ownHook, 'toJSON', {
+    configurable: true,
+    enumerable: false,
+    value: () => ({ leaked: serializationLeak }),
+  });
+  const inheritedHook = Object.assign(Object.create({
+    toJSON: () => ({ leaked: serializationLeak }),
+  }), expected);
+
+  for (const report of [ownHook, inheritedHook]) {
+    const summary = renderAuthenticatedSmokeSummary(report);
+    assert.deepEqual(
+      JSON.parse(summary.match(/```json\n([\s\S]+)\n```/)[1]),
+      expected,
+    );
+    assert.equal(summary.includes(serializationLeak), false);
+  }
+});
+
+test('summary serialization is isolated from inherited Object prototype hooks', () => {
+  const report = buildAuthenticatedSmokeReport(REPORT_INPUT);
+  const serializationLeak = `${PASSWORD} ${ORIGIN} inherited serialization leak`;
+  const previousDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON');
+  let summary;
+  Object.defineProperty(Object.prototype, 'toJSON', {
+    configurable: true,
+    value: () => ({ leaked: serializationLeak }),
+  });
+  try {
+    summary = renderAuthenticatedSmokeSummary(report);
+  } finally {
+    if (previousDescriptor === undefined) {
+      delete Object.prototype.toJSON;
+    } else {
+      Object.defineProperty(Object.prototype, 'toJSON', previousDescriptor);
+    }
+  }
+  assert.deepEqual(
+    JSON.parse(summary.match(/```json\n([\s\S]+)\n```/)[1]),
+    { ...report },
+  );
+  assert.equal(summary.includes(serializationLeak), false);
+});
+
 test('transaction performs exactly six same-origin requests and returns no sensitive projection', async () => {
   const requests = [];
   let meCalls = 0;

@@ -146,13 +146,17 @@ export function renderAuthenticatedSmokeSummary(report) {
       || report.outcome !== 'verified') {
       throw new Error('invalid report');
     }
-    buildAuthenticatedSmokeReport({
+    const canonicalReport = buildAuthenticatedSmokeReport({
       executedAt: report.executedAt,
       gitSha: report.gitSha,
       runId: report.runId,
       runAttempt: report.runAttempt,
     });
-    return `## Authenticated business smoke\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
+    const serializationReport = Object.create(null);
+    for (const key of REPORT_KEYS) {
+      serializationReport[key] = canonicalReport[key];
+    }
+    return `## Authenticated business smoke\n\n\`\`\`json\n${JSON.stringify(serializationReport, null, 2)}\n\`\`\`\n`;
   } catch {
     throw new Error('Authenticated smoke report was invalid.');
   }
