@@ -242,6 +242,61 @@ test('report and summary expose an immutable exact ordered whitelist', () => {
   }
 });
 
+test('report validators reject comma-joined enumerable key collisions', async (t) => {
+  const report = buildAuthenticatedSmokeReport(REPORT_INPUT);
+  const collisionCandidate = (values, collisionKey, storage) => {
+    const candidate = storage === 'inherited'
+      ? Object.create(values)
+      : Object.create(null);
+    if (storage === 'non-enumerable') {
+      for (const [key, value] of Object.entries(values)) {
+        Object.defineProperty(candidate, key, {
+          configurable: true,
+          enumerable: false,
+          value,
+        });
+      }
+    }
+    Object.defineProperty(candidate, collisionKey, {
+      configurable: true,
+      enumerable: true,
+      value: 'collision',
+    });
+    return candidate;
+  };
+  const cases = [
+    ['build inherited', () => buildAuthenticatedSmokeReport(collisionCandidate(
+      REPORT_INPUT,
+      'executedAt,gitSha,runAttempt,runId',
+      'inherited',
+    ))],
+    ['build non-enumerable', () => buildAuthenticatedSmokeReport(collisionCandidate(
+      REPORT_INPUT,
+      'executedAt,gitSha,runAttempt,runId',
+      'non-enumerable',
+    ))],
+    ['summary inherited', () => renderAuthenticatedSmokeSummary(collisionCandidate(
+      report,
+      'smokeVersion,executedAt,gitSha,runId,runAttempt,target,outcome',
+      'inherited',
+    ))],
+    ['summary non-enumerable', () => renderAuthenticatedSmokeSummary(collisionCandidate(
+      report,
+      'smokeVersion,executedAt,gitSha,runId,runAttempt,target,outcome',
+      'non-enumerable',
+    ))],
+  ];
+
+  for (const [name, invoke] of cases) {
+    await t.test(name, () => {
+      assert.throws(
+        invoke,
+        (error) => error.message === 'Authenticated smoke report was invalid.',
+      );
+    });
+  }
+});
+
 test('summary serializes a canonical whitelist instead of report toJSON hooks', () => {
   const expected = { ...buildAuthenticatedSmokeReport(REPORT_INPUT) };
   const serializationLeak = `${PASSWORD} ${COOKIE} raw serialization leak`;

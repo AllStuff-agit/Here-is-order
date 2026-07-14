@@ -38,13 +38,17 @@ const REPORT_KEYS = [
 export const AUTHENTICATED_SMOKE_VERSION = 'authenticated-business-smoke-v1';
 
 function exactKeys(value, keys) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === keys.length
+    && keys.every((key) => Object.prototype.propertyIsEnumerable.call(value, key));
 }
 
 function exactOrderedKeys(value, keys) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).join(',') === keys.join(',');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === keys.length
+    && actualKeys.every((key, index) => key === keys[index]);
 }
 
 function matchesString(value, pattern) {
