@@ -11,8 +11,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: hereisorder-production-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   verify:

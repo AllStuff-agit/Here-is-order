@@ -145,6 +145,14 @@ rollback contract는 일회용 D1에서 named CHECK 실패와 선행 update의 r
 
 실패 단계별 forward repair, Worker rollback, 예외적인 D1 restore 판단은 [Cloudflare 배포 가이드의 배포 복구 runbook](docs/design/cloudflare-deploy-guide.md#52-failure-phase별-복구)을 따릅니다. Workflow는 Worker rollback이나 D1 restore를 자동 실행하지 않습니다.
 
+### 운영 smoke identity
+
+Authenticated business smoke는 fixed `deployment-smoke` staff identity를 사용합니다. Identity lifecycle은 main의 `Manage production smoke identity` 수동 workflow만 사용하며 D1 콘솔이나 임의 SQL로 변경하지 않습니다. Repository secret `PRODUCTION_SMOKE_PASSWORD`에는 stdout·argv·파일을 거치지 않고 생성한 48-byte random credential을 저장합니다.
+
+최초 설정은 S1 merge/deploy 성공 → secret 설치 → `manage-smoke-identity.yml`의 `provision`과 `MANAGE hereisorder deployment-smoke provision` dispatch → provision run 성공 → provision exact whitelist evidence 확인 → S1 ready 기록 후 S2 허용 순서입니다.
+
+Rotation은 `disable`/`MANAGE hereisorder deployment-smoke disable` dispatch → disable run 성공 → disable exact whitelist evidence로 모든 세션을 폐기했음을 확인 → 새 secret 설치 → `rotate`/`MANAGE hereisorder deployment-smoke rotate` dispatch → rotate run 성공 → rotate exact whitelist evidence 확인 순서입니다. Disable run과 evidence가 모두 성공하기 전에는 secret을 교체하지 않습니다. Password, hash, user/session row, raw production response는 evidence가 아닙니다. Lifecycle run이 실패하거나 whitelist evidence가 없거나 malformed이면 authenticated smoke gate 병합과 S2 진행을 중단합니다.
+
 ### 수동 복구 배포
 
 GitHub Actions를 사용할 수 없는 장애 상황에서는 곧바로 production mutation을 실행하지 않습니다. 먼저 [배포 복구 runbook](docs/design/cloudflare-deploy-guide.md#52-failure-phase별-복구)에서 현재 phase와 checkpoint를 확인하고, 기존 D1 bookmark와 API/web Worker version을 별도 incident 기록에 보존합니다. 아래 명령은 새 환경의 최초 bootstrap 또는 그 기록과 복구 판단을 마친 뒤에만 사용합니다. API Worker를 먼저 배포한 다음 해당 origin을 웹 빌드의 서버 전용 `API_PROXY_URL`로 전달합니다.
