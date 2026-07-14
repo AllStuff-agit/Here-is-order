@@ -540,7 +540,7 @@ const dangerousDeployWebMutations = [
     mutate(source) {
       return source.replace(
         `${DEPLOY_WEB_JOB_HEADER}\n    steps:`,
-        `${DEPLOY_WEB_JOB_HEADER}\n    defaults:\n      run:\n        shell: bash -e {0} || true\n    steps:`,
+        `${DEPLOY_WEB_JOB_HEADER}\n    defaults:\n      run:\n        shell: >-\n          bash -c 'source "$1" || true' -- {0}\n    steps:`,
       );
     },
   },
@@ -580,7 +580,7 @@ const dangerousDeployWebMutations = [
     mutate(source) {
       return source.replace(
         'permissions:\n  contents: read\n\nconcurrency:',
-        'permissions:\n  contents: read\n\n"defaults":\n  run:\n    shell: bash -e {0} || true\n\nconcurrency:',
+        `permissions:\n  contents: read\n\n"defaults":\n  run:\n    shell: >-\n      bash -c 'source "$1" || true' -- {0}\n\nconcurrency:`,
       );
     },
   },
