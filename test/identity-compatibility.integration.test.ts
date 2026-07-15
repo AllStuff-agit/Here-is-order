@@ -149,6 +149,8 @@ describe('identity compatibility aggregate', () => {
   });
 
   const unsupportedHashCases: ReadonlyArray<readonly [string, string | ArrayBuffer]> = [
+    ['legacy SHA with NUL suffix', `${'a'.repeat(64)}\u0000x`],
+    ['current PBKDF2 with NUL suffix', `${currentHash}\u0000x`],
     ['uppercase legacy SHA', 'C'.repeat(64)],
     ['PBKDF2 iteration 99999', `pbkdf2_sha256$99999$${'a'.repeat(32)}$${'b'.repeat(64)}`],
     ['PBKDF2 iteration 600000', `pbkdf2_sha256$600000$${'a'.repeat(32)}$${'b'.repeat(64)}`],
@@ -179,14 +181,17 @@ describe('identity compatibility aggregate', () => {
     ['negative id', { id: -1 }],
     ['empty username', { username: '' }],
     ['over-limit username', { username: 'u'.repeat(129) }],
+    ['over-limit username hidden behind NUL', { username: `${'u'.repeat(128)}\u0000x` }],
     ['BLOB username', { username: new TextEncoder().encode('audit-user').buffer }],
     ['empty name', { name: '' }],
     ['over-limit name', { name: 'n'.repeat(201) }],
+    ['over-limit name hidden behind NUL', { name: `${'n'.repeat(200)}\u0000x` }],
     ['BLOB name', { name: new TextEncoder().encode('Audit User').buffer }],
     ['non-integer is_active', { isActive: 0.5 }],
     ['negative is_active', { isActive: -1 }],
     ['out-of-range is_active', { isActive: 2 }],
     ['non-round-trip created_at', { createdAt: '2026-07-15T12:34:56' }],
+    ['hour 24 created_at', { createdAt: '2026-07-15 24:00:00' }],
     ['wrong-length created_at', { createdAt: '2026-07-15 12:34:56Z' }],
   ];
 

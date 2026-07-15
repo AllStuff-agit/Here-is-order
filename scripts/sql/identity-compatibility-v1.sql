@@ -8,12 +8,14 @@ WITH constants AS (
   SELECT
     CASE
       WHEN typeof(password_hash) = 'text'
+       AND instr(password_hash, char(0)) = 0
        AND length(password_hash) = 64
        AND password_hash NOT GLOB '*[^0-9a-f]*'
       THEN 1 ELSE 0
     END AS is_legacy_hash,
     CASE
       WHEN typeof(password_hash) = 'text'
+       AND instr(password_hash, char(0)) = 0
        AND length(password_hash) = 118
        AND substr(password_hash, 1, 21) = 'pbkdf2_sha256$100000$'
        AND substr(password_hash, 22, 32) NOT GLOB '*[^0-9a-f]*'
@@ -24,16 +26,18 @@ WITH constants AS (
     CASE
       WHEN typeof(id) <> 'integer' OR id <= 0
         OR typeof(username) <> 'text'
+        OR instr(username, char(0)) > 0
         OR username <> trim(username, trim_chars)
         OR length(username) < 1 OR length(username) > 128
         OR typeof(name) <> 'text'
+        OR instr(name, char(0)) > 0
         OR name <> trim(name, trim_chars)
         OR length(name) < 1 OR length(name) > 200
         OR typeof(role) <> 'text' OR role NOT IN ('admin', 'staff')
         OR typeof(is_active) <> 'integer' OR is_active NOT IN (0, 1)
         OR typeof(created_at) <> 'text' OR length(created_at) <> 19
-        OR strftime('%Y-%m-%d %H:%M:%S', created_at) IS NULL
-        OR strftime('%Y-%m-%d %H:%M:%S', created_at) <> created_at
+        OR strftime('%Y-%m-%d %H:%M:%S', created_at, '+0 seconds') IS NULL
+        OR strftime('%Y-%m-%d %H:%M:%S', created_at, '+0 seconds') <> created_at
       THEN 1 ELSE 0
     END AS is_invalid_projection
   FROM users
