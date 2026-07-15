@@ -52,6 +52,19 @@
 - [ ] `unsupportedPasswordHashCount = 0`과 `invalidIdentityProjectionCount = 0` production evidence 확인
 - [ ] 모든 증거가 충족되고 Wave 2B가 evidence 사용 직전 live remote `main`을 다시 읽어 같은 merge SHA임을 확인한 뒤에만 Wave 2B 시작
 
+## Wave 2B identity extraction gate
+
+- [x] The credential runtime entry point `packages/identity-credential/src/index.mjs` and type entry point `packages/identity-credential/src/index.d.ts` own the credential format.
+- [x] `src/identity/index.ts` owns the Identity/session D1 choreography.
+- [x] `src/index.ts` remains the Hono adapter for current request parsing, HTTP response, and cookie mapping.
+- [x] Wave 2B changes implementation ownership only; it introduces no D1 schema or public runtime behavior change.
+- [x] Sessions continue to store the raw token in `sessions.token` with the existing 30-day lifetime. Self-password change continues to keep the current session and revoke sibling sessions. Logout continues to require an authenticated session and keeps delete plus audit in one D1 batch. Red-matrix assignments to 2C, 2D, 2E/2F-a, and 2F-b1/2F-b2 remain unchanged.
+- [x] Complete repository gate passes from clean dependencies.
+- [ ] Wave 2B PR review and merge
+- [ ] Exact merged SHA production deploy
+- [ ] Exact merged SHA API/web/authenticated-business smoke success
+- [ ] 2C starts only after the exact merged SHA production deploy and smoke success.
+
 ## 운영자 설정 필요
 
 - [ ] Cloudflare 인증 확인(`npx wrangler whoami`)
