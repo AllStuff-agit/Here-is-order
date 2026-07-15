@@ -164,6 +164,40 @@ test('implementation checklist keeps the Wave 2A production evidence unchecked',
   );
 });
 
+test('Wave 2A plan starts with the bounded post-review Identity contract amendment', () => {
+  const heading = 'Post-review normative amendment';
+  const amendment = extractH2(wave2aPlan, heading);
+  const amendmentIndex = wave2aPlan.indexOf(`## ${heading}`);
+  const constraintsIndex = wave2aPlan.indexOf('## Global Constraints');
+
+  assert.ok(amendmentIndex > 0, 'the normative amendment must follow the plan preamble');
+  assert.ok(
+    amendmentIndex < constraintsIndex,
+    'the normative amendment must be prominent and precede all implementation constraints/tasks',
+  );
+  assert.ok(amendment.length < 2_500, 'the amendment must stay bounded');
+  assert.equal(
+    wave2aPlan.match(/^## Post-review normative amendment$/gm)?.length,
+    1,
+    'the plan must contain exactly one normative amendment',
+  );
+  assertInOrder(amendment, [
+    'supersedes all completed Task 1 and Task 2 prose and code snippets',
+    '`test/api.integration.test.ts`',
+    '`test/identity-http-contract.test.ts`',
+    '`test/identity-compatibility.integration.test.ts`',
+    'checked-in executable tests are authoritative',
+    '`username` and `name` reject `U+0000`',
+    '`U+0000` semantics for password values remain unchanged',
+    'successful login and successful self-password `Set-Cookie` tokens',
+    'canonical lowercase UUIDv4',
+    'successful self-password change emits no replacement `Set-Cookie`',
+    'presented current token remains valid',
+    'sole stored D1 session',
+    'sibling sessions are revoked',
+  ]);
+});
+
 test('design and delivery plan fail closed when main moves around audit evidence', () => {
   const designSection = extractH3(
     designSpec,

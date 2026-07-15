@@ -8,6 +8,17 @@
 
 **Tech Stack:** TypeScript 5.6, Hono, Zod 3.24.1, Cloudflare Workers Vitest/Miniflare, Node.js 22.23.1, Cloudflare D1 REST API, GitHub Actions, npm 10.9.8.
 
+## Post-review normative amendment
+
+> **Normative override:** This section supersedes all completed Task 1 and Task 2 prose and code snippets below. Where a historical snippet conflicts with the final checked-in behavior, consult `test/api.integration.test.ts`, `test/identity-http-contract.test.ts`, and `test/identity-compatibility.integration.test.ts`; these checked-in executable tests are authoritative.
+
+The final Wave 2A current/target boundary is locked as follows:
+
+- Identity `username` and `name` reject `U+0000` at request and response/projection boundaries.
+- The `U+0000` semantics for password values remain unchanged; the identity-text rule must not be applied to passwords.
+- The target contract requires successful login and successful self-password `Set-Cookie` tokens to be canonical lowercase UUIDv4 values.
+- Current-runtime characterization remains intentionally different: a successful self-password change emits no replacement `Set-Cookie`; the presented current token remains valid and is the sole stored D1 session for that user, while all sibling sessions are revoked.
+
 ## Global Constraints
 
 - The approved design is `docs/superpowers/specs/2026-07-15-wave-2-identity-session-deep-module-design.md`; this plan implements only delivery slice 2A.
