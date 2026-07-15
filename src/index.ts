@@ -125,28 +125,6 @@ async function requireAuth(c: any, next: () => Promise<void>) {
   await next();
 }
 
-function auditStatement(
-  db: D1Database,
-  actorUserId: number | null,
-  action: string,
-  entityType: string,
-  entityId: number | null,
-  before?: unknown,
-  after?: unknown,
-) {
-  return db.prepare(
-    `INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(
-    actorUserId,
-    action,
-    entityType,
-    entityId,
-    before === undefined ? null : JSON.stringify(before),
-    after === undefined ? null : JSON.stringify(after),
-  );
-}
-
 function isUserRole(role: string): role is UserRole {
   return USER_ROLES.includes(role as UserRole);
 }

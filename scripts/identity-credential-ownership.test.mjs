@@ -873,17 +873,22 @@ function workerStructureViolations(sourceFile) {
     );
   }
   for (const statement of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(statement)
-      && statement.body
-      && ['requireAuth', 'scheduleExpiredSessionCleanup'].includes(statement.name?.text)) {
-      recordIdentityOwnershipViolations(
-        statement.body,
-        sourceFile,
-        credentialNames,
-        d1Aliases,
-        violations,
-      );
+    if (!ts.isFunctionDeclaration(statement) || !statement.body) continue;
+    const helperViolations = [];
+    recordIdentityOwnershipViolations(
+      statement.body,
+      sourceFile,
+      credentialNames,
+      d1Aliases,
+      helperViolations,
+    );
+    if (['requireAuth', 'scheduleExpiredSessionCleanup'].includes(statement.name?.text)) {
+      violations.push(...helperViolations);
+      continue;
     }
+    violations.push(...helperViolations
+      .filter((violation) => violation === 'Identity table SQL ownership')
+      .map((violation) => `top-level ${violation}`));
   }
 
   const forbiddenDeclarations = new Set([
@@ -1777,6 +1782,14 @@ test('the versioned compatibility audit keeps its independent fixed-format liter
   const source = readFileSync(new URL('sql/identity-compatibility-v1.sql', import.meta.url), 'utf8');
   assert.match(source, /pbkdf2_sha256\$100000\$/);
 });
+test('Wave 2B leaves the Identity HTTP contract source on its local envelope import', () => {
+  const source = readFileSync(
+    new URL('../packages/http-contract/src/identity.ts', import.meta.url),
+    'utf8',
+  );
+  assert.match(source, /\} from '\.\/envelope\.ts';/);
+  assert.doesNotMatch(source, /@here-is-order\/http-contract\/envelope/);
+});
 test('the Worker keeps Identity SQL and credential ownership behind Runtime Identity', () => {
   const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   const sourceFile = parseTypeScriptSource(source);
@@ -1814,6 +1827,23 @@ test('the Worker keeps Identity SQL and credential ownership behind Runtime Iden
       `${method.toUpperCase()} ${path} must schedule cleanup exactly once`,
     );
   }
+});
+test('the Worker ownership gate rejects top-level Identity SQL outside business routes', () => {
+  const routes = WORKER_IDENTITY_ROUTES
+    .map(([method, path]) => `app.${method}('${path}', async () => {});`)
+    .join('\n');
+  const source = `function legacyIdentityAudit(db) {
+      return db.prepare('INSERT INTO audit_logs (action) VALUES (?)');
+    }
+    const app = { get() {}, post() {}, patch() {} };
+    ${routes}
+    app.get('/api/categories', async () => {});`;
+  const sourceFile = parseTypeScriptSource(source, 'top-level-identity-sql.ts');
+
+  assert.deepEqual(
+    workerStructureViolations(sourceFile),
+    ['top-level Identity table SQL ownership'],
+  );
 });
 test('general business sessions authenticate through the shared Identity fixture', () => {
   const source = readFileSync(new URL('../test/api.integration.test.ts', import.meta.url), 'utf8');

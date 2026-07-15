@@ -2,7 +2,7 @@ import { z } from 'zod';
 import {
   apiEnvelopeSchema,
   type RuntimeSchema,
-} from '@here-is-order/http-contract/envelope';
+} from './envelope.ts';
 
 export const IDENTITY_JSON_BODY_LIMIT_BYTES = 32 * 1_024;
 const SESSION_SECONDS = 2_592_000;

@@ -99,6 +99,16 @@ test('rejects every malformed stored password hash in the shared corpus', () => 
   }
 });
 
+test('the shared corpus includes length-correct non-hex salt and digest cases', () => {
+  for (const malformed of [
+    'pbkdf2_sha256$100000$g0112233445566778899aabbccddeeff$2a080fdedce213934a91e8142d2eb7165be949c295612ce4b7d87be90ae208b6',
+    'pbkdf2_sha256$100000$00112233445566778899aabbccddeeff$ga080fdedce213934a91e8142d2eb7165be949c295612ce4b7d87be90ae208b6',
+    'g4bbcb1fbec99d65bf59d85c8cb62ee2db963f0fe106f483d9afa73bd4e39a8a',
+  ]) {
+    assert.ok(malformedStoredPasswordHashes.includes(malformed), malformed);
+  }
+});
+
 test('creates the same literal current hash with the Node adapter', async () => {
   const salt = knownAnswerSalt();
   const exportedResult = createPasswordHash(credentialKnownAnswer.password, salt);
