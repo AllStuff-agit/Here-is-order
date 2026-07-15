@@ -3,8 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
   "exports": {
     "./envelope": "./src/envelope.ts",
+    "./identity": "./src/identity.ts",
     "./purchase-orders": "./src/purchase-orders.ts"
   },
   "dependencies": {

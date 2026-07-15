@@ -109,6 +109,25 @@ D1 binding/query/schema를 확인할 수 없으면 내부 상세 없이 HTTP `50
 - 내 비밀번호를 변경하면 현재 요청에 사용한 세션만 유지하고 같은 사용자의 다른 세션은 모두 삭제합니다.
 - 관리자가 다른 사용자의 비밀번호를 초기화하면 대상 사용자의 기존 세션을 모두 삭제하므로 새 비밀번호로 다시 로그인해야 합니다.
 
+### Wave 2 전환 red matrix
+
+이 표는 현재 production과 승인된 Wave 2 계약의 차이를 기록합니다. 2A에서는 아래 동작을 바꾸거나 실패 테스트로 병합하지 않습니다. 각 owning slice가 구현과 회귀 테스트를 같은 커밋에서 추가합니다.
+
+| Current production behavior | Approved target | Owning slice |
+| --- | --- | --- |
+| 없는/비활성 계정은 잘못된 비밀번호와 다른 메시지·작업량을 사용 | 모든 invalid login credential은 같은 401/message와 one-SHA/one-PBKDF2 schedule | 2C |
+| Identity JSON과 필드가 coercion되고 명시적 32-KiB/128/200/4096 cap이 없음 | strict content type/body/field cap, extra-field rejection, no truncation | 2C |
+| human password setter가 6자 minimum을 사용 | 새 human password는 12 Unicode code points 이상 | 2C |
+| self change가 observed hash/session expiry를 CAS하지 않고 현재 raw token을 유지 | observed-state CAS, revoke-all, same-expiry replacement token rotation | 2C |
+| admin reset이 target observed state를 CAS하지 않고 self reset도 허용 | target CAS, concurrent conflict, self-reset prohibition | 2C |
+| logout이 valid authenticated context를 요구하고 audit와 delete를 한 batch에 묶음 | public idempotent locator, authoritative delete, best-effort audit, retryable D1 failure | 2C |
+| presented invalid cookie 401이 항상 cookie를 clear하지 않음 | determinate invalid/expired cookie clears; D1 uncertainty does not | 2C |
+| 브라우저 페이지가 개별적으로 broad 401 redirect를 수행 | strict route decoder와 shared authenticated-session classifier | 2D |
+| reusable session token을 D1 `sessions.token`에 저장 | compatibility deployment 뒤 새 token은 SHA-256 digest만 재사용 가능 | 2E/2F-a |
+| production smoke identity가 일반 staff write 권한을 가짐 | additive `read_only` access mode로 모든 business mutation을 server에서 거부 | 2F-b1/2F-b2 |
+
+현재 API 설명은 owning slice가 production에 배포되기 전까지 current behavior를 계속 나타냅니다. Target wire contract의 실행 가능한 정의는 `@here-is-order/http-contract/identity`입니다.
+
 ## 3. 카테고리와 품목
 
 ### 카테고리

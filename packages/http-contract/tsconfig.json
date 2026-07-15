@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../test/identity-http-contract.test.ts"
+  ],
+  "exclude": ["../../node_modules"]
+}
