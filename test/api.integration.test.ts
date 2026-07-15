@@ -544,7 +544,20 @@ describe('Wave 2A Identity compatibility characterization', () => {
       }),
     });
     expect(changed.status).toBe(200);
+    expect(changed.headers.get('Set-Cookie')).toBeNull();
+
+    const me = await apiRequest('/api/users/me', currentToken);
+    expect(me.status).toBe(200);
+    await expect(me.json()).resolves.toEqual({
+      ok: true,
+      data: { id: userId, username, name: 'Self Change', role: 'staff' },
+    });
     expect((await apiRequest('/api/users/me', siblingToken)).status).toBe(401);
+
+    const sessions = await env.DB.prepare(
+      'SELECT token FROM sessions WHERE user_id = ? ORDER BY token',
+    ).bind(userId).all<{ token: string }>();
+    expect(sessions.results).toEqual([{ token: currentToken }]);
   });
 
   it('admin reset revokes every target session', async () => {
