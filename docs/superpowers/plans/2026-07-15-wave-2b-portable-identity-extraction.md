@@ -585,6 +585,7 @@ git commit -m "refactor(identity): thin Hono identity adapter"
 - Create: `test/helpers/identity-fixture.ts`
 - Modify: `test/api.integration.test.ts`
 - Modify: `test/identity-extraction-structure.test.ts`
+- Modify: `scripts/identity-credential-ownership.test.mjs`
 
 **Interfaces:**
 
@@ -601,13 +602,13 @@ export async function createAuthenticatedIdentity(options?: Readonly<{
 }>>;
 ```
 
-The helper may insert only its bootstrap user row with a checked-in canonical test hash. It calls `identity(env.DB).authenticate` to create the session and may not insert into `sessions`.
+The helper may insert only its bootstrap user row with a checked-in canonical test hash. It calls `identity(env.DB).authenticate` to create the session and may not insert into `sessions`. Keep the fixture behavior checks in Workers Vitest and the TypeScript AST ownership gate in the existing Node harness; importing the 9.1 MB TypeScript compiler into the Cloudflare Vitest pool exceeds workerd's module-fallback message limit.
 
 - [ ] **Step 1: Add a failing fixture ownership assertion**
 
-Bound `createSession` in `test/api.integration.test.ts`, reject `INSERT INTO sessions`, and require `createAuthenticatedIdentity`.
+Bound `createSession` in `test/api.integration.test.ts` from the existing Node TypeScript AST harness, reject `INSERT INTO sessions`, and require `createAuthenticatedIdentity`.
 
-Run `npm exec -- vitest run test/identity-extraction-structure.test.ts`.
+Run `node --test scripts/identity-credential-ownership.test.mjs`.
 
 Expected: FAIL because the general business helper inserts a raw session.
 
@@ -626,6 +627,7 @@ npm exec -- vitest run \
   test/identity-extraction-structure.test.ts \
   test/api.integration.test.ts \
   test/identity-runtime.integration.test.ts
+node --test scripts/identity-credential-ownership.test.mjs
 npm test
 ```
 
@@ -634,7 +636,8 @@ npm test
 ```bash
 git add test/helpers/identity-fixture.ts \
   test/api.integration.test.ts \
-  test/identity-extraction-structure.test.ts
+  test/identity-extraction-structure.test.ts \
+  scripts/identity-credential-ownership.test.mjs
 git commit -m "test(identity): authenticate business fixtures"
 ```
 
