@@ -1,7 +1,7 @@
 # Wave 2 Identity / Session Deep Module Design
 
 - Date: 2026-07-15
-- Status: conversation design approved; written specification pending final user review
+- Status: written specification approved
 - Baseline: `main` at `69a9f68dc54d94faab5261fc924a2b57d9caa3bc`
 - Portfolio source: `docs/superpowers/specs/2026-07-12-risk-first-refactoring-portfolio-design.md`
 - Prior delivery gate: Wave 1 authenticated business smoke completed in production
