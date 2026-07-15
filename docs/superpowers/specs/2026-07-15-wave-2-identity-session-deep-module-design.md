@@ -120,7 +120,7 @@ The internal principal includes `sessionId`, `sessionExpiresAt`, `userId`, `user
 
 There are two intentionally distinct public projections:
 
-- `SessionUserProjection = { id, username, name, role }` for login and current-user, with a positive integer id, canonical trimmed username/name at the 128/200-code-point limits, and exact `admin | staff` role;
+- `SessionUserProjection = { id, username, name, role }` for login and current-user, with a positive integer id, canonical trimmed U+0000-free username/name at the 128/200-code-point limits, and exact `admin | staff` role;
 - `AdminUserProjection = { id, username, name, role, is_active, created_at }` for list-user and create-user, extending the same fields with `is_active: 0 | 1` and the existing canonical SQLite UTC `YYYY-MM-DD HH:MM:SS` string.
 
 Both projections exclude `access_mode`, password material, and session material. Keeping the projections distinct preserves the current administrator settings UI without leaking internal authorization state into the session contract.
@@ -201,8 +201,8 @@ For `POST /api/users`, all supplied fields must be strings and extra fields are 
 Strict input limits apply before credential work and never truncate values:
 
 - JSON-bearing Identity request body: at most 32 KiB of UTF-8;
-- trimmed username: 1 to 128 Unicode code points;
-- trimmed display name: at most 200 Unicode code points;
+- trimmed U+0000-free username: 1 to 128 Unicode code points;
+- trimmed U+0000-free display name: at most 200 Unicode code points;
 - submitted password field: at most 4,096 Unicode code points;
 - new human password: 12 to 4,096 Unicode code points.
 
@@ -346,7 +346,7 @@ END;
 
 Existing rows and rows written by an old Worker remain `legacy` while the floor is at its default. The existing non-null unique `token` column is not rebuilt in Wave 2. The singleton is a production capability floor, not a feature flag: after it advances, it cannot be lowered by any normal workflow, and the conditional triggers make any subsequent legacy insert/update fail inside D1 even if application preflight is bypassed.
 
-Session digest is lowercase hexadecimal SHA-256 over the high-entropy raw cookie token. It is not a password hash and does not use PBKDF2. The cookie token remains a UUID during Wave 2 to avoid changing cookie syntax in the same rollout.
+Session digest is lowercase hexadecimal SHA-256 over the high-entropy raw cookie token. It is not a password hash and does not use PBKDF2. The cookie token remains a canonical lowercase UUIDv4 during Wave 2 to avoid changing cookie syntax in the same rollout.
 
 The compatibility Implementation resolves sessions in this order:
 
@@ -665,7 +665,7 @@ legacyPasswordHashCount, unsupportedPasswordHashCount,
 invalidIdentityProjectionCount, outcome
 ```
 
-`unsupportedPasswordHashCount` and `invalidIdentityProjectionCount` must both be zero. All three counts cover every non-deleted user, active and inactive. The projection count is positive when a row violates any public serializer invariant: positive integer id; username equal to its trimmed form with length 1–128; name equal to its trimmed form with length 1–200; exact role; `is_active IN (0, 1)`; or canonical SQLite UTC `created_at`. The report exposes only the aggregate; a positive result stops rollout for a separately approved private diagnostic/remediation path.
+`unsupportedPasswordHashCount` and `invalidIdentityProjectionCount` must both be zero. All three counts cover every non-deleted user, active and inactive. The projection count is positive when a row violates any public serializer invariant: positive integer id; U+0000-free username equal to its trimmed form with length 1–128; U+0000-free name equal to its trimmed form with length 1–200; exact role; `is_active IN (0, 1)`; or canonical SQLite UTC `created_at`. The report exposes only the aggregate; a positive result stops rollout for a separately approved private diagnostic/remediation path.
 
 After migration 003, `identity-hardening-audit-v1` uses this exact ordered output:
 
@@ -810,7 +810,7 @@ Tests cover:
 Real migrated Miniflare D1 tests cover:
 
 - canonical 30-day issue and existing expiry-format compatibility;
-- exact HTTPS cookie attributes;
+- exact HTTPS cookie attributes and canonical lowercase UUIDv4 credential shape;
 - equal missing/inactive/deleted/wrong/malformed-hash public response;
 - stale login CAS triggering the deliberate guard failure and producing no session, upgrade, or success audit;
 - stale legacy-login CAS still executing exactly one SHA and one PBKDF2 and discarding its upgrade candidate;

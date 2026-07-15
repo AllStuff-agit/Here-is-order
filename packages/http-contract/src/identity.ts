@@ -6,6 +6,7 @@ import {
 
 export const IDENTITY_JSON_BODY_LIMIT_BYTES = 32 * 1_024;
 const SESSION_SECONDS = 2_592_000;
+const NEW_SESSION_COOKIE_PATTERN = /^isorder_sid=([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}); HttpOnly; Path=\/; Max-Age=([1-9]\d*); SameSite=Strict(; Secure)?$/;
 
 function codePointLength(value: string) {
   return Array.from(value).length;
@@ -18,13 +19,20 @@ function boundedString(min: number, max: number) {
   }, `must contain ${min}-${max} Unicode code points`);
 }
 
+function boundedIdentityString(min: number, max: number) {
+  return boundedString(min, max).refine(
+    (value) => !value.includes('\u0000'),
+    'must not contain U+0000',
+  );
+}
+
 function canonicalString(min: number, max: number) {
-  return boundedString(min, max).refine((value) => value === value.trim(),
+  return boundedIdentityString(min, max).refine((value) => value === value.trim(),
     'must already be trimmed');
 }
 
 function normalizedString(min: number, max: number) {
-  return z.string().transform((value) => value.trim()).pipe(boundedString(min, max));
+  return z.string().transform((value) => value.trim()).pipe(boundedIdentityString(min, max));
 }
 
 function isCanonicalSqliteUtc(value: string) {
@@ -71,7 +79,7 @@ export const listUsersResultSchema = z.array(adminUserProjectionSchema);
 
 const optionalNormalizedNameSchema = z.string()
   .transform((value) => value.trim())
-  .refine((value) => codePointLength(value) <= 200, 'name is too long')
+  .pipe(boundedIdentityString(0, 200))
   .optional();
 const optionalNormalizedRoleSchema = z.string()
   .transform((value) => value.trim())
@@ -309,8 +317,7 @@ function assertNewSessionCookie(
   secure: boolean,
   exactMaxAge: number | null,
 ) {
-  const match = /^isorder_sid=([^;\s]+); HttpOnly; Path=\/; Max-Age=([1-9]\d*); SameSite=Strict(; Secure)?$/
-    .exec(value ?? '');
+  const match = NEW_SESSION_COOKIE_PATTERN.exec(value ?? '');
   if (!match) throw new IdentityResponseContractError();
   const maxAge = Number(match[2]);
   const hasSecure = match[3] !== undefined;

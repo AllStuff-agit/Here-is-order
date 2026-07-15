@@ -30,6 +30,17 @@ const adminUser = {
   is_active: 1,
   created_at: '2026-07-15 12:34:56',
 } as const;
+const LOGIN_SESSION_TOKEN = '01234567-89ab-4cde-8f01-23456789abcd';
+const ROTATED_SESSION_TOKEN = 'fedcba98-7654-4321-a987-6543210fedcb';
+const SECURE_SESSION_TOKEN = 'abcdef01-2345-4678-9abc-def012345678';
+
+const invalidNewSessionTokens = [
+  { label: 'single-character token', token: 'x' },
+  { label: 'malformed UUID', token: '01234567-89ab-4cde-8f01' },
+  { label: 'uppercase UUIDv4', token: '01234567-89AB-4CDE-8F01-23456789ABCD' },
+  { label: 'non-v4 UUID', token: '01234567-89ab-3cde-8f01-23456789abcd' },
+  { label: 'UUIDv4 with an invalid variant', token: '01234567-89ab-4cde-7f01-23456789abcd' },
+] as const;
 
 const successes = [
   { operation: 'login', status: 200, data: { user: sessionUser } },
@@ -200,6 +211,41 @@ describe('Identity executable HTTP contract', () => {
     }
   });
 
+  it.each([
+    ['session username', sessionUserProjectionSchema, { ...sessionUser, username: 'staff\u00007' }],
+    ['session name', sessionUserProjectionSchema, { ...sessionUser, name: '직원\u00007' }],
+    ['admin username', adminUserProjectionSchema, { ...adminUser, username: 'staff\u00007' }],
+    ['admin name', adminUserProjectionSchema, { ...adminUser, name: '직원\u00007' }],
+  ] as const)('rejects U+0000 in %s', (_label, schema, value) => {
+    expect(schema.safeParse(value).success).toBe(false);
+  });
+
+  it.each([
+    ['login username', loginRequestSchema, { username: 'login\u0000user', password: 'password' }],
+    ['create-user username', createUserRequestSchema, {
+      username: 'new\u0000user',
+      password: '123456789012',
+    }],
+    ['create-user name', createUserRequestSchema, {
+      username: 'new-user',
+      name: 'New\u0000User',
+      password: '123456789012',
+    }],
+  ] as const)('rejects U+0000 in %s', (_label, schema, value) => {
+    expect(schema.safeParse(value).success).toBe(false);
+  });
+
+  it('does not change submitted or new-password U+0000 semantics', () => {
+    expect(loginRequestSchema.safeParse({
+      username: 'login-user',
+      password: 'pass\u0000word',
+    }).success).toBe(true);
+    expect(createUserRequestSchema.safeParse({
+      username: 'new-user',
+      password: '12345678901\u0000',
+    }).success).toBe(true);
+  });
+
   it('normalizes only documented fields and locks both sides of every field limit', () => {
     expect(IDENTITY_JSON_BODY_LIMIT_BYTES).toBe(32 * 1_024);
     expect(loginRequestSchema.parse({
@@ -326,11 +372,11 @@ describe('Identity executable HTTP contract', () => {
       { ok: true, data: fixture.data },
     );
     const setCookie = fixture.operation === 'login'
-      ? sessionCookie('new-token', 2_592_000)
+      ? sessionCookie(LOGIN_SESSION_TOKEN, 2_592_000)
       : fixture.operation === 'logout'
         ? sessionCookie('', 0)
         : fixture.operation === 'changeOwnPassword'
-          ? sessionCookie('rotated-token', 37)
+          ? sessionCookie(ROTATED_SESSION_TOKEN, 37)
           : undefined;
     assertIdentityResponseHeaders(
       fixture.operation,
@@ -401,11 +447,40 @@ describe('Identity executable HTTP contract', () => {
       login,
       headers({
         'cache-control': 'no-store',
-        'set-cookie': sessionCookie('new-secure-token', 2_592_000, true),
+        'set-cookie': sessionCookie(SECURE_SESSION_TOKEN, 2_592_000, true),
       }),
       { secure: true, sessionCookiePresented: false },
     );
   });
+
+  it.each(invalidNewSessionTokens)('rejects $label on login success', ({ token }) => {
+    expectInvalidHeaders(
+      'login',
+      200,
+      { ok: true, data: { user: sessionUser } },
+      {
+        'cache-control': 'no-store',
+        'set-cookie': sessionCookie(token, 2_592_000),
+      },
+      { secure: false, sessionCookiePresented: false },
+    );
+  });
+
+  it.each(invalidNewSessionTokens)(
+    'rejects $label on self-password success',
+    ({ token }) => {
+      expectInvalidHeaders(
+        'changeOwnPassword',
+        200,
+        { ok: true, data: { ok: true } },
+        {
+          'cache-control': 'no-store',
+          'set-cookie': sessionCookie(token, 37),
+        },
+        { secure: false, sessionCookiePresented: true },
+      );
+    },
+  );
 
   it.each([
     {
@@ -453,7 +528,7 @@ describe('Identity executable HTTP contract', () => {
       operation: 'login',
       status: 200,
       input: { ok: true, data: { user: sessionUser } },
-      values: { 'cache-control': 'no-store', 'set-cookie': sessionCookie('new-token', 37) },
+      values: { 'cache-control': 'no-store', 'set-cookie': sessionCookie(LOGIN_SESSION_TOKEN, 37) },
       context: { secure: false, sessionCookiePresented: false },
     },
     {
@@ -485,7 +560,7 @@ describe('Identity executable HTTP contract', () => {
       operation: 'changeOwnPassword',
       status: 200,
       input: { ok: true, data: { ok: true } },
-      values: { 'cache-control': 'no-store', 'set-cookie': sessionCookie('rotated-token', 2_592_001) },
+      values: { 'cache-control': 'no-store', 'set-cookie': sessionCookie(ROTATED_SESSION_TOKEN, 2_592_001) },
       context: { secure: false, sessionCookiePresented: true },
     },
     {
@@ -509,7 +584,7 @@ describe('Identity executable HTTP contract', () => {
       operation: 'login',
       status: 200,
       input: { ok: true, data: { user: sessionUser } },
-      values: { 'cache-control': 'no-store', 'set-cookie': sessionCookie('new-token', 2_592_000) },
+      values: { 'cache-control': 'no-store', 'set-cookie': sessionCookie(LOGIN_SESSION_TOKEN, 2_592_000) },
       context: { secure: true, sessionCookiePresented: false },
     },
     {
@@ -517,7 +592,7 @@ describe('Identity executable HTTP contract', () => {
       operation: 'login',
       status: 200,
       input: { ok: true, data: { user: sessionUser } },
-      values: { 'set-cookie': sessionCookie('new-token', 2_592_000) },
+      values: { 'set-cookie': sessionCookie(LOGIN_SESSION_TOKEN, 2_592_000) },
       context: { secure: false, sessionCookiePresented: false },
     },
   ] as const)('rejects $label', ({ operation, status, input, values, context }) => {
