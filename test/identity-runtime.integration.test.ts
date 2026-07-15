@@ -1549,8 +1549,42 @@ describe('Runtime Identity password hash generation failures', () => {
           passwordHash: observedHash,
           role: 'staff',
         });
-      const deriveBits = vi.spyOn(crypto.subtle, 'deriveBits').mockRejectedValue(
-        new Error(`TEST_${operation.toUpperCase()}_HASH_GENERATION_FAILURE`),
+      const changeSessions = operation === 'change' && target
+        ? Object.freeze({
+          current: await insertSession(
+            target.id,
+            '2999-12-07 00:00:00',
+            'hash-failure-change-current-session',
+          ),
+          sibling: await insertSession(
+            target.id,
+            '2999-12-08 00:00:00',
+            'hash-failure-change-sibling-session',
+          ),
+        })
+        : null;
+      const deriveBitsPlan = Object.freeze({
+        verificationCallIndex: operation === 'change' ? 1 : null,
+        rejectionCallIndex: operation === 'change' ? 2 : 1,
+      });
+      const originalDeriveBits = crypto.subtle.deriveBits.bind(crypto.subtle);
+      let deriveBitsCallIndex = 0;
+      const hashGenerationFailure = new Error(
+        `TEST_${operation.toUpperCase()}_HASH_GENERATION_FAILURE`,
+      );
+      const deriveBits = vi.spyOn(crypto.subtle, 'deriveBits').mockImplementation(
+        async (algorithm, baseKey, length) => {
+          deriveBitsCallIndex += 1;
+          if (deriveBitsCallIndex === deriveBitsPlan.rejectionCallIndex) {
+            throw hashGenerationFailure;
+          }
+          if (deriveBitsCallIndex === deriveBitsPlan.verificationCallIndex) {
+            return await originalDeriveBits(algorithm, baseKey, length);
+          }
+          throw new Error(
+            `TEST_UNEXPECTED_${operation.toUpperCase()}_DERIVE_BITS_CALL_${deriveBitsCallIndex}`,
+          );
+        },
       );
 
       try {
@@ -1569,7 +1603,7 @@ describe('Runtime Identity password hash generation failures', () => {
             await runtime.changeOwnPassword(principalFor(target!), {
               currentPassword,
               newPassword: 'hash-failure-change-new',
-              currentRawToken: 'hash-failure-change-current-token',
+              currentRawToken: changeSessions!.current.token,
             });
             return;
           }
@@ -1581,6 +1615,8 @@ describe('Runtime Identity password hash generation failures', () => {
         await expect(call()).rejects.toThrow(
           `TEST_${operation.toUpperCase()}_HASH_GENERATION_FAILURE`,
         );
+        expect(deriveBits).toHaveBeenCalledTimes(deriveBitsPlan.rejectionCallIndex);
+        expect(deriveBitsCallIndex).toBe(deriveBitsPlan.rejectionCallIndex);
       } finally {
         deriveBits.mockRestore();
       }
@@ -1595,6 +1631,24 @@ describe('Runtime Identity password hash generation failures', () => {
           'SELECT password_hash FROM users WHERE id = ?',
         ).bind(target!.id).first<{ password_hash: string }>();
         expect(stored?.password_hash).toBe(observedHash);
+      }
+      if (changeSessions) {
+        const sessions = await env.DB.prepare(
+          `SELECT token, expires_at
+             FROM sessions
+            WHERE user_id = ?
+            ORDER BY token ASC`,
+        ).bind(target!.id).all<{ token: string; expires_at: string }>();
+        expect(sessions.results).toEqual([
+          {
+            token: changeSessions.current.token,
+            expires_at: changeSessions.current.expiresAt,
+          },
+          {
+            token: changeSessions.sibling.token,
+            expires_at: changeSessions.sibling.expiresAt,
+          },
+        ]);
       }
       expect(await auditRows()).toEqual([]);
     },
