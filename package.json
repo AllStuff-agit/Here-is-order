@@ -40,6 +40,7 @@
   },
   "dependencies": {
     "@here-is-order/http-contract": "file:packages/http-contract",
+    "@here-is-order/identity-credential": "file:packages/identity-credential",
     "hono": "^4.12.4"
   },
   "devDependencies": {
