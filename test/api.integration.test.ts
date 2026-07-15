@@ -114,6 +114,22 @@ async function expectApiError(
   });
 }
 
+function createInspectableExecutionContext() {
+  const pending: Promise<unknown>[] = [];
+  const waitUntil = vi.fn((promise: Promise<unknown>) => {
+    pending.push(promise);
+  });
+
+  return {
+    ctx: {
+      waitUntil,
+      passThroughOnException: vi.fn(),
+    } as unknown as ExecutionContext,
+    waitUntil,
+    settle: () => Promise.all(pending),
+  };
+}
+
 describe('세션 만료 형식', () => {
   it.each([
     ['future ISO', new Date(Date.now() + 3_600_000).toISOString(), 200],
@@ -437,6 +453,619 @@ describe('세션 만료 형식', () => {
     ).bind(token).first<{ token: string }>();
     expect(currentSession).toBeNull();
     expect((await apiRequest('/api/users/me', token)).status).toBe(401);
+  });
+});
+
+describe('Wave 2B Identity HTTP adapter compatibility', () => {
+  it('계정 사용 불가와 잘못된 비밀번호의 401 메시지를 구분한다', async () => {
+    const { userId, username, password } = await createLegacyLoginUser();
+    const execution = createInspectableExecutionContext();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await env.DB.prepare('UPDATE users SET is_active = 0 WHERE id = ?')
+        .bind(userId).run();
+      const unavailable = await worker.fetch(
+        loginRequest(username, password),
+        env,
+        execution.ctx,
+      );
+      await expectApiError(
+        unavailable,
+        401,
+        'INVALID_CREDENTIALS',
+        '계정이 존재하지 않거나 비활성입니다.',
+      );
+
+      await env.DB.prepare('UPDATE users SET is_active = 1 WHERE id = ?')
+        .bind(userId).run();
+      const wrongPassword = await worker.fetch(
+        loginRequest(username, `${password}-wrong`),
+        env,
+        execution.ctx,
+      );
+      await expectApiError(
+        wrongPassword,
+        401,
+        'INVALID_CREDENTIALS',
+        '아이디 또는 비밀번호가 올바르지 않습니다.',
+      );
+
+      for (const response of [unavailable, wrongPassword]) {
+        expect(response.headers.get('Set-Cookie')).toBeNull();
+        expect(response.headers.get('Cache-Control')).toBeNull();
+      }
+      expect(execution.waitUntil).not.toHaveBeenCalled();
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('정확한 login path는 잘못된 cookie 디코딩보다 먼저 공개 예외를 적용한다', async () => {
+    const { userId, username, password } = await createLegacyLoginUser();
+    const execution = createInspectableExecutionContext();
+    const request = new Request('http://example.com/api/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: 'unrelated=%E0%A4%A',
+      },
+      body: JSON.stringify({ username, password }),
+    });
+
+    const response = await worker.fetch(request, env, execution.ctx);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      data: {
+        user: {
+          id: userId,
+          username,
+          name: '로그인 테스트',
+          role: 'admin',
+        },
+      },
+    });
+    expect(response.headers.get('Set-Cookie') ?? '').toContain('isorder_sid=');
+    expect(execution.waitUntil).toHaveBeenCalledOnce();
+    await execution.settle();
+  });
+
+  it('API middleware는 trailing login과 logout을 보호하고 unknown API에서 401/404를 구분한다', async () => {
+    await expectApiError(
+      await worker.fetch(
+        new Request('http://example.com/api/auth/login/', { method: 'POST' }),
+        env,
+      ),
+      401,
+      'UNAUTHORIZED',
+      '로그인이 필요합니다.',
+    );
+    await expectApiError(
+      await worker.fetch(
+        new Request('http://example.com/api/auth/logout', { method: 'POST' }),
+        env,
+      ),
+      401,
+      'UNAUTHORIZED',
+      '로그인이 필요합니다.',
+    );
+    await expectApiError(
+      await worker.fetch(new Request('http://example.com/api/not-a-route'), env),
+      401,
+      'UNAUTHORIZED',
+      '로그인이 필요합니다.',
+    );
+
+    const token = await createSession();
+    expect((await apiRequest('/api/not-a-route', token)).status).toBe(404);
+  });
+
+  it('non-API route는 잘못된 cookie가 있어도 auth middleware 밖에 남는다', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await worker.fetch(
+        new Request('http://example.com/not-an-api-route', {
+          headers: { Cookie: 'unrelated=%E0%A4%A' },
+        }),
+        env,
+      );
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('Set-Cookie')).toBeNull();
+      expect(response.headers.get('Cache-Control')).toBeNull();
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('missing, empty, final-empty auth cookie는 D1 접근 전에 정확한 401로 종료한다', async () => {
+    const prepare = vi.fn(() => {
+      throw new Error('D1 must not be reached for an empty auth value.');
+    });
+    const batch = vi.fn(() => {
+      throw new Error('D1 batch must not be reached for an empty auth value.');
+    });
+    const db = { prepare, batch } as unknown as D1Database;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      for (const cookie of [
+        undefined,
+        'isorder_sid=',
+        'isorder_sid=discarded; isorder_sid=',
+      ]) {
+        const execution = createInspectableExecutionContext();
+        const response = await worker.fetch(
+          new Request('http://example.com/api/users/me', {
+            headers: cookie === undefined ? undefined : { Cookie: cookie },
+          }),
+          { DB: db },
+          execution.ctx,
+        );
+
+        await expectApiError(
+          response,
+          401,
+          'UNAUTHORIZED',
+          '로그인이 필요합니다.',
+        );
+        expect(response.headers.get('Set-Cookie')).toBeNull();
+        expect(response.headers.get('Cache-Control')).toBeNull();
+        expect(execution.waitUntil).not.toHaveBeenCalled();
+      }
+
+      expect(prepare).not.toHaveBeenCalled();
+      expect(batch).not.toHaveBeenCalled();
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('unknown과 expired auth cookie는 같은 401을 반환하고 cookie를 지우거나 cleanup하지 않는다', async () => {
+    const { token: expiredToken } = await createSessionWithExpiry('2000-01-01 00:00:00');
+    const execution = createInspectableExecutionContext();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      for (const token of [`unknown-${crypto.randomUUID()}`, expiredToken]) {
+        const response = await worker.fetch(
+          new Request('http://example.com/api/users/me', {
+            headers: { Cookie: `isorder_sid=${token}` },
+          }),
+          env,
+          execution.ctx,
+        );
+
+        await expectApiError(
+          response,
+          401,
+          'UNAUTHORIZED',
+          '로그인이 필요합니다.',
+        );
+        expect(response.headers.get('Set-Cookie')).toBeNull();
+        expect(response.headers.get('Cache-Control')).toBeNull();
+      }
+
+      expect(execution.waitUntil).not.toHaveBeenCalled();
+      expect(consoleError).not.toHaveBeenCalled();
+      const expired = await env.DB.prepare(
+        'SELECT token FROM sessions WHERE token = ?',
+      ).bind(expiredToken).first<{ token: string }>();
+      expect(expired?.token).toBe(expiredToken);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('duplicate auth cookie는 마지막 nonempty 값으로 session을 해결한다', async () => {
+    const token = await createSession('staff');
+    const response = await worker.fetch(
+      new Request('http://example.com/api/users/me', {
+        headers: {
+          Cookie: `isorder_sid=unknown; isorder_sid=${token}`,
+        },
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('staff admin-route precheck는 user body, reset path/body, audit query 파싱보다 먼저 403을 반환한다', async () => {
+    const staffToken = await createSession('staff');
+    const responses = [
+      await apiRequest('/api/users', staffToken, {
+        method: 'POST',
+        body: 'null',
+      }),
+      await apiRequest('/api/users/not-an-id/password', staffToken, {
+        method: 'PATCH',
+        body: 'null',
+      }),
+      await apiRequest('/api/audit-logs?actor=%E0%A4%A', staffToken),
+    ];
+
+    for (const response of responses) {
+      await expectApiError(
+        response,
+        403,
+        'FORBIDDEN',
+        '관리자 권한이 필요합니다.',
+      );
+    }
+  });
+
+  it('admin reset은 invalid path를 body보다 먼저 400으로, 음수 ID를 not-found로 판정한다', async () => {
+    const adminToken = await createSession('admin');
+
+    await expectApiError(
+      await apiRequest('/api/users/not-an-id/password', adminToken, {
+        method: 'PATCH',
+        body: 'null',
+      }),
+      400,
+      'INVALID_INPUT',
+      '유효하지 않은 사용자 ID입니다.',
+    );
+    await expectApiError(
+      await apiRequest('/api/users/-1/password', adminToken, {
+        method: 'PATCH',
+        body: JSON.stringify({ new_password: 'replacement-password-value' }),
+      }),
+      404,
+      'NOT_FOUND',
+      '사용자를 찾을 수 없습니다.',
+    );
+  });
+
+  it('활성 username 중복은 정확한 409로 매핑한다', async () => {
+    const adminToken = await createSession('admin');
+    const username = `duplicate-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO users (username, password_hash, name, role)
+       VALUES (?, 'unused', '중복 계정', 'staff')`,
+    ).bind(username).run();
+
+    await expectApiError(
+      await apiRequest('/api/users', adminToken, {
+        method: 'POST',
+        body: JSON.stringify({ username, password: 'password-value' }),
+      }),
+      409,
+      'DUPLICATE_USERNAME',
+      '이미 사용 중인 아이디입니다.',
+    );
+  });
+
+  it.each(['soft_deleted', 'concurrent'] as const)(
+    '%s unique rejection은 예상하지 않은 위생적 500으로 매핑한다',
+    async (mode) => {
+      const adminToken = await createSession('admin');
+      const username = `${mode}-${crypto.randomUUID()}`;
+      let concurrentInserted = false;
+      let requestDb: D1Database = env.DB;
+
+      if (mode === 'soft_deleted') {
+        await env.DB.prepare(
+          `INSERT INTO users
+             (username, password_hash, name, role, is_deleted, deleted_at)
+           VALUES (?, 'unused', '삭제된 계정', 'staff', 1, datetime('now'))`,
+        ).bind(username).run();
+      } else {
+        requestDb = new Proxy(env.DB, {
+          get(target, property) {
+            if (property === 'batch') {
+              return async (statements: D1PreparedStatement[]) => {
+                concurrentInserted = true;
+                await target.prepare(
+                  `INSERT INTO users (username, password_hash, name, role)
+                   VALUES (?, 'concurrent-owner', '동시 생성', 'staff')`,
+                ).bind(username).run();
+                return target.batch(statements);
+              };
+            }
+
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      }
+
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const response = await worker.fetch(
+          new Request('http://example.com/api/users', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Cookie: `isorder_sid=${adminToken}`,
+            },
+            body: JSON.stringify({ username, password: 'password-value' }),
+          }),
+          { DB: requestDb },
+        );
+
+        await expectApiError(
+          response,
+          500,
+          'INTERNAL_ERROR',
+          '서버 오류가 발생했습니다.',
+        );
+        expect(concurrentInserted).toBe(mode === 'concurrent');
+        expect(consoleError).toHaveBeenCalledOnce();
+        expect(consoleError).toHaveBeenCalledWith(
+          JSON.stringify({ event: 'unhandled_request_error' }),
+        );
+        expect(JSON.stringify(consoleError.mock.calls)).not.toContain(username);
+      } finally {
+        consoleError.mockRestore();
+      }
+    },
+  );
+
+  it('createUser의 null readback도 201 data:null 성공으로 직렬화한다', async () => {
+    const adminToken = await createSession('admin');
+    const username = `null-readback-${crypto.randomUUID()}`;
+    let creationBatchCompleted = false;
+    let readbackSuppressed = false;
+    const nullReadbackDb = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            const results = await target.batch(statements);
+            creationBatchCompleted = true;
+            return results;
+          };
+        }
+        if (property === 'prepare') {
+          return (sql: string) => {
+            if (
+              creationBatchCompleted
+              && sql.includes('created_at AS created_at')
+              && sql.includes('WHERE id = ?')
+            ) {
+              readbackSuppressed = true;
+              return {
+                bind: () => ({
+                  first: async () => null,
+                }),
+              } as unknown as D1PreparedStatement;
+            }
+            return target.prepare(sql);
+          };
+        }
+
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('http://example.com/api/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `isorder_sid=${adminToken}`,
+        },
+        body: JSON.stringify({ username, password: 'password-value' }),
+      }),
+      { DB: nullReadbackDb },
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({ ok: true, data: null });
+    expect(readbackSuppressed).toBe(true);
+    const stored = await env.DB.prepare(
+      'SELECT username FROM users WHERE username = ?',
+    ).bind(username).first<{ username: string }>();
+    expect(stored?.username).toBe(username);
+  });
+
+  it('Identity JSON의 top-level null은 기존 전역 500 경로와 위생적 로그를 유지한다', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await worker.fetch(
+        new Request('http://example.com/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: 'null',
+        }),
+        env,
+      );
+
+      await expectApiError(
+        response,
+        500,
+        'INTERNAL_ERROR',
+        '서버 오류가 발생했습니다.',
+      );
+      expect(response.headers.get('Set-Cookie')).toBeNull();
+      expect(response.headers.get('Cache-Control')).toBeNull();
+      expect(consoleError).toHaveBeenCalledOnce();
+      expect(consoleError).toHaveBeenCalledWith(
+        JSON.stringify({ event: 'unhandled_request_error' }),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('사용자 생성은 기존 String coercion과 6 JS-code-unit 비밀번호 경계를 유지한다', async () => {
+    const adminToken = await createSession('admin');
+    const accepted = await apiRequest('/api/users', adminToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        username: 246810,
+        name: 0,
+        password: '😀😀😀',
+        role: null,
+      }),
+    });
+
+    expect(accepted.status).toBe(201);
+    await expect(accepted.json()).resolves.toEqual({
+      ok: true,
+      data: expect.objectContaining({
+        username: '246810',
+        name: '246810',
+        role: 'staff',
+      }),
+    });
+
+    await expectApiError(
+      await apiRequest('/api/users', adminToken, {
+        method: 'POST',
+        body: JSON.stringify({
+          username: `short-${crypto.randomUUID()}`,
+          password: '😀😀',
+        }),
+      }),
+      400,
+      'INVALID_INPUT',
+      '비밀번호는 6자 이상이어야 합니다.',
+    );
+  });
+
+  it('own-password는 잘못된 현재 비밀번호 401과 사라진 계정 404를 구분한다', async () => {
+    const { userId, password } = await createLegacyLoginUser();
+    const token = `own-password-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES (?, ?, datetime('now', '+1 hour'))`,
+    ).bind(token, userId).run();
+
+    await expectApiError(
+      await apiRequest('/api/users/me/password', token, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          current_password: `${password}-wrong`,
+          new_password: 'replacement-password-value',
+        }),
+      }),
+      401,
+      'INVALID_CREDENTIALS',
+      '현재 비밀번호가 올바르지 않습니다.',
+    );
+
+    let passwordReadSuppressed = false;
+    const missingPasswordDb = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => {
+            if (sql.trim() === 'SELECT password_hash FROM users WHERE id = ?') {
+              passwordReadSuppressed = true;
+              return {
+                bind: () => ({
+                  first: async () => null,
+                }),
+              } as unknown as D1PreparedStatement;
+            }
+            return target.prepare(sql);
+          };
+        }
+
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const missing = await worker.fetch(
+      new Request('http://example.com/api/users/me/password', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `isorder_sid=${token}`,
+        },
+        body: JSON.stringify({
+          current_password: password,
+          new_password: 'replacement-password-value',
+        }),
+      }),
+      { DB: missingPasswordDb },
+    );
+
+    await expectApiError(
+      missing,
+      404,
+      'NOT_FOUND',
+      '계정을 찾을 수 없습니다.',
+    );
+    expect(passwordReadSuppressed).toBe(true);
+  });
+
+  it('logout audit 실패는 삭제를 rollback하고 cookie/cleanup 부수효과 없이 위생적 500을 반환한다', async () => {
+    const { token, userId } = await createSessionWithExpiry('2999-01-01 00:00:00');
+    const expiredToken = `logout-cleanup-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES (?, ?, '2000-01-01 00:00:00')`,
+    ).bind(expiredToken, userId).run();
+    const execution = createInspectableExecutionContext();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await withTestTrigger(
+        env.DB,
+        'test_fail_logout_audit',
+        `CREATE TRIGGER test_fail_logout_audit
+         BEFORE INSERT ON audit_logs
+         WHEN NEW.action = 'logout'
+         BEGIN
+           SELECT RAISE(ABORT, 'TEST_LOGOUT_AUDIT_FAILURE');
+         END`,
+        async () => {
+          const response = await worker.fetch(
+            new Request('http://example.com/api/auth/logout', {
+              method: 'POST',
+              headers: { Cookie: `isorder_sid=${token}` },
+            }),
+            env,
+            execution.ctx,
+          );
+
+          await expectApiError(
+            response,
+            500,
+            'INTERNAL_ERROR',
+            '서버 오류가 발생했습니다.',
+          );
+          expect(response.headers.get('Set-Cookie')).toBeNull();
+          expect(response.headers.get('Cache-Control')).toBeNull();
+          expect(execution.waitUntil).not.toHaveBeenCalled();
+
+          expect((await apiRequest('/api/users/me', token)).status).toBe(200);
+          const sessions = await env.DB.prepare(
+            'SELECT token FROM sessions WHERE token IN (?, ?) ORDER BY token',
+          ).bind(token, expiredToken).all<{ token: string }>();
+          expect(sessions.results.map((row) => row.token).sort()).toEqual(
+            [token, expiredToken].sort(),
+          );
+          const logoutAudits = await env.DB.prepare(
+            `SELECT COUNT(*) AS count
+               FROM audit_logs
+              WHERE actor_user_id = ? AND action = 'logout'`,
+          ).bind(userId).first<{ count: number }>();
+          expect(logoutAudits?.count).toBe(0);
+
+          expect(consoleError).toHaveBeenCalledOnce();
+          expect(consoleError).toHaveBeenCalledWith(
+            JSON.stringify({ event: 'unhandled_request_error' }),
+          );
+          expect(JSON.stringify(consoleError.mock.calls)).not.toContain(token);
+          expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+            'TEST_LOGOUT_AUDIT_FAILURE',
+          );
+        },
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 
