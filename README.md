@@ -116,6 +116,7 @@ npm run db:recover-password -- --remote --username admin
 - `db:bootstrap:from-notion`: Notion 변환 + migration + 품목/관리자 seed를 로컬 D1에 적용
 - `import:notion`: `notion-export/`를 검토용 `data/` 생성물로 변환
 - `deploy:preflight`: GitHub Actions에서 production D1/Worker recovery checkpoint 검증
+- `audit-identity-compatibility.yml` zero-count gate: [운영 절차](docs/design/cloudflare-deploy-guide.md#identity-compatibility-audit)
 - `npm run build:cloudflare --prefix frontend`: OpenNext Worker 산출물 검증
 - `npm run deploy --prefix frontend`: 웹 Worker 배포
 - `npm run deploy`: API Worker 배포

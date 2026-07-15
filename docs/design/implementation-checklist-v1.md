@@ -43,6 +43,15 @@
 - [x] API health/D1 readiness 및 웹 same-origin proxy smoke test
 - [x] 별도 production URL 변수와 Environment 승인 불필요
 
+## Wave 2A identity compatibility gate
+
+- [ ] Least-privilege repository secret `CLOUDFLARE_D1_READ_TOKEN` 설치와 secret 이름 확인
+- [ ] Wave 2A PR의 검토와 `main` merge 완료
+- [ ] 병합 commit의 정상 production deploy 성공과 배포된 exact main SHA 기록
+- [ ] 해당 SHA에서 `audit-identity-compatibility.yml`을 한 번 dispatch하고 성공 run 및 정확히 하나의 8-field report 확인
+- [ ] `unsupportedPasswordHashCount = 0`과 `invalidIdentityProjectionCount = 0` production evidence 확인
+- [ ] 모든 증거가 충족된 뒤에만 Wave 2B 시작
+
 ## 운영자 설정 필요
 
 - [ ] Cloudflare 인증 확인(`npx wrangler whoami`)
