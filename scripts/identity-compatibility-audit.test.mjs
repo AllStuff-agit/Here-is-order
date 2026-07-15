@@ -526,6 +526,64 @@ test('invalid argv is rejected before environment access, config read, or client
   assert.deepEqual(events, []);
 });
 
+test('null dependency options fail with only the canonical sanitized message', async () => {
+  await assert.rejects(
+    () => runIdentityCompatibilityAudit(null),
+    (error) => {
+      assert.equal(error.message, 'Identity compatibility audit failed.');
+      assert.doesNotMatch(error.message, /null|destructure|convert/i);
+      return true;
+    },
+  );
+});
+
+test('a throwing argv option getter fails with only the canonical sanitized message', async () => {
+  const rawDetail = 'raw argv getter detail';
+  const options = {};
+  Object.defineProperty(options, 'argv', {
+    enumerable: true,
+    get() {
+      throw new Error(rawDetail);
+    },
+  });
+
+  await assert.rejects(
+    () => runIdentityCompatibilityAudit(options),
+    (error) => {
+      assert.equal(error.message, 'Identity compatibility audit failed.');
+      assert.equal(error.message.includes(rawDetail), false);
+      return true;
+    },
+  );
+});
+
+test('invalid argv stops before an env option getter can run', async () => {
+  const events = [];
+  const options = {};
+  Object.defineProperties(options, {
+    argv: {
+      enumerable: true,
+      get() {
+        events.push('argv');
+        return ['--sql', 'SELECT 1'];
+      },
+    },
+    env: {
+      enumerable: true,
+      get() {
+        events.push('env');
+        throw new Error('raw env getter detail');
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => runIdentityCompatibilityAudit(options),
+    { message: 'Identity compatibility audit failed.' },
+  );
+  assert.deepEqual(events, ['argv']);
+});
+
 test('invalid environment is rejected before config read or client creation', async () => {
   for (const env of [
     without(validEnvironment, 'CLOUDFLARE_D1_READ_TOKEN'),

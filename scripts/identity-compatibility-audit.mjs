@@ -370,22 +370,33 @@ export function renderIdentityCompatibilitySummary(report) {
   return `## Identity compatibility audit\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
 }
 
-export async function runIdentityCompatibilityAudit({
-  argv = process.argv.slice(2),
-  env = process.env,
-  configPath = 'wrangler.toml',
-  readBinding = readProductionD1Binding,
-  createClient = createCloudflareD1RestClient,
-  now = () => new Date(),
-  randomUUID = createRandomUUID,
-  appendSummary = (filePath, contents) => fs.appendFileSync(filePath, contents, 'utf8'),
-  log = (contents) => console.log(contents),
-} = {}) {
+export async function runIdentityCompatibilityAudit(options = {}) {
   try {
+    const configuredArgv = options.argv;
+    const argv = configuredArgv === undefined
+      ? process.argv.slice(2)
+      : configuredArgv;
     if (argv.length !== 0) throw new Error('invalid arguments');
+
+    const configuredEnv = options.env;
+    const env = configuredEnv === undefined ? process.env : configuredEnv;
     const environment = parseIdentityCompatibilityEnvironment(env);
+
+    const configuredConfigPath = options.configPath;
+    const configPath = configuredConfigPath === undefined
+      ? 'wrangler.toml'
+      : configuredConfigPath;
+    const configuredReadBinding = options.readBinding;
+    const readBinding = configuredReadBinding === undefined
+      ? readProductionD1Binding
+      : configuredReadBinding;
     const binding = readBinding({ configPath, binding: 'DB' });
     assertExactBinding(binding);
+
+    const configuredCreateClient = options.createClient;
+    const createClient = configuredCreateClient === undefined
+      ? createCloudflareD1RestClient
+      : configuredCreateClient;
     const client = createClient({
       accountId: environment.accountId,
       apiToken: environment.readToken,
@@ -399,16 +410,33 @@ export async function runIdentityCompatibilityAudit({
       binding.databaseId,
       { sql: IDENTITY_COMPATIBILITY_SQL },
     ));
+
+    const configuredNow = options.now;
+    const now = configuredNow === undefined ? () => new Date() : configuredNow;
+    const configuredRandomUUID = options.randomUUID;
+    const randomUUID = configuredRandomUUID === undefined
+      ? createRandomUUID
+      : configuredRandomUUID;
     const report = buildIdentityCompatibilityReport({
       row,
       executedAt: now().toISOString(),
       gitSha: environment.gitSha,
       requestId: randomUUID(),
     });
+
+    const configuredAppendSummary = options.appendSummary;
+    const appendSummary = configuredAppendSummary === undefined
+      ? (filePath, contents) => fs.appendFileSync(filePath, contents, 'utf8')
+      : configuredAppendSummary;
     await appendSummary(
       environment.summaryPath,
       renderIdentityCompatibilitySummary(report),
     );
+
+    const configuredLog = options.log;
+    const log = configuredLog === undefined
+      ? (contents) => console.log(contents)
+      : configuredLog;
     await log(JSON.stringify(report));
     return Object.freeze({
       report,
