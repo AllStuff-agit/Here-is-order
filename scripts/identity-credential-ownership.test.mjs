@@ -18,6 +18,15 @@ function staticValue(node, sourceFile, seen = new Set()) {
   if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
   if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isTemplateExpression(node)) {
+    let value = node.head.text;
+    for (const span of node.templateSpans) {
+      const expression = staticValue(span.expression, sourceFile, seen);
+      if (expression === null) return null;
+      value += expression + span.literal.text;
+    }
+    return value;
+  }
   if (ts.isNumericLiteral(node)) return Number(node.text.replaceAll('_', ''));
   if (ts.isParenthesizedExpression(node)) return staticValue(node.expression, sourceFile, seen);
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
@@ -223,29 +232,44 @@ const WORKER_IDENTITY_ROUTES = [
   ['patch', '/api/users/me/password', 'changeOwnPassword', true],
   ['patch', '/api/users/:id/password', 'resetPassword', true],
 ];
-function topLevelRoutes(sourceFile) {
-  const routes = [];
-  for (const statement of sourceFile.statements) {
-    if (!ts.isExpressionStatement(statement)
-      || !ts.isCallExpression(statement.expression)
-      || !ts.isPropertyAccessExpression(statement.expression.expression)
-      || !ts.isIdentifier(statement.expression.expression.expression)
-      || statement.expression.expression.expression.text !== 'app') {
-      continue;
-    }
-    const [pathNode, callback] = statement.expression.arguments;
-    if (!ts.isStringLiteral(pathNode)
-      || (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback))) {
-      continue;
-    }
-    routes.push({
-      callback,
-      method: statement.expression.expression.name.text,
-      path: pathNode.text,
-      statement,
-    });
+function routeRegistration(sourceFile, call) {
+  if (!ts.isCallExpression(call)) return null;
+  let receiver = null;
+  let method = null;
+  if (ts.isPropertyAccessExpression(call.expression)) {
+    receiver = call.expression.expression;
+    method = call.expression.name.text;
+  } else if (ts.isElementAccessExpression(call.expression)) {
+    receiver = call.expression.expression;
+    const value = staticValue(call.expression.argumentExpression, sourceFile);
+    method = typeof value === 'string' ? value : null;
   }
+  if (!receiver || !ts.isIdentifier(receiver) || receiver.text !== 'app' || method === null) {
+    return null;
+  }
+  const [pathNode, callback] = call.arguments;
+  const path = staticValue(pathNode, sourceFile);
+  if (typeof path !== 'string'
+    || (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback))) {
+    return null;
+  }
+  const statement = ts.isExpressionStatement(call.parent)
+    && call.parent.expression === call
+    && call.parent.parent === sourceFile
+    ? call.parent
+    : null;
+  return { callback, call, method, path, statement };
+}
+function allRouteRegistrations(sourceFile) {
+  const routes = [];
+  visit(sourceFile, (node) => {
+    const route = routeRegistration(sourceFile, node);
+    if (route) routes.push(route);
+  });
   return routes;
+}
+function topLevelRoutes(sourceFile) {
+  return allRouteRegistrations(sourceFile).filter((route) => route.statement !== null);
 }
 function uniqueWorkerRoute(sourceFile, method, path) {
   const matches = topLevelRoutes(sourceFile).filter((route) =>
@@ -255,6 +279,15 @@ function uniqueWorkerRoute(sourceFile, method, path) {
 }
 function workerIdentitySlice(sourceFile) {
   const routes = topLevelRoutes(sourceFile);
+  const requiredPaths = new Set(WORKER_IDENTITY_ROUTES.map(([, path]) => path));
+  for (const route of allRouteRegistrations(sourceFile)) {
+    if (requiredPaths.has(route.path) || route.path.startsWith('/api/categories')) {
+      assert.ok(
+        route.statement,
+        `${route.method.toUpperCase()} ${route.path} must be a direct top-level route`,
+      );
+    }
+  }
   const login = uniqueWorkerRoute(sourceFile, 'post', '/api/auth/login');
   const firstCategory = routes.find((route) => route.path.startsWith('/api/categories'));
   assert.ok(firstCategory, 'the first categories route boundary must exist');
@@ -286,6 +319,20 @@ function visitOwnScope(root, callback) {
     if (node !== root && (ts.isFunctionLike(node) || ts.isClassLike(node))) return false;
     return callback(node);
   });
+}
+function directStatementWithin(node, target) {
+  if (!ts.isBlock(target.body)) return null;
+  let current = node;
+  while (current.parent && current.parent !== target.body) current = current.parent;
+  return current.parent === target.body && ts.isStatement(current) ? current : null;
+}
+function statementImmediatelyFollows(source, previous, next) {
+  if (!previous || !next || previous.parent !== next.parent || !ts.isBlock(previous.parent)) {
+    return false;
+  }
+  const statements = previous.parent.statements;
+  return statements.indexOf(next) === statements.indexOf(previous) + 1
+    && previous.getEnd() <= next.getStart(source);
 }
 function workerRuntimeBinding(sourceFile) {
   return namedImport(sourceFile, './identity', 'identity');
@@ -327,6 +374,8 @@ function runtimeLocalBindings(sourceFile, target) {
       }
     });
     if (declarations !== 1 || reassigned
+      || !directStatementWithin(declaration, target)
+      || isStaticallyDead(declaration, target, sourceFile)
       || target.parameters.some((parameter) => bindsName(parameter.name, name))) {
       candidates.delete(name);
       continue;
@@ -337,8 +386,45 @@ function runtimeLocalBindings(sourceFile, target) {
 }
 function staticTruthiness(node, sourceFile) {
   if (node?.kind === ts.SyntaxKind.NullKeyword) return false;
+  if (ts.isPrefixUnaryExpression(node)) {
+    if (node.operator === ts.SyntaxKind.ExclamationToken) {
+      const operand = staticTruthiness(node.operand, sourceFile);
+      return operand === null ? null : !operand;
+    }
+    const operand = staticValue(node.operand, sourceFile);
+    if (operand !== null
+      && (node.operator === ts.SyntaxKind.PlusToken
+        || node.operator === ts.SyntaxKind.MinusToken)) {
+      const numeric = Number(operand);
+      if (!Number.isNaN(numeric)) {
+        return Boolean(node.operator === ts.SyntaxKind.MinusToken ? -numeric : numeric);
+      }
+    }
+  }
   const value = staticValue(node, sourceFile);
   return value === null ? null : Boolean(value);
+}
+function statementAlwaysTerminates(statement, sourceFile) {
+  if (ts.isReturnStatement(statement) || ts.isThrowStatement(statement)
+    || ts.isBreakStatement(statement) || ts.isContinueStatement(statement)) {
+    return true;
+  }
+  if (ts.isBlock(statement)) {
+    return statement.statements.some((child) => statementAlwaysTerminates(child, sourceFile));
+  }
+  if (ts.isIfStatement(statement)) {
+    const condition = staticTruthiness(statement.expression, sourceFile);
+    if (condition === true) return statementAlwaysTerminates(statement.thenStatement, sourceFile);
+    if (condition === false) {
+      return statement.elseStatement
+        ? statementAlwaysTerminates(statement.elseStatement, sourceFile)
+        : false;
+    }
+    return Boolean(statement.elseStatement)
+      && statementAlwaysTerminates(statement.thenStatement, sourceFile)
+      && statementAlwaysTerminates(statement.elseStatement, sourceFile);
+  }
+  return false;
 }
 function isStaticallyDead(node, scope, sourceFile = scope.getSourceFile()) {
   let current = node;
@@ -374,7 +460,7 @@ function isStaticallyDead(node, scope, sourceFile = scope.getSourceFile()) {
     if (ts.isBlock(parent)) {
       const currentIndex = parent.statements.findIndex((statement) => statement === current);
       if (currentIndex >= 0 && parent.statements.slice(0, currentIndex).some((statement) =>
-        ts.isReturnStatement(statement) || ts.isThrowStatement(statement))) {
+        statementAlwaysTerminates(statement, sourceFile))) {
         return true;
       }
     }
@@ -393,7 +479,42 @@ function workerRuntimeCalls(sourceFile, target, member) {
       && node.expression.name.text === member
       && node.pos > bindings.get(node.expression.expression.text).end
       && !isStaticallyDead(node, target)) {
-      calls.push(node);
+      const bindingStatement = directStatementWithin(
+        bindings.get(node.expression.expression.text),
+        target,
+      );
+      const callStatement = directStatementWithin(node, target);
+      if (!statementImmediatelyFollows(sourceFile, bindingStatement, callStatement)) return;
+
+      if (member === 'cleanupExpiredSessions') {
+        if (ts.isExpressionStatement(callStatement)) calls.push(node);
+        return;
+      }
+      if (member === 'currentUser') {
+        if (ts.isReturnStatement(callStatement)
+          && ts.isCallExpression(callStatement.expression)
+          && ts.isPropertyAccessExpression(callStatement.expression.expression)
+          && ts.isIdentifier(callStatement.expression.expression.expression)
+          && callStatement.expression.expression.expression.text === 'c'
+          && callStatement.expression.expression.name.text === 'json'
+          && callStatement.expression.arguments.length === 1
+          && ts.isCallExpression(callStatement.expression.arguments[0])
+          && ts.isIdentifier(callStatement.expression.arguments[0].expression)
+          && callStatement.expression.arguments[0].expression.text === 'apiOk'
+          && callStatement.expression.arguments[0].arguments.length === 1
+          && callStatement.expression.arguments[0].arguments[0] === node) {
+          calls.push(node);
+        }
+        return;
+      }
+      if (ts.isAwaitExpression(node.parent)
+        && ts.isVariableDeclaration(node.parent.parent)
+        && node.parent.parent.initializer === node.parent
+        && ts.isVariableDeclarationList(node.parent.parent.parent)
+        && (node.parent.parent.parent.flags & ts.NodeFlags.Const)
+        && directStatementWithin(node.parent.parent, target) === callStatement) {
+        calls.push(node);
+      }
     }
   });
   return calls;
@@ -430,6 +551,11 @@ function caughtCleanupPassedToWaitUntil(sourceFile, cleanup) {
   if (caught.arguments.length !== 1) return false;
   const callback = caught.arguments[0];
   if (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) return false;
+  if (!ts.isBlock(callback.body)) return false;
+  const loggerBinding = namedImport(sourceFile, './observability', 'logApiErrorEvent');
+  if (!loggerBinding
+    || hasTargetBindingConflict(cleanup, loggerBinding)
+    || hasTargetBindingConflict(callback, loggerBinding)) return false;
   let fixedLogCalls = 0;
   const fixedLogNodes = [];
   let otherCalls = 0;
@@ -437,7 +563,7 @@ function caughtCleanupPassedToWaitUntil(sourceFile, cleanup) {
   visitOwnScope(callback.body, (node) => {
     if (ts.isCallExpression(node)
       && ts.isIdentifier(node.expression)
-      && node.expression.text === 'logApiErrorEvent'
+      && node.expression.text === loggerBinding
       && node.arguments.length === 1
       && ts.isStringLiteral(node.arguments[0])
       && node.arguments[0].text === 'expired_session_cleanup_failed') {
@@ -449,26 +575,54 @@ function caughtCleanupPassedToWaitUntil(sourceFile, cleanup) {
     if (ts.isThrowStatement(node)) rethrows += 1;
   });
   if (fixedLogCalls !== 1 || otherCalls !== 0 || rethrows !== 0
+    || !directStatementWithin(fixedLogNodes[0], callback)
+    || !ts.isExpressionStatement(directStatementWithin(fixedLogNodes[0], callback))
     || isStaticallyDead(fixedLogNodes[0], callback, sourceFile)
     || isStaticallyDead(cleanupCall, cleanup)) return false;
 
   const waitUntilCalls = [];
+  let invalidWaitUntilOwnership = 0;
+  const waitUntilAliases = boundMethodAliases(sourceFile, new Set(['waitUntil']));
   visitOwnScope(cleanup.body, (node) => {
-    if (ts.isCallExpression(node)
-      && ts.isPropertyAccessExpression(node.expression)
-      && node.expression.name.text === 'waitUntil'
-      && ts.isPropertyAccessExpression(node.expression.expression)
-      && ts.isIdentifier(node.expression.expression.expression)
-      && node.expression.expression.expression.text === 'c'
-      && node.expression.expression.name.text === 'executionCtx'
-      && !isStaticallyDead(node, cleanup)) {
-      waitUntilCalls.push(node);
+    if (!ts.isCallExpression(node)) return;
+    const method = staticPropertyName(node.expression, sourceFile);
+    if (method === 'waitUntil') {
+      const receiver = ts.isPropertyAccessExpression(node.expression)
+        || ts.isElementAccessExpression(node.expression)
+        ? node.expression.expression
+        : null;
+      const exactReceiver = receiver
+        && (ts.isPropertyAccessExpression(receiver) || ts.isElementAccessExpression(receiver))
+        && staticPropertyName(receiver, sourceFile) === 'executionCtx'
+        && ts.isIdentifier(receiver.expression)
+        && receiver.expression.text === 'c';
+      if (exactReceiver && !isStaticallyDead(node, cleanup)) waitUntilCalls.push(node);
+      else invalidWaitUntilOwnership += 1;
+    }
+    if (boundMethodName(node, sourceFile) === 'waitUntil'
+      || (ts.isIdentifier(node.expression) && waitUntilAliases.has(node.expression.text))) {
+      invalidWaitUntilOwnership += 1;
     }
   });
-  return waitUntilCalls.length === 1
-    && waitUntilCalls[0].arguments.length === 1
-    && waitUntilCalls[0].arguments[0] === caught
-    && !isAwaitedThroughTransparentWrappers(waitUntilCalls[0]);
+  if (invalidWaitUntilOwnership !== 0
+    || waitUntilCalls.length !== 1
+    || waitUntilCalls[0].arguments.length !== 1
+    || waitUntilCalls[0].arguments[0] !== caught
+    || isAwaitedThroughTransparentWrappers(waitUntilCalls[0])) {
+    return false;
+  }
+  const waitUntilStatement = directStatementWithin(waitUntilCalls[0], cleanup);
+  if (!waitUntilStatement
+    || !ts.isExpressionStatement(waitUntilStatement)
+    || waitUntilStatement.expression !== waitUntilCalls[0]) return false;
+  const runtimeBinding = runtimeLocalBindings(sourceFile, cleanup).get(
+    cleanupCall.expression.expression.text,
+  );
+  return statementImmediatelyFollows(
+    sourceFile,
+    runtimeBinding ? directStatementWithin(runtimeBinding, cleanup) : null,
+    waitUntilStatement,
+  );
 }
 function directHelperCalls(target, helperName) {
   if (hasTargetBindingConflict(target, helperName)) return [];
@@ -478,7 +632,10 @@ function directHelperCalls(target, helperName) {
       && ts.isIdentifier(node.expression)
       && node.expression.text === helperName
       && !isStaticallyDead(node, target)) {
-      calls.push(node);
+      const statement = directStatementWithin(node, target);
+      if (statement && ts.isExpressionStatement(statement) && statement.expression === node) {
+        calls.push(node);
+      }
     }
   });
   return calls;
@@ -491,16 +648,38 @@ function staticPropertyName(expression, sourceFile) {
   }
   return null;
 }
-function appVariablesMembers(node) {
-  if (ts.isTypeAliasDeclaration(node)
-    && node.name.text === 'AppVariables'
-    && ts.isTypeLiteralNode(node.type)) {
-    return node.type.members;
+function boundMethodName(initializer, sourceFile) {
+  if (!initializer || !ts.isCallExpression(initializer)
+    || staticPropertyName(initializer.expression, sourceFile) !== 'bind') {
+    return null;
   }
-  if (ts.isInterfaceDeclaration(node) && node.name.text === 'AppVariables') {
-    return node.members;
-  }
-  return [];
+  const boundTarget = ts.isPropertyAccessExpression(initializer.expression)
+    || ts.isElementAccessExpression(initializer.expression)
+    ? initializer.expression.expression
+    : null;
+  return boundTarget ? staticPropertyName(boundTarget, sourceFile) : null;
+}
+function boundMethodAliases(sourceFile, methodNames) {
+  const aliases = new Set();
+  visit(sourceFile, (node) => {
+    if (!ts.isVariableDeclaration(node) || !node.initializer) return;
+    if (ts.isIdentifier(node.name)
+      && methodNames.has(boundMethodName(node.initializer, sourceFile))) {
+      aliases.add(node.name.text);
+      return;
+    }
+    if (ts.isObjectBindingPattern(node.name)) {
+      for (const element of node.name.elements) {
+        const sourceName = element.propertyName
+          ? declaredPropertyName(element.propertyName, sourceFile)
+          : declaredPropertyName(element.name, sourceFile);
+        if (sourceName && methodNames.has(sourceName) && ts.isIdentifier(element.name)) {
+          aliases.add(element.name.text);
+        }
+      }
+    }
+  });
+  return aliases;
 }
 function declaredPropertyName(name, sourceFile) {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
@@ -512,16 +691,78 @@ function declaredPropertyName(name, sourceFile) {
   }
   return null;
 }
+function namedTypeOwnsProperty(sourceFile, typeName, propertyName, seen = new Set()) {
+  if (seen.has(typeName)) return false;
+  const nextSeen = new Set([...seen, typeName]);
+  const declarations = sourceFile.statements.filter((statement) =>
+    (ts.isTypeAliasDeclaration(statement) || ts.isInterfaceDeclaration(statement))
+      && statement.name.text === typeName);
+  return declarations.some((declaration) => {
+    const members = ts.isTypeAliasDeclaration(declaration)
+      && ts.isTypeLiteralNode(declaration.type)
+      ? declaration.type.members
+      : ts.isInterfaceDeclaration(declaration)
+        ? declaration.members
+        : [];
+    if (members.some((member) => ts.isPropertySignature(member)
+      && declaredPropertyName(member.name, sourceFile) === propertyName)) {
+      return true;
+    }
+    if (ts.isTypeAliasDeclaration(declaration)) {
+      return typeNodeOwnsProperty(
+        sourceFile,
+        declaration.type,
+        propertyName,
+        nextSeen,
+      );
+    }
+    return declaration.heritageClauses?.some((clause) => clause.types.some((type) =>
+      ts.isIdentifier(type.expression)
+        && namedTypeOwnsProperty(
+          sourceFile,
+          type.expression.text,
+          propertyName,
+          nextSeen,
+        ))) ?? false;
+  });
+}
+function typeNodeOwnsProperty(sourceFile, typeNode, propertyName, seen = new Set()) {
+  if (ts.isTypeLiteralNode(typeNode)) {
+    return typeNode.members.some((member) => ts.isPropertySignature(member)
+      && declaredPropertyName(member.name, sourceFile) === propertyName);
+  }
+  if (ts.isTypeReferenceNode(typeNode) && ts.isIdentifier(typeNode.typeName)) {
+    return namedTypeOwnsProperty(sourceFile, typeNode.typeName.text, propertyName, seen);
+  }
+  if (ts.isParenthesizedTypeNode(typeNode)) {
+    return typeNodeOwnsProperty(sourceFile, typeNode.type, propertyName, seen);
+  }
+  if (ts.isUnionTypeNode(typeNode) || ts.isIntersectionTypeNode(typeNode)) {
+    return typeNode.types.some((type) =>
+      typeNodeOwnsProperty(sourceFile, type, propertyName, seen));
+  }
+  return false;
+}
 function recordIdentityOwnershipViolations(
   root,
   sourceFile,
   credentialNames,
+  d1Aliases,
   violations,
 ) {
   visit(root, (node) => {
-    if (ts.isCallExpression(node)
-      && ['prepare', 'batch'].includes(staticPropertyName(node.expression, sourceFile))) {
-      violations.push(`direct .${staticPropertyName(node.expression, sourceFile)}()`);
+    if (ts.isCallExpression(node)) {
+      const directMethod = staticPropertyName(node.expression, sourceFile);
+      const boundMethod = boundMethodName(node, sourceFile);
+      if (['prepare', 'batch'].includes(directMethod)) {
+        violations.push(`direct .${directMethod}()`);
+      }
+      if (['prepare', 'batch'].includes(boundMethod)) {
+        violations.push(`bound .${boundMethod}()`);
+      }
+      if (ts.isIdentifier(node.expression) && d1Aliases.has(node.expression.text)) {
+        violations.push(`aliased D1 ${node.expression.text}()`);
+      }
     }
     if (ts.isIdentifier(node) && credentialNames.has(node.text)) {
       violations.push(`credential primitive ${node.text}`);
@@ -529,9 +770,16 @@ function recordIdentityOwnershipViolations(
     if (ts.isIdentifier(node) && node.text === 'password_hash') {
       violations.push('password_hash ownership');
     }
-    if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-      if (/password_hash/i.test(node.text)) violations.push('password_hash SQL ownership');
-      if (/\b(?:select|insert|update|delete)\b[\s\S]*\b(?:sessions|users|audit_logs)\b/i.test(node.text)) {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node)
+      || ts.isBinaryExpression(node)
+      || (ts.isIdentifier(node) && ts.isCallExpression(node.parent)
+        && node.parent.arguments.includes(node))) {
+      const value = staticValue(node, sourceFile);
+      if (typeof value === 'string' && /password_hash/i.test(value)) {
+        violations.push('password_hash SQL ownership');
+      }
+      if (typeof value === 'string'
+        && /\b(?:select|insert|update|delete)\b[\s\S]*\b(?:sessions|users|audit_logs)\b/i.test(value)) {
         violations.push('Identity table SQL ownership');
       }
     }
@@ -552,14 +800,27 @@ function workerStructureViolations(sourceFile) {
     'hashPassword',
     'verifyPassword',
   ]);
+  const d1Aliases = boundMethodAliases(sourceFile, new Set(['prepare', 'batch']));
   for (const statement of workerIdentitySlice(sourceFile)) {
-    recordIdentityOwnershipViolations(statement, sourceFile, credentialNames, violations);
+    recordIdentityOwnershipViolations(
+      statement,
+      sourceFile,
+      credentialNames,
+      d1Aliases,
+      violations,
+    );
   }
   for (const statement of sourceFile.statements) {
     if (ts.isFunctionDeclaration(statement)
       && statement.body
       && ['requireAuth', 'scheduleExpiredSessionCleanup'].includes(statement.name?.text)) {
-      recordIdentityOwnershipViolations(statement.body, sourceFile, credentialNames, violations);
+      recordIdentityOwnershipViolations(
+        statement.body,
+        sourceFile,
+        credentialNames,
+        d1Aliases,
+        violations,
+      );
     }
   }
 
@@ -571,6 +832,10 @@ function workerStructureViolations(sourceFile) {
     'authSetCookie',
     'authClearCookie',
   ]);
+  if (namedTypeOwnsProperty(sourceFile, 'AppVariables', 'user')) {
+    violations.push('AppVariables.user');
+  }
+  const contextAliases = boundMethodAliases(sourceFile, new Set(['get', 'set']));
   visit(sourceFile, (node) => {
     if ((ts.isFunctionDeclaration(node) || ts.isTypeAliasDeclaration(node)
       || ts.isInterfaceDeclaration(node))
@@ -582,14 +847,16 @@ function workerStructureViolations(sourceFile) {
         if (bindsName(node.name, name)) violations.push(`legacy declaration ${name}`);
       }
     }
-    if (appVariablesMembers(node).some((member) => ts.isPropertySignature(member)
-      && declaredPropertyName(member.name, sourceFile) === 'user')) {
-      violations.push('AppVariables.user');
-    }
     if (ts.isCallExpression(node)
       && ['get', 'set'].includes(staticPropertyName(node.expression, sourceFile))
       && staticValue(node.arguments[0], sourceFile) === 'user') {
       violations.push(`context.${staticPropertyName(node.expression, sourceFile)}('user')`);
+    }
+    if (ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && contextAliases.has(node.expression.text)
+      && staticValue(node.arguments[0], sourceFile) === 'user') {
+      violations.push(`aliased context ${node.expression.text}('user')`);
     }
   });
   return [...new Set(violations)];
@@ -767,6 +1034,10 @@ test('the Worker Runtime call validator rejects property, string, nested, and de
     `const runtime = identity(c.env.DB); while (false) { await runtime.authenticate({}); }`,
     `const runtime = identity(c.env.DB); while (0) { await runtime.authenticate({}); }`,
     `const disabled = 0; const runtime = identity(c.env.DB); if (disabled) { await runtime.authenticate({}); }`,
+    `const runtime = identity(c.env.DB); if (!true) { await runtime.authenticate({}); }`,
+    `const runtime = identity(c.env.DB); if (true) return; const result = await runtime.authenticate({});`,
+    `if (true) return; const runtime = identity(c.env.DB); const result = await runtime.authenticate({});`,
+    `const runtime = identity(c.env.DB); for (;;) { break; await runtime.authenticate({}); }`,
     `const runtime = identity(c.env.DB); return; await runtime.authenticate({});`,
     `let runtime = identity(c.env.DB); await runtime.authenticate({});`,
     `let runtime = identity(c.env.DB); runtime = fake; await runtime.authenticate({});`,
@@ -960,5 +1231,89 @@ test('Identity helper ownership rejects direct D1 alongside valid Runtime calls'
       'identity-helper-d1-decoy.ts',
     );
     assert.match(workerStructureViolations(sourceFile).join('\n'), /direct \.(?:prepare|batch)\(\)/);
+  }
+});
+test('Identity ownership rejects bound D1 aliases and statically assembled SQL', () => {
+  const sourceFile = parseTypeScriptSource(`
+    const app = { post() {}, get() {}, patch() {} };
+    app.post('/api/auth/login', async (c) => {
+      const prepare = c.env.DB.prepare.bind(c.env.DB);
+      await prepare('SELECT id FROM ' + 'users');
+    });
+    app.post('/api/auth/logout', async () => {});
+    app.get('/api/users', async () => {});
+    app.post('/api/users', async () => {});
+    app.get('/api/users/me', async () => {});
+    app.patch('/api/users/me/password', async () => {});
+    app.patch('/api/users/:id/password', async () => {});
+    app.get('/api/categories', async () => {});
+  `, 'bound-d1-decoy.ts');
+  const violations = workerStructureViolations(sourceFile).join('\n');
+  assert.match(violations, /(?:bound \.prepare|aliased D1 prepare)/);
+  assert.match(violations, /Identity table SQL ownership/);
+});
+test('Identity boundary rejects wrapped route registrations before a direct decoy', () => {
+  const sourceFile = parseTypeScriptSource(`
+    const app = { post() {}, get() {}, patch() {} };
+    if (true) app.get('/api/categories', async () => {});
+    app.post('/api/auth/login', async () => {});
+    app.post('/api/auth/logout', async () => {});
+    app.get('/api/users', async () => {});
+    app.post('/api/users', async () => {});
+    app.get('/api/users/me', async () => {});
+    app.patch('/api/users/me/password', async () => {});
+    app.patch('/api/users/:id/password', async () => {});
+    app.get('/api/categories', async () => {});
+  `, 'wrapped-boundary-decoy.ts');
+  assert.throws(
+    () => workerIdentitySlice(sourceFile),
+    /must be a direct top-level route/,
+  );
+});
+test('legacy context ownership follows AppVariables and bound getter aliases', () => {
+  const sourceFile = parseTypeScriptSource(`
+    type LegacyVariables = { user?: unknown };
+    type AppVariables = LegacyVariables;
+    const app = { post() {}, get() {}, patch() {} };
+    app.post('/api/auth/login', async () => {});
+    app.post('/api/auth/logout', async () => {});
+    app.get('/api/users', async () => {});
+    app.post('/api/users', async () => {});
+    app.get('/api/users/me', async () => {});
+    app.patch('/api/users/me/password', async () => {});
+    app.patch('/api/users/:id/password', async () => {});
+    app.get('/api/categories', async () => {});
+    const getUser = c.get.bind(c);
+    getUser('user');
+  `, 'aliased-context-decoy.ts');
+  const violations = workerStructureViolations(sourceFile).join('\n');
+  assert.match(violations, /AppVariables\.user/);
+  assert.match(violations, /aliased context getUser\('user'\)/);
+});
+test('cleanup ownership rejects shadowed logging and aliased extra waitUntil calls', () => {
+  for (const extra of [
+    `const logApiErrorEvent = () => {};
+     logApiErrorEvent('expired_session_cleanup_failed');`,
+    `logApiErrorEvent('expired_session_cleanup_failed');`,
+  ]) {
+    const additionalWait = extra.startsWith('const logApiErrorEvent')
+      ? ''
+      : `const waitLater = c.executionCtx.waitUntil.bind(c.executionCtx);
+         waitLater(Promise.resolve());`;
+    const sourceFile = parseTypeScriptSource(`
+      import { identity } from './identity';
+      import { logApiErrorEvent } from './observability';
+      function scheduleExpiredSessionCleanup(c) {
+        const runtime = identity(c.env.DB);
+        c.executionCtx.waitUntil(runtime.cleanupExpiredSessions().catch(() => {
+          ${extra}
+        }));
+        ${additionalWait}
+      }
+    `, 'cleanup-alias-decoy.ts');
+    assert.equal(caughtCleanupPassedToWaitUntil(
+      sourceFile,
+      uniqueTopLevelFunction(sourceFile, 'scheduleExpiredSessionCleanup'),
+    ), false);
   }
 });
