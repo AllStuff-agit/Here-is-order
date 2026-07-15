@@ -669,6 +669,79 @@ test('requires exactly one exact-name remote database match with the checked-in 
   }
 });
 
+test('resolves and calls now before resolving and calling randomUUID', async () => {
+  const { deps, events } = createAuditHarness();
+  Object.defineProperties(deps, {
+    now: {
+      configurable: true,
+      enumerable: true,
+      get() {
+        events.push('get now');
+        return () => {
+          events.push('call now');
+          return new Date(executedAt);
+        };
+      },
+    },
+    randomUUID: {
+      configurable: true,
+      enumerable: true,
+      get() {
+        events.push('get randomUUID');
+        return () => {
+          events.push('call randomUUID');
+          return generatedRequestId;
+        };
+      },
+    },
+  });
+
+  await runIdentityCompatibilityAudit(deps);
+  assert.deepEqual(
+    events.filter((event) => typeof event === 'string'),
+    ['get now', 'call now', 'get randomUUID', 'call randomUUID'],
+  );
+});
+
+test('a throwing randomUUID getter is sanitized only after now has run', async () => {
+  const { deps, events } = createAuditHarness();
+  const rawDetail = 'raw randomUUID getter detail';
+  Object.defineProperties(deps, {
+    now: {
+      configurable: true,
+      enumerable: true,
+      get() {
+        events.push('get now');
+        return () => {
+          events.push('call now');
+          return new Date(executedAt);
+        };
+      },
+    },
+    randomUUID: {
+      configurable: true,
+      enumerable: true,
+      get() {
+        events.push('get randomUUID');
+        throw new Error(rawDetail);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => runIdentityCompatibilityAudit(deps),
+    (error) => {
+      assert.equal(error.message, 'Identity compatibility audit failed.');
+      assert.equal(error.message.includes(rawDetail), false);
+      return true;
+    },
+  );
+  assert.deepEqual(
+    events.filter((event) => typeof event === 'string'),
+    ['get now', 'call now', 'get randomUUID'],
+  );
+});
+
 test('runs the fixed audit in exact order and emits only summary then one-line report JSON', async () => {
   const { deps, events } = createAuditHarness();
   const result = await runIdentityCompatibilityAudit(deps);

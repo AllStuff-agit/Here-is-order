@@ -413,15 +413,18 @@ export async function runIdentityCompatibilityAudit(options = {}) {
 
     const configuredNow = options.now;
     const now = configuredNow === undefined ? () => new Date() : configuredNow;
+    const executedAt = now().toISOString();
+
     const configuredRandomUUID = options.randomUUID;
     const randomUUID = configuredRandomUUID === undefined
       ? createRandomUUID
       : configuredRandomUUID;
+    const requestId = randomUUID();
     const report = buildIdentityCompatibilityReport({
       row,
-      executedAt: now().toISOString(),
+      executedAt,
       gitSha: environment.gitSha,
-      requestId: randomUUID(),
+      requestId,
     });
 
     const configuredAppendSummary = options.appendSummary;
