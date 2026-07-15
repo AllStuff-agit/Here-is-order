@@ -15,6 +15,8 @@ function visit(node, callback) {
 }
 function staticValue(node, sourceFile, seen = new Set()) {
   if (!node) return null;
+  const unwrapped = unwrapTransparentExpression(node);
+  if (unwrapped !== node) return staticValue(unwrapped, sourceFile, seen);
   if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
   if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
@@ -28,7 +30,6 @@ function staticValue(node, sourceFile, seen = new Set()) {
     return value;
   }
   if (ts.isNumericLiteral(node)) return Number(node.text.replaceAll('_', ''));
-  if (ts.isParenthesizedExpression(node)) return staticValue(node.expression, sourceFile, seen);
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
     const left = staticValue(node.left, sourceFile, seen);
     const right = staticValue(node.right, sourceFile, seen);
@@ -710,6 +711,20 @@ function staticPropertyName(expression, sourceFile) {
   }
   return null;
 }
+function directWebCryptoCredentialPrimitive(expression) {
+  const path = propertyPath(expression);
+  if (!path) return null;
+  const method = path.at(-1);
+  if (!['digest', 'importKey', 'deriveBits'].includes(method)) return null;
+  const isGlobalCrypto = path.length === 3
+    && path[0] === 'crypto'
+    && path[1] === 'subtle';
+  const isGlobalThisCrypto = path.length === 4
+    && path[0] === 'globalThis'
+    && path[1] === 'crypto'
+    && path[2] === 'subtle';
+  return isGlobalCrypto || isGlobalThisCrypto ? `crypto.subtle.${method}` : null;
+}
 function boundMethodName(initializer, sourceFile) {
   if (!initializer || !ts.isCallExpression(initializer)
     || staticPropertyName(initializer.expression, sourceFile) !== 'bind') {
@@ -816,6 +831,7 @@ function recordIdentityOwnershipViolations(
     if (ts.isCallExpression(node)) {
       const directMethod = staticPropertyName(node.expression, sourceFile);
       const boundMethod = boundMethodName(node, sourceFile);
+      const webCryptoPrimitive = directWebCryptoCredentialPrimitive(node.expression);
       if (['prepare', 'batch'].includes(directMethod)) {
         violations.push(`direct .${directMethod}()`);
       }
@@ -824,6 +840,9 @@ function recordIdentityOwnershipViolations(
       }
       if (ts.isIdentifier(node.expression) && d1Aliases.has(node.expression.text)) {
         violations.push(`aliased D1 ${node.expression.text}()`);
+      }
+      if (webCryptoPrimitive) {
+        violations.push(`credential primitive ${webCryptoPrimitive}`);
       }
     }
     if (ts.isIdentifier(node) && credentialNames.has(node.text)) {
@@ -873,21 +892,30 @@ function workerStructureViolations(sourceFile) {
     );
   }
   for (const statement of sourceFile.statements) {
-    if (!ts.isFunctionDeclaration(statement) || !statement.body) continue;
+    const helperRoot = ts.isFunctionDeclaration(statement) && statement.body
+      ? statement.body
+      : ts.isVariableStatement(statement) || ts.isClassDeclaration(statement)
+        ? statement
+        : null;
+    if (!helperRoot) continue;
     const helperViolations = [];
     recordIdentityOwnershipViolations(
-      statement.body,
+      helperRoot,
       sourceFile,
       credentialNames,
       d1Aliases,
       helperViolations,
     );
-    if (['requireAuth', 'scheduleExpiredSessionCleanup'].includes(statement.name?.text)) {
+    if (ts.isFunctionDeclaration(statement)
+      && ['requireAuth', 'scheduleExpiredSessionCleanup'].includes(statement.name?.text)) {
       violations.push(...helperViolations);
       continue;
     }
     violations.push(...helperViolations
-      .filter((violation) => violation === 'Identity table SQL ownership')
+      .filter((violation) => violation === 'Identity table SQL ownership'
+        || violation === 'password_hash ownership'
+        || violation === 'password_hash SQL ownership'
+        || violation.startsWith('credential primitive '))
       .map((violation) => `top-level ${violation}`));
   }
 
@@ -1843,6 +1871,227 @@ test('the Worker ownership gate rejects top-level Identity SQL outside business 
   assert.deepEqual(
     workerStructureViolations(sourceFile),
     ['top-level Identity table SQL ownership'],
+  );
+});
+test('the Worker ownership gate rejects arrow and class Identity SQL helpers', () => {
+  const routes = WORKER_IDENTITY_ROUTES
+    .map(([method, path]) => `app.${method}('${path}', async () => {});`)
+    .join('\n');
+  const declarations = [
+    `const legacySessionLookup = (db: D1Database) =>
+      db.prepare('SELECT id FROM sessions');`,
+    `const legacySessionLookup = function (db: D1Database) {
+      return db.prepare('SELECT id FROM sessions');
+    };`,
+    `const legacyIdentitySql = {
+      run(db: D1Database) {
+        return db.prepare('DELETE FROM sessions');
+      },
+    };`,
+    `class LegacyIdentitySql {
+      run(db: D1Database) {
+        return db.prepare('DELETE FROM sessions');
+      }
+    }`,
+  ];
+
+  for (const [index, declaration] of declarations.entries()) {
+    const source = `${declaration}
+      const app = { get() {}, post() {}, patch() {} };
+      ${routes}
+      app.get('/api/categories', async () => {});`;
+    const sourceFile = parseTypeScriptSource(source, `top-level-identity-sql-${index}.ts`);
+
+    assert.deepEqual(
+      workerStructureViolations(sourceFile),
+      ['top-level Identity table SQL ownership'],
+    );
+  }
+});
+test('the Worker ownership gate rejects a top-level WebCrypto credential helper', () => {
+  const routes = WORKER_IDENTITY_ROUTES
+    .map(([method, path]) => `app.${method}('${path}', async () => {});`)
+    .join('\n');
+  const source = `const legacyCredentialDigest = (password: string) =>
+      crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
+    const app = { get() {}, post() {}, patch() {} };
+    ${routes}
+    app.get('/api/categories', async () => {});`;
+  const sourceFile = parseTypeScriptSource(source, 'top-level-webcrypto-credential.ts');
+
+  assert.deepEqual(
+    workerStructureViolations(sourceFile),
+    ['top-level credential primitive crypto.subtle.digest'],
+  );
+});
+for (const [name, call, expectedViolation] of [
+  [
+    'digest',
+      `crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'importKey',
+      `crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(password),
+        'PBKDF2',
+        false,
+        ['deriveBits'],
+      )`,
+    'credential primitive crypto.subtle.importKey',
+  ],
+  [
+    'deriveBits',
+      `crypto.subtle.deriveBits(
+        { name: 'PBKDF2', salt: new Uint8Array(), iterations: 100000, hash: 'SHA-256' },
+        {} as CryptoKey,
+        256,
+      )`,
+    'credential primitive crypto.subtle.deriveBits',
+  ],
+  [
+    'globalThis element access',
+      `globalThis['crypto']['subtle']['digest'](
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'wrapped callee',
+      `(crypto.subtle.digest)(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'parenthesized subtle',
+      `(crypto.subtle).digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'as-wrapped subtle',
+      `(crypto.subtle as SubtleCrypto).digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'type-asserted crypto',
+      `(<typeof crypto>crypto).subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'non-null crypto',
+      `(crypto!).subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'satisfies-wrapped subtle',
+      `(crypto.subtle satisfies SubtleCrypto).digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'parenthesized globalThis crypto',
+      `(globalThis.crypto).subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'as-wrapped globalThis',
+      `(globalThis as typeof globalThis).crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'as-wrapped method element',
+      `crypto.subtle['digest' as const](
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'type-asserted subtle element',
+      `crypto[<'subtle'>'subtle'].digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+  [
+    'satisfies-wrapped crypto element',
+      `globalThis['crypto' satisfies string].subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(password) as BufferSource,
+      )`,
+    'credential primitive crypto.subtle.digest',
+  ],
+]) {
+  test(`the Worker ownership gate rejects renamed direct WebCrypto ${name}`, () => {
+    const routes = WORKER_IDENTITY_ROUTES
+      .map(([method, path]) => {
+        const body = path === '/api/auth/login'
+          ? `const credentialResult = await ${call}; void credentialResult;`
+          : '';
+        return `app.${method}('${path}', async () => { ${body} });`;
+      })
+      .join('\n');
+    const source = `const app = { get() {}, post() {}, patch() {} };
+      ${routes}
+      app.get('/api/categories', async () => {});`;
+    const sourceFile = parseTypeScriptSource(source, 'renamed-webcrypto-credential.ts');
+
+    assert.deepEqual(
+      workerStructureViolations(sourceFile),
+      [expectedViolation],
+    );
+  });
+}
+test('the Worker ownership gate rejects a wrapped computed WebCrypto alias', () => {
+  const routes = WORKER_IDENTITY_ROUTES
+    .map(([method, path]) => {
+      const body = path === '/api/auth/login'
+        ? `const digestMethod = 'digest' as const;
+          const credentialResult = await crypto.subtle[digestMethod](
+            'SHA-256',
+            new TextEncoder().encode(password) as BufferSource,
+          );
+          void credentialResult;`
+        : '';
+      return `app.${method}('${path}', async () => { ${body} });`;
+    })
+    .join('\n');
+  const source = `const app = { get() {}, post() {}, patch() {} };
+    ${routes}
+    app.get('/api/categories', async () => {});`;
+  const sourceFile = parseTypeScriptSource(source, 'computed-webcrypto-alias.ts');
+
+  assert.deepEqual(
+    workerStructureViolations(sourceFile),
+    ['credential primitive crypto.subtle.digest'],
   );
 });
 test('general business sessions authenticate through the shared Identity fixture', () => {
