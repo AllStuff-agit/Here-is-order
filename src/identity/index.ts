@@ -1,4 +1,5 @@
 import type {
+  AdminUserProjection,
   SessionUserProjection,
   UserRole,
 } from '@here-is-order/http-contract/identity';
@@ -39,6 +40,47 @@ export interface RuntimeIdentity {
   resolveSession(rawToken: string): Promise<IdentityPrincipal | null>;
   currentUser(principal: IdentityPrincipal): SessionUserProjection;
   cleanupExpiredSessions(): Promise<void>;
+  logout(input: Readonly<{
+    principal: IdentityPrincipal;
+    rawToken: string;
+  }>): Promise<IdentitySuccess<Readonly<{ loggedOut: true }>>>;
+  listUsers(principal: IdentityPrincipal): Promise<
+    IdentitySuccess<AdminUserProjection[]>
+    | IdentityFailure<'forbidden'>
+  >;
+  createUser(
+    principal: IdentityPrincipal,
+    input: Readonly<{
+      username: string;
+      name: string;
+      password: string;
+      role: UserRole;
+    }>,
+  ): Promise<
+    IdentitySuccess<AdminUserProjection | null>
+    | IdentityFailure<'forbidden' | 'duplicate_username'>
+  >;
+  changeOwnPassword(
+    principal: IdentityPrincipal,
+    input: Readonly<{
+      currentPassword: string;
+      newPassword: string;
+      currentRawToken: string;
+    }>,
+  ): Promise<
+    IdentitySuccess<Readonly<{ ok: true }>>
+    | IdentityFailure<'not_found' | 'invalid_credentials'>
+  >;
+  resetPassword(
+    principal: IdentityPrincipal,
+    input: Readonly<{
+      targetId: number;
+      newPassword: string;
+    }>,
+  ): Promise<
+    IdentitySuccess<Readonly<{ ok: true }>>
+    | IdentityFailure<'forbidden' | 'not_found'>
+  >;
 }
 
 type SessionResolutionRow = Readonly<{
@@ -58,6 +100,19 @@ type AuthenticationUserRow = Readonly<{
   role: UserRole;
   is_active: number;
   is_deleted: number;
+}>;
+
+type AdminUserRow = Readonly<{
+  id: number;
+  username: string;
+  name: string;
+  role: UserRole;
+  is_active: 0 | 1;
+  created_at: string;
+}>;
+
+type PasswordHashRow = Readonly<{
+  password_hash: string;
 }>;
 
 function failure<K extends string>(kind: K): IdentityFailure<K> {
@@ -82,6 +137,41 @@ function sessionUserProjection(
     role,
   } satisfies SessionUserProjection;
   return Object.freeze(user);
+}
+
+function adminUserProjection(row: AdminUserRow) {
+  const user = {
+    id: row.id,
+    username: row.username,
+    name: row.name,
+    role: row.role,
+    is_active: row.is_active,
+    created_at: row.created_at,
+  } satisfies AdminUserProjection;
+  return Object.freeze(user);
+}
+
+function auditStatement(
+  db: D1Database,
+  actorUserId: number | null,
+  action: string,
+  entityType: string,
+  entityId: number | null,
+  before?: unknown,
+  after?: unknown,
+) {
+  return db.prepare(
+    `INSERT INTO audit_logs
+       (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    actorUserId,
+    action,
+    entityType,
+    entityId,
+    before === undefined ? null : JSON.stringify(before),
+    after === undefined ? null : JSON.stringify(after),
+  );
 }
 
 export function identity(db: D1Database): RuntimeIdentity {
@@ -121,6 +211,183 @@ export function identity(db: D1Database): RuntimeIdentity {
       principal.name,
       principal.role,
     );
+  }
+
+  async function logout(input: Readonly<{
+    principal: IdentityPrincipal;
+    rawToken: string;
+  }>) {
+    await db.batch([
+      db.prepare(
+        'DELETE FROM sessions WHERE token = ? AND user_id = ?',
+      ).bind(input.rawToken, input.principal.userId),
+      auditStatement(
+        db,
+        input.principal.userId,
+        'logout',
+        'user',
+        input.principal.userId,
+      ),
+    ]);
+
+    return success(Object.freeze({ loggedOut: true as const }));
+  }
+
+  async function listUsers(principal: IdentityPrincipal) {
+    if (principal.role !== 'admin') return failure('forbidden');
+
+    const rows = await db.prepare(
+      `SELECT id AS id,
+              username AS username,
+              name AS name,
+              role AS role,
+              is_active AS is_active,
+              created_at AS created_at
+         FROM users
+        WHERE is_deleted = 0
+        ORDER BY id ASC`,
+    ).all<AdminUserRow>();
+    const users: AdminUserProjection[] = rows.results.map((row) => (
+      adminUserProjection(row)
+    ));
+    Object.freeze(users);
+    return success(users);
+  }
+
+  async function createUser(
+    principal: IdentityPrincipal,
+    input: Readonly<{
+      username: string;
+      name: string;
+      password: string;
+      role: UserRole;
+    }>,
+  ) {
+    if (principal.role !== 'admin') return failure('forbidden');
+
+    const existing = await db.prepare(
+      `SELECT id
+         FROM users
+        WHERE username = ?
+          AND is_deleted = 0`,
+    ).bind(input.username).first<{ id: number }>();
+    if (existing) return failure('duplicate_username');
+
+    const passwordHash = await workerIdentityCredential.createPasswordHash(
+      input.password,
+    );
+    const results = await db.batch([
+      db.prepare(
+        `INSERT INTO users (username, password_hash, name, role)
+         VALUES (?, ?, ?, ?)`,
+      ).bind(input.username, passwordHash, input.name, input.role),
+      db.prepare(
+        `INSERT INTO audit_logs
+           (actor_user_id, action, entity_type, entity_id, before_json, after_json)
+         VALUES (?, 'create', 'user', last_insert_rowid(), NULL, ?)`,
+      ).bind(
+        principal.userId,
+        JSON.stringify({ username: input.username, role: input.role }),
+      ),
+    ]);
+
+    const userId = Number(results[0].meta.last_row_id);
+    const row = await db.prepare(
+      `SELECT id AS id,
+              username AS username,
+              name AS name,
+              role AS role,
+              is_active AS is_active,
+              created_at AS created_at
+         FROM users
+        WHERE id = ?`,
+    ).bind(userId).first<AdminUserRow>();
+    return success(row === null ? null : adminUserProjection(row));
+  }
+
+  async function changeOwnPassword(
+    principal: IdentityPrincipal,
+    input: Readonly<{
+      currentPassword: string;
+      newPassword: string;
+      currentRawToken: string;
+    }>,
+  ) {
+    const row = await db.prepare(
+      'SELECT password_hash FROM users WHERE id = ?',
+    ).bind(principal.userId).first<PasswordHashRow>();
+    if (!row) return failure('not_found');
+
+    const passwordCheck = await workerIdentityCredential.verifyPassword(
+      input.currentPassword,
+      row.password_hash,
+    );
+    if (!passwordCheck.valid) return failure('invalid_credentials');
+
+    const newHash = await workerIdentityCredential.createPasswordHash(
+      input.newPassword,
+    );
+    await db.batch([
+      db.prepare(
+        `UPDATE users
+            SET password_hash = ?, updated_at = datetime('now')
+          WHERE id = ?`,
+      ).bind(newHash, principal.userId),
+      db.prepare(
+        'DELETE FROM sessions WHERE user_id = ? AND token <> ?',
+      ).bind(principal.userId, input.currentRawToken),
+      auditStatement(
+        db,
+        principal.userId,
+        'change_password',
+        'user',
+        principal.userId,
+      ),
+    ]);
+
+    return success(Object.freeze({ ok: true as const }));
+  }
+
+  async function resetPassword(
+    principal: IdentityPrincipal,
+    input: Readonly<{
+      targetId: number;
+      newPassword: string;
+    }>,
+  ) {
+    if (principal.role !== 'admin') return failure('forbidden');
+
+    const target = await db.prepare(
+      `SELECT id
+         FROM users
+        WHERE id = ?
+          AND is_deleted = 0`,
+    ).bind(input.targetId).first<{ id: number }>();
+    if (!target) return failure('not_found');
+
+    const newHash = await workerIdentityCredential.createPasswordHash(
+      input.newPassword,
+    );
+    await db.batch([
+      db.prepare(
+        `UPDATE users
+            SET password_hash = ?, updated_at = datetime('now')
+          WHERE id = ?
+            AND is_deleted = 0`,
+      ).bind(newHash, input.targetId),
+      db.prepare(
+        'DELETE FROM sessions WHERE user_id = ?',
+      ).bind(input.targetId),
+      auditStatement(
+        db,
+        principal.userId,
+        'reset_password',
+        'user',
+        input.targetId,
+      ),
+    ]);
+
+    return success(Object.freeze({ ok: true as const }));
   }
 
   async function authenticate(input: Readonly<{
@@ -225,5 +492,10 @@ export function identity(db: D1Database): RuntimeIdentity {
     resolveSession,
     currentUser,
     cleanupExpiredSessions,
+    logout,
+    listUsers,
+    createUser,
+    changeOwnPassword,
+    resetPassword,
   });
 }
