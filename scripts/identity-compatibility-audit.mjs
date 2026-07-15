@@ -1,4 +1,10 @@
+import { randomUUID as createRandomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { createCloudflareD1RestClient } from './cloudflare-d1-rest.mjs';
+import { readProductionD1Binding } from './recover-password.mjs';
 
 export const IDENTITY_COMPATIBILITY_AUDIT_VERSION = 'identity-compatibility-v1';
 export const IDENTITY_COMPATIBILITY_SQL = fs.readFileSync(
@@ -27,6 +33,15 @@ const REPORT_INPUT_FIELDS = [
   'gitSha',
   'requestId',
 ];
+const BINDING_FIELDS = [
+  'binding',
+  'databaseName',
+  'databaseId',
+];
+const REMOTE_TARGET_FIELDS = [
+  'name',
+  'uuid',
+];
 const MUTATING_SQL_KEYWORD = new RegExp(
   '\\b(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX|TRIGGER)\\b',
   'i',
@@ -34,8 +49,20 @@ const MUTATING_SQL_KEYWORD = new RegExp(
 const ISO_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
+const RUN_ID_PATTERN = /^[1-9]\d*$/;
+const DATABASE_UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FORBIDDEN_ENVIRONMENT_FIELDS = new Set([
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_FORWARD_DEPLOY_TOKEN',
+  'CLOUDFLARE_D1_TOKEN',
+  'CLOUDFLARE_DATABASE_ID',
+  'D1_DATABASE_ID',
+  'IDENTITY_COMPATIBILITY_SQL',
+  'SQL',
+]);
 
 function isPlainRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -75,6 +102,13 @@ function isNonnegativeSafeInteger(value) {
     && value >= 0;
 }
 
+function isNonblank(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 function isCanonicalIsoTimestamp(value) {
   if (typeof value !== 'string' || !ISO_TIMESTAMP_PATTERN.test(value)) return false;
   try {
@@ -98,6 +132,16 @@ function parseIdentityCompatibilityRow(row) {
     unsupported_password_hash_count: row.unsupported_password_hash_count,
     invalid_identity_projection_count: row.invalid_identity_projection_count,
   };
+}
+
+function assertExactBinding(binding) {
+  if (!hasExactDataFields(binding, BINDING_FIELDS, false)
+    || binding.binding !== 'DB'
+    || binding.databaseName !== 'hereisorder'
+    || typeof binding.databaseId !== 'string'
+    || !DATABASE_UUID_PATTERN.test(binding.databaseId)) {
+    throw new Error('Identity compatibility binding was invalid.');
+  }
 }
 
 function assertIdentityCompatibilityReport(report) {
@@ -220,6 +264,58 @@ export function assertReadOnlyIdentityAuditSql(sql) {
   }
 }
 
+export function parseIdentityCompatibilityEnvironment(env) {
+  try {
+    if (!env
+      || typeof env !== 'object'
+      || Array.isArray(env)
+      || env.CI !== 'true'
+      || env.GITHUB_ACTIONS !== 'true'
+      || env.GITHUB_EVENT_NAME !== 'workflow_dispatch'
+      || env.GITHUB_REF !== 'refs/heads/main'
+      || typeof env.GITHUB_SHA !== 'string'
+      || !GIT_SHA_PATTERN.test(env.GITHUB_SHA)
+      || typeof env.GITHUB_RUN_ID !== 'string'
+      || !RUN_ID_PATTERN.test(env.GITHUB_RUN_ID)
+      || typeof env.GITHUB_RUN_ATTEMPT !== 'string'
+      || !RUN_ID_PATTERN.test(env.GITHUB_RUN_ATTEMPT)
+      || !isNonblank(env.GITHUB_STEP_SUMMARY)
+      || !path.isAbsolute(env.GITHUB_STEP_SUMMARY)
+      || path.normalize(env.GITHUB_STEP_SUMMARY) !== env.GITHUB_STEP_SUMMARY
+      || typeof env.CLOUDFLARE_ACCOUNT_ID !== 'string'
+      || !ACCOUNT_ID_PATTERN.test(env.CLOUDFLARE_ACCOUNT_ID)
+      || !isNonblank(env.CLOUDFLARE_D1_READ_TOKEN)
+      || Object.keys(env).some((field) => (
+        field.startsWith('INPUT_') || FORBIDDEN_ENVIRONMENT_FIELDS.has(field)
+      ))) {
+      throw new Error('invalid environment');
+    }
+    return Object.freeze({
+      accountId: env.CLOUDFLARE_ACCOUNT_ID,
+      readToken: env.CLOUDFLARE_D1_READ_TOKEN,
+      gitSha: env.GITHUB_SHA,
+      summaryPath: env.GITHUB_STEP_SUMMARY,
+    });
+  } catch {
+    throw new Error('Identity compatibility environment was invalid.');
+  }
+}
+
+export function assertIdentityCompatibilityRemoteTarget(matches, binding) {
+  try {
+    assertExactBinding(binding);
+    if (!Array.isArray(matches)
+      || matches.length !== 1
+      || !hasExactDataFields(matches[0], REMOTE_TARGET_FIELDS, false)
+      || matches[0].name !== 'hereisorder'
+      || matches[0].uuid !== binding.databaseId) {
+      throw new Error('invalid remote target');
+    }
+  } catch {
+    throw new Error('Identity compatibility remote target was invalid.');
+  }
+}
+
 export function parseIdentityCompatibilityResult(results) {
   try {
     if (!Array.isArray(results)
@@ -272,4 +368,66 @@ export function identityCompatibilityGatePassed(report) {
 export function renderIdentityCompatibilitySummary(report) {
   assertIdentityCompatibilityReport(report);
   return `## Identity compatibility audit\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
+}
+
+export async function runIdentityCompatibilityAudit({
+  argv = process.argv.slice(2),
+  env = process.env,
+  configPath = 'wrangler.toml',
+  readBinding = readProductionD1Binding,
+  createClient = createCloudflareD1RestClient,
+  now = () => new Date(),
+  randomUUID = createRandomUUID,
+  appendSummary = (filePath, contents) => fs.appendFileSync(filePath, contents, 'utf8'),
+  log = (contents) => console.log(contents),
+} = {}) {
+  try {
+    if (argv.length !== 0) throw new Error('invalid arguments');
+    const environment = parseIdentityCompatibilityEnvironment(env);
+    const binding = readBinding({ configPath, binding: 'DB' });
+    assertExactBinding(binding);
+    const client = createClient({
+      accountId: environment.accountId,
+      apiToken: environment.readToken,
+    });
+    assertIdentityCompatibilityRemoteTarget(
+      await client.listDatabasesByExactName('hereisorder'),
+      binding,
+    );
+    assertReadOnlyIdentityAuditSql(IDENTITY_COMPATIBILITY_SQL);
+    const row = parseIdentityCompatibilityResult(await client.query(
+      binding.databaseId,
+      { sql: IDENTITY_COMPATIBILITY_SQL },
+    ));
+    const report = buildIdentityCompatibilityReport({
+      row,
+      executedAt: now().toISOString(),
+      gitSha: environment.gitSha,
+      requestId: randomUUID(),
+    });
+    await appendSummary(
+      environment.summaryPath,
+      renderIdentityCompatibilitySummary(report),
+    );
+    await log(JSON.stringify(report));
+    return Object.freeze({
+      report,
+      gatePassed: identityCompatibilityGatePassed(report),
+    });
+  } catch {
+    throw new Error('Identity compatibility audit failed.');
+  }
+}
+
+const isMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  runIdentityCompatibilityAudit()
+    .then(({ gatePassed }) => {
+      if (!gatePassed) process.exitCode = 1;
+    })
+    .catch(() => {
+      console.error('Identity compatibility audit failed.');
+      process.exitCode = 1;
+    });
 }

@@ -25,6 +25,7 @@
     "db:generate:admin-seed": "node scripts/generate-admin-seed.mjs",
     "db:recover-password": "node scripts/recover-password.mjs",
     "db:manage-smoke-identity": "node scripts/manage-smoke-identity.mjs",
+    "db:audit:identity-compatibility": "node scripts/identity-compatibility-audit.mjs",
     "db:audit:order-items": "node scripts/audit-order-item-integrity.mjs",
     "deploy:preflight": "node scripts/production-preflight.mjs",
     "deploy:verify-worker": "node scripts/verify-worker-deployment.mjs",

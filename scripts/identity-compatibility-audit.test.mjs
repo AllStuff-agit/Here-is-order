@@ -1,14 +1,22 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
   IDENTITY_COMPATIBILITY_AUDIT_VERSION,
   IDENTITY_COMPATIBILITY_SQL,
+  assertIdentityCompatibilityRemoteTarget,
   assertReadOnlyIdentityAuditSql,
   buildIdentityCompatibilityReport,
   identityCompatibilityGatePassed,
+  parseIdentityCompatibilityEnvironment,
   parseIdentityCompatibilityResult,
   renderIdentityCompatibilitySummary,
+  runIdentityCompatibilityAudit,
 } from './identity-compatibility-audit.mjs';
 
 const QUERY_FIELDS = [
@@ -57,6 +65,27 @@ const expectedReport = {
   invalidIdentityProjectionCount: 0,
   outcome: 'verified',
 };
+const validEnvironment = {
+  CI: 'true',
+  GITHUB_ACTIONS: 'true',
+  GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_REF: 'refs/heads/main',
+  GITHUB_SHA: 'a'.repeat(40),
+  GITHUB_RUN_ID: '12345',
+  GITHUB_RUN_ATTEMPT: '1',
+  GITHUB_STEP_SUMMARY: '/tmp/identity-summary.md',
+  CLOUDFLARE_ACCOUNT_ID: 'b'.repeat(32),
+  CLOUDFLARE_D1_READ_TOKEN: 'dedicated-read-token',
+};
+const productionBinding = {
+  binding: 'DB',
+  databaseName: 'hereisorder',
+  databaseId: '6129977e-f5a1-41ee-96ce-7a7a1e260e6d',
+};
+const generatedRequestId = '123e4567-e89b-42d3-a456-426614174000';
+const executedAt = '2026-07-15T12:34:56.000Z';
+const AUDIT_MODULE_URL = new URL('./identity-compatibility-audit.mjs', import.meta.url);
+const PROJECT_ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function envelope(row = cleanRow) {
   return [{ success: true, results: [row], meta: {} }];
@@ -87,6 +116,48 @@ function collisionCandidate(values, fieldNames, storage) {
     value: 'enumerable key collision',
   });
   return candidate;
+}
+
+function createAuditHarness({ row = cleanRow } = {}) {
+  const events = [];
+  const client = {
+    async listDatabasesByExactName(name) {
+      events.push(['listDatabasesByExactName', name]);
+      return [{ name: 'hereisorder', uuid: productionBinding.databaseId }];
+    },
+    async query(databaseId, body) {
+      events.push(['query', databaseId, body]);
+      return envelope(row);
+    },
+  };
+  const deps = {
+    argv: [],
+    env: { ...validEnvironment },
+    configPath: '/repo/wrangler.toml',
+    readBinding(options) {
+      events.push(['readBinding', options]);
+      return { ...productionBinding };
+    },
+    createClient(options) {
+      events.push(['createClient', options]);
+      return client;
+    },
+    now() {
+      events.push(['now']);
+      return new Date(executedAt);
+    },
+    randomUUID() {
+      events.push(['randomUUID']);
+      return generatedRequestId;
+    },
+    async appendSummary(filePath, contents) {
+      events.push(['appendSummary', filePath, contents]);
+    },
+    async log(contents) {
+      events.push(['log', contents]);
+    },
+  };
+  return { client, deps, events };
 }
 
 test('exports the fixed version and accepts its checked-in read-only SQL', () => {
@@ -361,5 +432,419 @@ test('rejects inherited, non-enumerable, collision, symbol, and accessor propert
   ]) {
     assert.throws(() => identityCompatibilityGatePassed(candidate));
     assert.throws(() => renderIdentityCompatibilitySummary(candidate));
+  }
+});
+
+test('accepts only the protected main workflow environment and returns its safe fields', () => {
+  const parsed = parseIdentityCompatibilityEnvironment(validEnvironment);
+  assert.deepEqual(parsed, {
+    accountId: validEnvironment.CLOUDFLARE_ACCOUNT_ID,
+    readToken: validEnvironment.CLOUDFLARE_D1_READ_TOKEN,
+    gitSha: validEnvironment.GITHUB_SHA,
+    summaryPath: validEnvironment.GITHUB_STEP_SUMMARY,
+  });
+  assert.equal(Object.isFrozen(parsed), true);
+});
+
+test('rejects every missing protected workflow environment field', () => {
+  for (const field of Object.keys(validEnvironment)) {
+    assert.throws(
+      () => parseIdentityCompatibilityEnvironment(without(validEnvironment, field)),
+      /environment was invalid/i,
+      `${field} must be required`,
+    );
+  }
+});
+
+test('rejects malformed protected workflow metadata and dedicated credentials', () => {
+  const invalidPatches = [
+    { CI: '1' },
+    { GITHUB_ACTIONS: 'false' },
+    { GITHUB_EVENT_NAME: 'push' },
+    { GITHUB_REF: 'refs/heads/feature' },
+    { GITHUB_SHA: 'A'.repeat(40) },
+    { GITHUB_SHA: 'a'.repeat(39) },
+    { GITHUB_RUN_ID: '0' },
+    { GITHUB_RUN_ID: '01' },
+    { GITHUB_RUN_ATTEMPT: '0' },
+    { GITHUB_RUN_ATTEMPT: '1.0' },
+    { GITHUB_STEP_SUMMARY: 'tmp/identity-summary.md' },
+    { GITHUB_STEP_SUMMARY: '/tmp/../identity-summary.md' },
+    { GITHUB_STEP_SUMMARY: '/tmp/identity-summary.md\nleak' },
+    { CLOUDFLARE_ACCOUNT_ID: 'B'.repeat(32) },
+    { CLOUDFLARE_ACCOUNT_ID: 'b'.repeat(31) },
+    { CLOUDFLARE_D1_READ_TOKEN: '' },
+    { CLOUDFLARE_D1_READ_TOKEN: ' dedicated-read-token' },
+    { CLOUDFLARE_D1_READ_TOKEN: 'dedicated-read-token\nleak' },
+  ];
+  for (const patch of invalidPatches) {
+    assert.throws(
+      () => parseIdentityCompatibilityEnvironment({ ...validEnvironment, ...patch }),
+      /environment was invalid/i,
+    );
+  }
+});
+
+test('rejects deploy credentials and user-controlled audit inputs even when the read token exists', () => {
+  for (const patch of [
+    { CLOUDFLARE_API_TOKEN: 'deploy-token' },
+    { CLOUDFLARE_FORWARD_DEPLOY_TOKEN: 'forward-deploy-token' },
+    { INPUT_SQL: 'SELECT * FROM users' },
+    { INPUT_DATABASE_ID: productionBinding.databaseId },
+    { INPUT_USERNAME: 'target-user' },
+    { INPUT_ROLE: 'admin' },
+    { INPUT_ACTION: 'query' },
+  ]) {
+    assert.throws(
+      () => parseIdentityCompatibilityEnvironment({ ...validEnvironment, ...patch }),
+      /environment was invalid/i,
+    );
+  }
+});
+
+test('invalid argv is rejected before environment access, config read, or client creation', async () => {
+  const events = [];
+  const env = new Proxy({}, {
+    get() {
+      events.push('environment');
+      throw new Error('raw environment detail');
+    },
+  });
+  await assert.rejects(
+    () => runIdentityCompatibilityAudit({
+      argv: ['--sql', 'SELECT 1'],
+      env,
+      readBinding() {
+        events.push('readBinding');
+      },
+      createClient() {
+        events.push('createClient');
+      },
+    }),
+    { message: 'Identity compatibility audit failed.' },
+  );
+  assert.deepEqual(events, []);
+});
+
+test('invalid environment is rejected before config read or client creation', async () => {
+  for (const env of [
+    without(validEnvironment, 'CLOUDFLARE_D1_READ_TOKEN'),
+    { ...validEnvironment, CLOUDFLARE_API_TOKEN: 'deploy-token' },
+  ]) {
+    const events = [];
+    await assert.rejects(
+      () => runIdentityCompatibilityAudit({
+        argv: [],
+        env,
+        readBinding() {
+          events.push('readBinding');
+        },
+        createClient() {
+          events.push('createClient');
+        },
+      }),
+      { message: 'Identity compatibility audit failed.' },
+    );
+    assert.deepEqual(events, []);
+  }
+});
+
+test('requires the exact DB/hereisorder/canonical UUID binding before client creation', async () => {
+  const invalidBindings = [
+    { ...productionBinding, binding: 'OTHER' },
+    { ...productionBinding, databaseName: 'hereisorder-preview' },
+    { ...productionBinding, databaseId: productionBinding.databaseId.toUpperCase() },
+    { ...productionBinding, databaseId: productionBinding.databaseId.replaceAll('-', '') },
+    { ...productionBinding, databaseId: `${productionBinding.databaseId} ` },
+    { ...productionBinding, extra: 'forbidden' },
+    without(productionBinding, 'databaseId'),
+  ];
+  for (const binding of invalidBindings) {
+    const events = [];
+    await assert.rejects(
+      () => runIdentityCompatibilityAudit({
+        argv: [],
+        env: { ...validEnvironment },
+        readBinding(options) {
+          events.push(['readBinding', options]);
+          return binding;
+        },
+        createClient() {
+          events.push(['createClient']);
+        },
+      }),
+      { message: 'Identity compatibility audit failed.' },
+    );
+    assert.deepEqual(events, [[
+      'readBinding',
+      { configPath: 'wrangler.toml', binding: 'DB' },
+    ]]);
+  }
+});
+
+test('requires exactly one exact-name remote database match with the checked-in UUID', () => {
+  assert.doesNotThrow(() => assertIdentityCompatibilityRemoteTarget(
+    [{ name: 'hereisorder', uuid: productionBinding.databaseId }],
+    productionBinding,
+  ));
+
+  const invalidMatches = [
+    undefined,
+    [],
+    [
+      { name: 'hereisorder', uuid: productionBinding.databaseId },
+      { name: 'hereisorder', uuid: productionBinding.databaseId },
+    ],
+    [{ name: 'other', uuid: productionBinding.databaseId }],
+    [{ name: 'hereisorder', uuid: '11111111-1111-1111-1111-111111111111' }],
+    [{ name: 'hereisorder', uuid: productionBinding.databaseId, id: 7 }],
+    [Object.assign(
+      Object.create({ id: 7 }),
+      { name: 'hereisorder', uuid: productionBinding.databaseId },
+    )],
+  ];
+  for (const matches of invalidMatches) {
+    assert.throws(
+      () => assertIdentityCompatibilityRemoteTarget(matches, productionBinding),
+      /remote target was invalid/i,
+    );
+  }
+});
+
+test('runs the fixed audit in exact order and emits only summary then one-line report JSON', async () => {
+  const { deps, events } = createAuditHarness();
+  const result = await runIdentityCompatibilityAudit(deps);
+  assert.deepEqual(result, { report: expectedReport, gatePassed: true });
+  assert.equal(Object.isFrozen(result), true);
+  assert.notEqual(result.report, expectedReport);
+  assert.equal(Object.isFrozen(result.report), true);
+  assert.deepEqual(events, [
+    ['readBinding', { configPath: '/repo/wrangler.toml', binding: 'DB' }],
+    ['createClient', {
+      accountId: validEnvironment.CLOUDFLARE_ACCOUNT_ID,
+      apiToken: validEnvironment.CLOUDFLARE_D1_READ_TOKEN,
+    }],
+    ['listDatabasesByExactName', 'hereisorder'],
+    ['query', productionBinding.databaseId, { sql: IDENTITY_COMPATIBILITY_SQL }],
+    ['now'],
+    ['randomUUID'],
+    [
+      'appendSummary',
+      validEnvironment.GITHUB_STEP_SUMMARY,
+      renderIdentityCompatibilitySummary(result.report),
+    ],
+    ['log', JSON.stringify(result.report)],
+  ]);
+  assert.doesNotMatch(events.at(-1)[1], /\r|\n/);
+
+  const output = `${events.at(-2)[2]}${events.at(-1)[1]}`;
+  for (const forbidden of [
+    validEnvironment.CLOUDFLARE_D1_READ_TOKEN,
+    validEnvironment.CLOUDFLARE_ACCOUNT_ID,
+    productionBinding.databaseId,
+    'audit_version',
+    'password_hash',
+    'results',
+    'success',
+    'meta',
+  ]) {
+    assert.equal(output.includes(forbidden), false);
+  }
+});
+
+test('returns a frozen failed gate only after emitting the same safe eight-field report', async () => {
+  const { deps, events } = createAuditHarness({
+    row: {
+      ...cleanRow,
+      unsupported_password_hash_count: 1,
+      invalid_identity_projection_count: 2,
+    },
+  });
+  const result = await runIdentityCompatibilityAudit(deps);
+  assert.equal(result.gatePassed, false);
+  assert.equal(Object.isFrozen(result), true);
+  assert.deepEqual(Object.keys(result.report), REPORT_FIELDS);
+  assert.deepEqual(result.report, {
+    ...expectedReport,
+    unsupportedPasswordHashCount: 1,
+    invalidIdentityProjectionCount: 2,
+  });
+  assert.deepEqual(events.slice(-2).map((event) => event[0]), [
+    'appendSummary',
+    'log',
+  ]);
+  assert.equal(events.at(-1)[1], JSON.stringify(result.report));
+});
+
+test('sanitizes every dependency failure without leaking target, envelope, or raw detail', async () => {
+  const rawDetail = [
+    'raw-detail',
+    validEnvironment.CLOUDFLARE_D1_READ_TOKEN,
+    validEnvironment.CLOUDFLARE_ACCOUNT_ID,
+    productionBinding.databaseId,
+    JSON.stringify(cleanEnvelope),
+  ].join('/');
+  const failures = [
+    { key: 'readBinding', replacement() { throw new Error(rawDetail); } },
+    { key: 'createClient', replacement() { throw new Error(rawDetail); } },
+    {
+      key: 'createClient',
+      replacement() {
+        return {
+          async listDatabasesByExactName() { throw new Error(rawDetail); },
+        };
+      },
+    },
+    {
+      key: 'createClient',
+      replacement() {
+        return {
+          async listDatabasesByExactName() {
+            return [{ name: 'hereisorder', uuid: productionBinding.databaseId }];
+          },
+          async query() { throw new Error(rawDetail); },
+        };
+      },
+    },
+    { key: 'now', replacement() { throw new Error(rawDetail); } },
+    { key: 'randomUUID', replacement() { throw new Error(rawDetail); } },
+    { key: 'appendSummary', async replacement() { throw new Error(rawDetail); } },
+    { key: 'log', async replacement() { throw new Error(rawDetail); } },
+  ];
+
+  for (const { key, replacement } of failures) {
+    const { deps } = createAuditHarness();
+    deps[key] = replacement;
+    await assert.rejects(
+      () => runIdentityCompatibilityAudit(deps),
+      (error) => {
+        assert.equal(error.message, 'Identity compatibility audit failed.');
+        assert.equal(error.message.includes(rawDetail), false);
+        return true;
+      },
+    );
+  }
+});
+
+test('the zero-input CLI prints only the sanitized failure and exits nonzero', () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(AUDIT_MODULE_URL)], {
+    encoding: 'utf8',
+    env: {},
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, 'Identity compatibility audit failed.\n');
+});
+
+test('the direct-entry CLI invokes once, emits one safe failed-gate report, and exits nonzero', () => {
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'identity-compatibility-cli-'),
+  );
+  const preloadPath = path.join(temporaryDirectory, 'fake-cloudflare.mjs');
+  const summaryPath = path.join(temporaryDirectory, 'summary.md');
+  const listUrl = `https://api.cloudflare.com/client/v4/accounts/${
+    validEnvironment.CLOUDFLARE_ACCOUNT_ID
+  }/d1/database?name=hereisorder`;
+  const queryUrl = `https://api.cloudflare.com/client/v4/accounts/${
+    validEnvironment.CLOUDFLARE_ACCOUNT_ID
+  }/d1/database/${productionBinding.databaseId}/query`;
+  const preloadSource = `
+let requestCount = 0;
+globalThis.fetch = async (url, init) => {
+  requestCount += 1;
+  if (requestCount === 1) {
+    if (url !== ${JSON.stringify(listUrl)}
+      || init.method !== 'GET'
+      || init.headers.Authorization !== ${JSON.stringify(
+    `Bearer ${validEnvironment.CLOUDFLARE_D1_READ_TOKEN}`,
+  )}) {
+      throw new Error('invalid list request');
+    }
+    return new Response(JSON.stringify({
+      success: true,
+      result: [{
+        name: 'hereisorder',
+        uuid: ${JSON.stringify(productionBinding.databaseId)},
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  if (requestCount === 2) {
+    const body = JSON.parse(init.body);
+    if (url !== ${JSON.stringify(queryUrl)}
+      || init.method !== 'POST'
+      || Object.keys(body).join(',') !== 'sql'
+      || typeof body.sql !== 'string'
+      || !body.sql.startsWith('WITH constants AS (')) {
+      throw new Error('invalid query request');
+    }
+    return new Response(JSON.stringify({
+      success: true,
+      result: [{
+        success: true,
+        results: [{
+          audit_version: 'identity-compatibility-v1',
+          legacy_password_hash_count: 3,
+          unsupported_password_hash_count: 1,
+          invalid_identity_projection_count: 2,
+        }],
+        meta: {},
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  throw new Error('audit invoked more than once');
+};
+process.on('beforeExit', () => {
+  if (requestCount !== 2) process.exitCode = 92;
+});
+`;
+
+  try {
+    fs.writeFileSync(preloadPath, preloadSource, 'utf8');
+    const result = spawnSync(process.execPath, [
+      '--import',
+      pathToFileURL(preloadPath).href,
+      fileURLToPath(AUDIT_MODULE_URL),
+    ], {
+      cwd: PROJECT_ROOT,
+      encoding: 'utf8',
+      env: { ...validEnvironment, GITHUB_STEP_SUMMARY: summaryPath },
+    });
+
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, '');
+    assert.match(result.stdout, /^\{[^\r\n]+\}\n$/);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(report), REPORT_FIELDS);
+    assert.equal(report.auditVersion, IDENTITY_COMPATIBILITY_AUDIT_VERSION);
+    assert.match(report.executedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(report.gitSha, validEnvironment.GITHUB_SHA);
+    assert.match(
+      report.requestId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    assert.equal(report.legacyPasswordHashCount, 3);
+    assert.equal(report.unsupportedPasswordHashCount, 1);
+    assert.equal(report.invalidIdentityProjectionCount, 2);
+    assert.equal(report.outcome, 'verified');
+
+    const summary = fs.readFileSync(summaryPath, 'utf8');
+    assert.equal(summary, renderIdentityCompatibilitySummary(report));
+    assert.equal(summary.split('## Identity compatibility audit').length - 1, 1);
+    for (const forbidden of [
+      validEnvironment.CLOUDFLARE_D1_READ_TOKEN,
+      validEnvironment.CLOUDFLARE_ACCOUNT_ID,
+      productionBinding.databaseId,
+      'audit_version',
+      'password_hash',
+      'results',
+      'success',
+      'meta',
+      'Identity compatibility audit failed.',
+    ]) {
+      assert.equal(`${result.stdout}${result.stderr}${summary}`.includes(forbidden), false);
+    }
+  } finally {
+    fs.rmSync(temporaryDirectory, { force: true, recursive: true });
   }
 });
