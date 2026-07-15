@@ -665,6 +665,8 @@ legacyPasswordHashCount, unsupportedPasswordHashCount,
 invalidIdentityProjectionCount, outcome
 ```
 
+To prevent queued stale-main evidence, the workflow uses only the built-in `github.token` and immediately before the fixed query reads live remote `main`, requiring that SHA to equal `GITHUB_SHA`; it repeats the same comparison immediately after the audit command. Either mismatch fails closed. Wave 2B must re-read live remote `main` and require the same merged SHA immediately before it consumes this report.
+
 `unsupportedPasswordHashCount` and `invalidIdentityProjectionCount` must both be zero. All three counts cover every non-deleted user, active and inactive. The projection count is positive when a row violates any public serializer invariant: positive integer id; U+0000-free username equal to its trimmed form with length 1–128; U+0000-free name equal to its trimmed form with length 1–200; exact role; `is_active IN (0, 1)`; or canonical SQLite UTC `created_at`. The report exposes only the aggregate; a positive result stops rollout for a separately approved private diagnostic/remediation path.
 
 After migration 003, `identity-hardening-audit-v1` uses this exact ordered output:

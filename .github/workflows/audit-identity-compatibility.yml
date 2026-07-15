@@ -36,9 +36,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify live main before audit
+        run: test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Audit production identity compatibility
         run: npm run db:audit:identity-compatibility
         env:
           CI: 'true'
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_D1_READ_TOKEN: ${{ secrets.CLOUDFLARE_D1_READ_TOKEN }}
+
+      - name: Verify live main after audit
+        run: test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}

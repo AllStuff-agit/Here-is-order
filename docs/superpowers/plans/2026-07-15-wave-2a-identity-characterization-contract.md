@@ -1842,6 +1842,7 @@ git commit -m "docs: document identity compatibility gate"
 
 - Consumes: a clean verified feature branch, repository PR checks, the normal `main` deployment workflow, and the dedicated D1 read secret.
 - Produces: the exact deployed main SHA plus one successful `identity-compatibility-v1` report with both required zero counts.
+- Preserves: the workflow's built-in `github.token` pre-audit and post-audit live-main guards, plus a fresh live-main equality check immediately before Wave 2B consumes the report.
 
 - [ ] **Step 1: Push the feature branch and open the PR**
 
@@ -1975,10 +1976,28 @@ audit_report_matches="$(gh run view "$audit_run_id" \
   --repo AllStuff-agit/Here-is-order --log \
   | rg -o "\{\"auditVersion\":\"identity-compatibility-v1\",\"executedAt\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z\",\"gitSha\":\"$merge_sha\",\"requestId\":\"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\",\"legacyPasswordHashCount\":[0-9]+,\"unsupportedPasswordHashCount\":0,\"invalidIdentityProjectionCount\":0,\"outcome\":\"verified\"\}")"
 test "$(printf '%s\n' "$audit_report_matches" | sed '/^$/d' | wc -l)" -eq 1
+remote_main_after_audit="$(gh api repos/AllStuff-agit/Here-is-order/git/ref/heads/main \
+  --jq '.object.sha')"
+test "$remote_main_after_audit" = "$merge_sha"
 ```
 
-Expected: dispatch happens exactly once. A returned URL is validated; if no URL is returned, bounded discovery selects exactly one run created after the recorded UTC boundary. Zero/multiple candidates, metadata mismatch, a moved `main`, or a nonzero gate all fail closed and never trigger a second dispatch. The successful exact-SHA run emits exactly one valid report. Do not retain raw run logs as repository artifacts.
+Expected: dispatch happens exactly once. A returned URL is validated; if no URL is returned, bounded discovery selects exactly one run created after the recorded UTC boundary. Zero/multiple candidates, metadata mismatch, a moved `main` before dispatch, inside the workflow's pre/post audit guards, or after report extraction, and any nonzero gate all fail closed and never trigger a second dispatch. The successful exact-SHA run emits exactly one valid report. Do not retain raw run logs as repository artifacts.
 
 - [ ] **Step 6: Mark the 2A gate complete and hand off to a new 2B plan**
 
-Update only the working plan/checklist state used by the agent. Do not retroactively place production values or run URLs in source documentation. Invoke `superpowers:finishing-a-development-branch`, remove the linked worktree, and only then delete the merged local/remote feature branch. Create the Wave 2B implementation plan from the merged `main` tree, using the approved design and the zero-count report as its entry evidence.
+Before consuming the report as Wave 2B entry evidence, re-read live remote `main` and require the same merge SHA:
+
+```bash
+set -euo pipefail
+pr_number="$(gh pr view --repo AllStuff-agit/Here-is-order --json number --jq '.number')"
+merge_sha="$(gh pr view "$pr_number" --repo AllStuff-agit/Here-is-order \
+  --json mergeCommit --jq '.mergeCommit.oid')"
+[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
+wave2b_main_sha="$(gh api repos/AllStuff-agit/Here-is-order/git/ref/heads/main \
+  --jq '.object.sha')"
+test "$wave2b_main_sha" = "$merge_sha"
+```
+
+The Wave 2B plan must repeat this exact check before consuming the report.
+
+Update only the working plan/checklist state used by the agent. Do not retroactively place production values or run URLs in source documentation. Invoke `superpowers:finishing-a-development-branch`, remove the linked worktree, and only then delete the merged local/remote feature branch. Create the Wave 2B implementation plan from the merged `main` tree, using the approved design and the zero-count report as its entry evidence only after the fresh equality check passes.

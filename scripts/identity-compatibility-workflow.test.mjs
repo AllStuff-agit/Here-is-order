@@ -11,6 +11,21 @@ const PACKAGE_URL = new URL('../package.json', import.meta.url);
 const CHECKOUT_ACTION = 'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0';
 const SETUP_NODE_ACTION = 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e';
 const PACKAGE_COMMAND = 'npm run db:audit:identity-compatibility';
+const LIVE_MAIN_COMMAND = 'test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq \'.object.sha\')" = "$GITHUB_SHA"';
+const BEFORE_LIVE_MAIN_STEP = [
+  '      - name: Verify live main before audit',
+  `        run: ${LIVE_MAIN_COMMAND}`,
+  '        env:',
+  '          GH_TOKEN: ${{ github.token }}',
+  '',
+].join('\n');
+const AFTER_LIVE_MAIN_STEP = [
+  '      - name: Verify live main after audit',
+  `        run: ${LIVE_MAIN_COMMAND}`,
+  '        env:',
+  '          GH_TOKEN: ${{ github.token }}',
+  '',
+].join('\n');
 const CANONICAL_WORKFLOW = [
   'name: Audit production identity compatibility',
   '',
@@ -50,12 +65,22 @@ const CANONICAL_WORKFLOW = [
   '      - name: Install dependencies',
   '        run: npm ci',
   '',
+  '      - name: Verify live main before audit',
+  `        run: ${LIVE_MAIN_COMMAND}`,
+  '        env:',
+  '          GH_TOKEN: ${{ github.token }}',
+  '',
   '      - name: Audit production identity compatibility',
   '        run: npm run db:audit:identity-compatibility',
   '        env:',
   '          CI: \'true\'',
   '          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}',
   '          CLOUDFLARE_D1_READ_TOKEN: ${{ secrets.CLOUDFLARE_D1_READ_TOKEN }}',
+  '',
+  '      - name: Verify live main after audit',
+  `        run: ${LIVE_MAIN_COMMAND}`,
+  '        env:',
+  '          GH_TOKEN: ${{ github.token }}',
 ].join('\n') + '\n';
 
 function readWorkflow() {
@@ -162,6 +187,11 @@ function assertIdentityCompatibilityWorkflowSafety(contents) {
     },
     { name: 'Install dependencies', run: 'npm ci' },
     {
+      name: 'Verify live main before audit',
+      run: LIVE_MAIN_COMMAND,
+      env: { GH_TOKEN: '${{ github.token }}' },
+    },
+    {
       name: 'Audit production identity compatibility',
       run: PACKAGE_COMMAND,
       env: {
@@ -169,6 +199,11 @@ function assertIdentityCompatibilityWorkflowSafety(contents) {
         CLOUDFLARE_ACCOUNT_ID: '${{ secrets.CLOUDFLARE_ACCOUNT_ID }}',
         CLOUDFLARE_D1_READ_TOKEN: '${{ secrets.CLOUDFLARE_D1_READ_TOKEN }}',
       },
+    },
+    {
+      name: 'Verify live main after audit',
+      run: LIVE_MAIN_COMMAND,
+      env: { GH_TOKEN: '${{ github.token }}' },
     },
   ]);
 
@@ -179,7 +214,9 @@ function assertIdentityCompatibilityWorkflowSafety(contents) {
       'exit 1',
       'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
       'npm ci',
+      LIVE_MAIN_COMMAND,
       PACKAGE_COMMAND,
+      LIVE_MAIN_COMMAND,
     ],
     'shell commands and their order must be exact',
   );
@@ -194,6 +231,8 @@ function assertIdentityCompatibilityWorkflowSafety(contents) {
   );
   assert.equal(countOccurrences(contents, PACKAGE_COMMAND), 1);
   assert.equal(countOccurrences(contents, 'git rev-parse HEAD'), 1);
+  assert.equal(countOccurrences(contents, LIVE_MAIN_COMMAND), 2);
+  assert.equal(countOccurrences(contents, 'GH_TOKEN: ${{ github.token }}'), 2);
 
   const forbiddenPatterns = [
     /CLOUDFLARE_API_TOKEN/,
@@ -280,6 +319,27 @@ test('workflow safety rejects credential, input, SQL, artifact, output, shell, a
 
   for (const mutation of mutations) {
     assert.notEqual(mutation, canonical, 'mutation fixture must change the workflow');
+    assert.throws(() => assertIdentityCompatibilityWorkflowSafety(mutation));
+  }
+});
+
+test('workflow safety rejects removing or changing either live-main guard', () => {
+  const canonical = CANONICAL_WORKFLOW;
+  const mutations = [
+    canonical.replace(BEFORE_LIVE_MAIN_STEP, ''),
+    canonical.replace(AFTER_LIVE_MAIN_STEP, ''),
+    canonical.replace(
+      BEFORE_LIVE_MAIN_STEP,
+      BEFORE_LIVE_MAIN_STEP.replace(LIVE_MAIN_COMMAND, 'test "$GITHUB_SHA" = "$GITHUB_SHA"'),
+    ),
+    canonical.replace(
+      AFTER_LIVE_MAIN_STEP,
+      AFTER_LIVE_MAIN_STEP.replace(LIVE_MAIN_COMMAND, 'test "$GITHUB_SHA" = "$GITHUB_SHA"'),
+    ),
+  ];
+
+  for (const mutation of mutations) {
+    assert.notEqual(mutation, canonical, 'live-main mutation fixture must change the workflow');
     assert.throws(() => assertIdentityCompatibilityWorkflowSafety(mutation));
   }
 });

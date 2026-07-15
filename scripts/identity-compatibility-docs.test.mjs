@@ -4,11 +4,24 @@ import test from 'node:test';
 
 const deployGuide = fs.readFileSync('docs/design/cloudflare-deploy-guide.md', 'utf8');
 const checklist = fs.readFileSync('docs/design/implementation-checklist-v1.md', 'utf8');
+const designSpec = fs.readFileSync(
+  'docs/superpowers/specs/2026-07-15-wave-2-identity-session-deep-module-design.md',
+  'utf8',
+);
+const wave2aPlan = fs.readFileSync(
+  'docs/superpowers/plans/2026-07-15-wave-2a-identity-characterization-contract.md',
+  'utf8',
+);
 const readme = fs.readFileSync('README.md', 'utf8');
 
 const deployGuideRequired = [
   'CLOUDFLARE_D1_READ_TOKEN',
   'audit-identity-compatibility.yml',
+  'built-in `github.token`',
+  'audit 명령 직전',
+  'live remote `main` SHA',
+  '`GITHUB_SHA`',
+  'audit 명령 성공 직후',
   'identity-compatibility-v1',
   'auditVersion',
   'executedAt',
@@ -21,6 +34,8 @@ const deployGuideRequired = [
   'unsupportedPasswordHashCount = 0',
   'invalidIdentityProjectionCount = 0',
   'Wave 2B',
+  'evidence를 소비하기 직전',
+  'merge SHA',
 ];
 
 const checklistRequired = [
@@ -29,9 +44,14 @@ const checklistRequired = [
   'deploy',
   'exact main SHA',
   'audit-identity-compatibility.yml',
+  'audit 명령 직전과 직후',
+  'live remote `main` SHA',
+  '`GITHUB_SHA`',
   'unsupportedPasswordHashCount = 0',
   'invalidIdentityProjectionCount = 0',
   'Wave 2B',
+  'evidence 사용 직전',
+  'merge SHA',
 ];
 
 const readmeRequired = [
@@ -76,6 +96,17 @@ function extractH2(text, heading) {
     throw new Error(`${expected} section must exist`);
   }
   const next = lines.findIndex((line, index) => index > start && /^## /.test(line));
+  return lines.slice(start, next < 0 ? lines.length : next).join('\n');
+}
+
+function extractH3(text, heading) {
+  const lines = text.split(/\r?\n/);
+  const expected = `### ${heading}`;
+  const start = lines.findIndex((line) => line === expected);
+  if (start < 0) {
+    throw new Error(`${expected} section must exist`);
+  }
+  const next = lines.findIndex((line, index) => index > start && /^###? /.test(line));
   return lines.slice(start, next < 0 ? lines.length : next).join('\n');
 }
 
@@ -131,6 +162,47 @@ test('implementation checklist keeps the Wave 2A production evidence unchecked',
     checklistItems.every((line) => line.startsWith('- [ ]')),
     'Wave 2A production evidence must remain unchecked until Task 6',
   );
+});
+
+test('design and delivery plan fail closed when main moves around audit evidence', () => {
+  const designSection = extractH3(
+    designSpec,
+    '10.3 Fixed read-only compatibility and hardening audits',
+  );
+  assertInOrder(designSection, [
+    'built-in `github.token`',
+    'immediately before the fixed query',
+    'live remote `main`',
+    '`GITHUB_SHA`',
+    'immediately after the audit command',
+    'Wave 2B',
+    'immediately before it consumes this report',
+  ]);
+
+  const task6 = extractH3(
+    wave2aPlan,
+    'Task 6: Merge, deploy, and produce the Wave 2B entry evidence',
+  );
+  assert.ok(
+    task6.includes('built-in `github.token` pre-audit and post-audit live-main guards'),
+    'Task 6 must preserve both in-workflow stale-main guards',
+  );
+  assert.equal(
+    task6.split('repos/AllStuff-agit/Here-is-order/git/ref/heads/main').length - 1,
+    3,
+    'Task 6 must re-read live main before dispatch, after the report, and before 2B consumes it',
+  );
+  assertInOrder(task6, [
+    'remote_main_sha=',
+    'audit_dispatch_output=',
+    'audit_report_matches=',
+    'remote_main_after_audit=',
+    'test "$remote_main_after_audit" = "$merge_sha"',
+    'Step 6: Mark the 2A gate complete and hand off to a new 2B plan',
+    'wave2b_main_sha=',
+    'test "$wave2b_main_sha" = "$merge_sha"',
+    'before consuming the report',
+  ]);
 });
 
 test('README contains only the short identity compatibility operator link', () => {

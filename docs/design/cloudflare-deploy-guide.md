@@ -400,9 +400,10 @@ Restore 뒤에는 migration 이력, 핵심 데이터 무결성, API와 web의 sc
 
 3. `gh secret list --repo AllStuff-agit/Here-is-order`에 secret 이름이 정확히 한 번 있는지 확인합니다. Secret 값은 출력하지 않습니다.
 4. `gh workflow run audit-identity-compatibility.yml --ref main --repo AllStuff-agit/Here-is-order`만 dispatch합니다. 임의 input이나 다른 ref를 전달하지 않습니다.
-5. Exact current `main`에서 실행된 workflow가 성공하고 `identity-compatibility-v1` JSON report가 정확히 하나 있는지 확인합니다. Report는 `auditVersion`, `executedAt`, `gitSha`, `requestId`, `legacyPasswordHashCount`, `unsupportedPasswordHashCount`, `invalidIdentityProjectionCount`, `outcome`의 여덟 필드만 이 순서로 가져야 하며, `gitSha`는 배포된 exact current `main` SHA와 같아야 합니다.
-6. `unsupportedPasswordHashCount = 0`과 `invalidIdentityProjectionCount = 0`을 모두 요구합니다. `legacyPasswordHashCount`는 0이 아닐 수 있습니다.
-7. Run 실패, report 누락·중복·형식 오류, SHA 불일치, zero-count gate 실패 중 하나라도 있으면 Wave 2B를 시작하지 않습니다. GitHub Actions에서 row를 조회하거나 ad hoc SQL을 실행하지 않고, 더 넓은 배포 token fallback도 사용하지 않습니다. 원인 식별과 수선은 별도로 승인된 private remediation 절차로 수행합니다.
+5. Workflow는 built-in `github.token`만 `GH_TOKEN`으로 사용하여 audit 명령 직전 live remote `main` SHA를 읽고 `GITHUB_SHA`와 같은지 확인합니다. 고정 audit 명령 성공 직후 동일 비교를 다시 수행하며, 어느 시점이든 `main`이 이동했다면 report를 evidence로 인정하지 않고 실패합니다. D1 read secret은 audit 명령에만 전달합니다.
+6. Exact current `main`에서 실행된 workflow가 성공하고 `identity-compatibility-v1` JSON report가 정확히 하나 있는지 확인합니다. Report는 `auditVersion`, `executedAt`, `gitSha`, `requestId`, `legacyPasswordHashCount`, `unsupportedPasswordHashCount`, `invalidIdentityProjectionCount`, `outcome`의 여덟 필드만 이 순서로 가져야 하며, `gitSha`는 배포된 exact current `main` SHA와 같아야 합니다.
+7. `unsupportedPasswordHashCount = 0`과 `invalidIdentityProjectionCount = 0`을 모두 요구합니다. `legacyPasswordHashCount`는 0이 아닐 수 있습니다.
+8. Run 실패, report 누락·중복·형식 오류, SHA 불일치, zero-count gate 실패 중 하나라도 있으면 Wave 2B를 시작하지 않습니다. Wave 2B가 이 evidence를 소비하기 직전에도 live remote `main`을 다시 읽어 같은 merge SHA인지 확인합니다. GitHub Actions에서 row를 조회하거나 ad hoc SQL을 실행하지 않고, 더 넓은 배포 token fallback도 사용하지 않습니다. 원인 식별과 수선은 별도로 승인된 private remediation 절차로 수행합니다.
 
 ## 6. 운영 발주 품목 무결성 감사
 
