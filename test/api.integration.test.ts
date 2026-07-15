@@ -3,7 +3,7 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { purchaseOrderDetailSchema } from '@here-is-order/http-contract/purchase-orders';
 import { Buffer } from 'node:buffer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPasswordHash } from '../scripts/generate-admin-seed.mjs';
+import { createPasswordHash } from '../scripts/node-credential-crypto.mjs';
 import worker from '../src/index';
 import { withTestTrigger } from './helpers/test-trigger';
 
@@ -222,13 +222,13 @@ describe('세션 만료 형식', () => {
   it('비밀번호 검증 뒤 hash가 교체되면 stale login session과 audit을 만들지 않는다', async () => {
     const username = `rotate-login-${crypto.randomUUID()}`;
     const password = `verified-${crypto.randomUUID()}`;
-    const verifiedHash = createPasswordHash(password, Buffer.alloc(16, 7));
+    const verifiedHash = await createPasswordHash(password, Buffer.alloc(16, 7));
     const inserted = await env.DB.prepare(
       `INSERT INTO users (username, password_hash, name, role)
        VALUES (?, ?, '회전 로그인 테스트', 'staff')`,
     ).bind(username, verifiedHash).run();
     const userId = Number(inserted.meta.last_row_id);
-    const rotatedHash = createPasswordHash(
+    const rotatedHash = await createPasswordHash(
       `rotated-${crypto.randomUUID()}`,
       Buffer.alloc(16, 8),
     );
@@ -523,7 +523,7 @@ describe('Wave 2A Identity compatibility characterization', () => {
     const inserted = await env.DB.prepare(
       `INSERT INTO users (username, password_hash, name, role)
        VALUES (?, ?, 'Self Change', 'staff')`,
-    ).bind(username, createPasswordHash(currentPassword)).run();
+    ).bind(username, await createPasswordHash(currentPassword)).run();
     const userId = Number(inserted.meta.last_row_id);
     const currentToken = `current-${crypto.randomUUID()}`;
     const siblingToken = `sibling-${crypto.randomUUID()}`;
@@ -566,7 +566,7 @@ describe('Wave 2A Identity compatibility characterization', () => {
     const inserted = await env.DB.prepare(
       `INSERT INTO users (username, password_hash, name, role)
        VALUES (?, ?, 'Reset Target', 'staff')`,
-    ).bind(username, createPasswordHash('target-current-password')).run();
+    ).bind(username, await createPasswordHash('target-current-password')).run();
     const targetUserId = Number(inserted.meta.last_row_id);
     const firstToken = `target-first-${crypto.randomUUID()}`;
     const secondToken = `target-second-${crypto.randomUUID()}`;

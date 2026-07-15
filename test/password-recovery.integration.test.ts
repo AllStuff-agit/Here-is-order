@@ -1,7 +1,7 @@
 import { env, exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { createPasswordHash } from '../scripts/node-credential-crypto.mjs';
 import { buildRecoveryBatch } from '../scripts/recover-password-core.mjs';
-import { createPasswordHash } from '../scripts/generate-admin-seed.mjs';
 import { withTestTrigger } from './helpers/test-trigger';
 
 const TABLES_IN_DELETE_ORDER = [
@@ -105,7 +105,7 @@ describe('operator password recovery', () => {
       'SELECT COUNT(*) AS count FROM sessions WHERE user_id = ?',
     ).bind(adminId).first()).toEqual({ count: 2 });
 
-    const passwordHash = createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
+    const passwordHash = await createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
     const { batch, auditJson } = buildRecoveryBatch({
       username: 'admin',
       passwordHash,
@@ -143,7 +143,7 @@ describe('operator password recovery', () => {
 
   it('audit insert가 실패하면 hash와 두 session을 함께 rollback한다', async () => {
     const adminId = await createUser({ username: 'admin', sessionCount: 2 });
-    const passwordHash = createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
+    const passwordHash = await createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
     const { batch } = buildRecoveryBatch({ username: 'admin', passwordHash });
 
     await expect(withTestTrigger(
@@ -186,7 +186,7 @@ describe('operator password recovery', () => {
       await createUser({ username, sessionCount: 1, ...target });
     }
     const before = await recoveryState();
-    const passwordHash = createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
+    const passwordHash = await createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
     const { batch } = buildRecoveryBatch({ username, passwordHash });
 
     await env.DB.batch(prepareBatch(batch));
@@ -195,7 +195,7 @@ describe('operator password recovery', () => {
   });
 
   it('Node에서 생성한 PBKDF2 hash로 실제 Worker login에 성공한다', async () => {
-    const passwordHash = createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
+    const passwordHash = await createPasswordHash(RECOVERY_PASSWORD, FIXED_SALT);
     await createUser({ username: 'admin', passwordHash });
 
     const response = await exports.default.fetch(new Request(
