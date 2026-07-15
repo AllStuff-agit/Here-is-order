@@ -1,7 +1,7 @@
 import { env, exports } from 'cloudflare:workers';
 import { beforeEach, expect, it } from 'vitest';
 
-import { createPasswordHash } from '../scripts/generate-admin-seed.mjs';
+import { createPasswordHash } from '../scripts/node-credential-crypto.mjs';
 import {
   assertSmokeIdentityPostflight,
   buildSmokeIdentityMutation,
@@ -31,7 +31,7 @@ const executeMutation = (mutation: ReturnType<typeof buildSmokeIdentityMutation>
     env.DB.prepare(sql).bind(...params)));
 
 it('provision creates one exact active staff row and one operator audit', async () => {
-  const hash = createPasswordHash('x'.repeat(64), Buffer.alloc(16, 1));
+  const hash = await createPasswordHash('x'.repeat(64), Buffer.alloc(16, 1));
   const preflight = buildSmokeIdentityPreflightQuery();
   const emptyPreflight = await env.DB.prepare(preflight.sql).bind(...preflight.params).all();
   expect(parseSmokeIdentityPreflight([emptyPreflight], 'provision')).toBeNull();
@@ -68,8 +68,8 @@ it('provision creates one exact active staff row and one operator audit', async 
 });
 
 it.each([0, 1])('rotate from active=%i writes the new hash and revokes all sessions', async (isActive) => {
-  const oldHash = createPasswordHash('x'.repeat(64), Buffer.alloc(16, 2));
-  const nextHash = createPasswordHash('y'.repeat(64), Buffer.alloc(16, 3));
+  const oldHash = await createPasswordHash('x'.repeat(64), Buffer.alloc(16, 2));
+  const nextHash = await createPasswordHash('y'.repeat(64), Buffer.alloc(16, 3));
   const inserted = await env.DB.prepare(
     `INSERT INTO users (username, password_hash, name, role, is_active, is_deleted)
      VALUES ('deployment-smoke', ?, 'Deployment Smoke', 'staff', ?, 0)`,
@@ -98,7 +98,7 @@ it.each([0, 1])('rotate from active=%i writes the new hash and revokes all sessi
 });
 
 it('disable preserves the hash, deactivates the row and revokes all sessions', async () => {
-  const hash = createPasswordHash('x'.repeat(64), Buffer.alloc(16, 4));
+  const hash = await createPasswordHash('x'.repeat(64), Buffer.alloc(16, 4));
   const inserted = await env.DB.prepare(
     `INSERT INTO users (username, password_hash, name, role, is_active, is_deleted)
      VALUES ('deployment-smoke', ?, 'Deployment Smoke', 'staff', 1, 0)`,
@@ -126,7 +126,7 @@ it('disable preserves the hash, deactivates the row and revokes all sessions', a
 });
 
 it('lost rotate CAS rolls back audit and preserves every existing session', async () => {
-  const passwordHash = createPasswordHash('x'.repeat(64), Buffer.alloc(16, 7));
+  const passwordHash = await createPasswordHash('x'.repeat(64), Buffer.alloc(16, 7));
   const inserted = await env.DB.prepare(
     `INSERT INTO users (username, password_hash, name, role, is_active, is_deleted)
      VALUES ('deployment-smoke', ?, 'Deployment Smoke', 'staff', 1, 0)`,
@@ -140,7 +140,7 @@ it('lost rotate CAS rolls back audit and preserves every existing session', asyn
   const mutation = buildSmokeIdentityMutation({
     action: 'rotate',
     target: { id: userId, observedActive: 0 },
-    passwordHash: createPasswordHash('y'.repeat(64), Buffer.alloc(16, 8)),
+    passwordHash: await createPasswordHash('y'.repeat(64), Buffer.alloc(16, 8)),
     operationId: OPERATION_IDS[3],
   });
   await expect(env.DB.batch(mutation.batch.map(({ sql, params }) =>
@@ -156,8 +156,8 @@ it('lost rotate CAS rolls back audit and preserves every existing session', asyn
 });
 
 it('audit insert failure rolls back the user update and preserves the session', async () => {
-  const oldHash = createPasswordHash('x'.repeat(64), Buffer.alloc(16, 5));
-  const nextHash = createPasswordHash('y'.repeat(64), Buffer.alloc(16, 6));
+  const oldHash = await createPasswordHash('x'.repeat(64), Buffer.alloc(16, 5));
+  const nextHash = await createPasswordHash('y'.repeat(64), Buffer.alloc(16, 6));
   const inserted = await env.DB.prepare(
     `INSERT INTO users (username, password_hash, name, role)
      VALUES ('deployment-smoke', ?, 'Deployment Smoke', 'staff')`,
@@ -192,7 +192,7 @@ it('audit insert failure rolls back the user update and preserves the session', 
 
 it('provisioned Node hash authenticates through the real Worker as staff', async () => {
   const password = 'x'.repeat(64);
-  const hash = createPasswordHash(password, Buffer.alloc(16, 9));
+  const hash = await createPasswordHash(password, Buffer.alloc(16, 9));
   await executeMutation(buildSmokeIdentityMutation({
     action: 'provision', target: null, passwordHash: hash, operationId: OPERATION_IDS[5],
   }));

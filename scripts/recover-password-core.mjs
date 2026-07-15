@@ -1,3 +1,5 @@
+import { CURRENT_PASSWORD_HASH_PREFIX } from '@here-is-order/identity-credential';
+
 const ACTIVE_ADMIN_PREDICATE = `username = ?
   AND role = 'admin'
   AND is_active = 1
@@ -118,7 +120,7 @@ export function buildRecoveryPostflightQuery(username, passwordHash) {
                      AND a.action = 'recover_password'
                    ORDER BY a.id DESC LIMIT 1) AS latest_recovery_audit
             FROM users u WHERE ${ACTIVE_ADMIN_PREDICATE}`,
-    params: [passwordHash, 'pbkdf2_sha256$100000$', username],
+    params: [passwordHash, CURRENT_PASSWORD_HASH_PREFIX, username],
   };
 }
 

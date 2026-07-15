@@ -17,6 +17,12 @@ import {
   type PurchaseOrderRevision,
   type PurchaseOrderResult,
 } from './purchase-orders';
+import { identity, type IdentityPrincipal } from './identity';
+import {
+  authClearCookie,
+  authSetCookie,
+  parseAuthCookie,
+} from './identity/http-cookie';
 import { logApiErrorEvent } from './observability';
 import { probeRequiredD1Schema } from './readiness';
 
@@ -26,17 +32,10 @@ type Env = {
   };
 };
 
-type SessionUser = {
-  id: number;
-  username: string;
-  name: string;
-  role: UserRole;
-};
-
 type UserRole = 'admin' | 'staff';
 
 type AppVariables = {
-  user?: SessionUser;
+  principal?: IdentityPrincipal;
 };
 
 
@@ -47,14 +46,6 @@ app.onError((_err, c) => {
   return c.json(apiErr('INTERNAL_ERROR', '서버 오류가 발생했습니다.'), 500);
 });
 
-const AUTH_COOKIE = 'isorder_sid';
-const SESSION_DAYS = 30;
-const SESSION_SECONDS = SESSION_DAYS * 24 * 60 * 60;
-const PASSWORD_HASH_SCHEME = 'pbkdf2_sha256';
-const PASSWORD_HASH_ITERATIONS = 100_000;
-const PASSWORD_SALT_BYTES = 16;
-const PASSWORD_HASH_BITS = 256;
-const PUBLIC_API_PATHS = new Set(['/api/auth/login', '/health', '/login']);
 const USER_ROLES = ['admin', 'staff'] as const;
 const ITEM_PUBLIC_COLUMNS = `i.id, i.category_id, i.name, i.spec, i.unit,
   i.safety_stock, i.min_stock, i.current_stock, i.unit_price, i.memo,
@@ -86,21 +77,6 @@ function purchaseOrderResponse<T>(
   return c.json(apiErr(result.error.code, result.error.message), status);
 }
 
-function parseCookie(cookieHeader: string | undefined) {
-  const result: Record<string, string> = {};
-  if (!cookieHeader) return result;
-
-  for (const pair of cookieHeader.split(';')) {
-    const idx = pair.indexOf('=');
-    if (idx <= 0) continue;
-    const key = pair.slice(0, idx).trim();
-    const value = decodeURIComponent(pair.slice(idx + 1).trim());
-    result[key] = value;
-  }
-
-  return result;
-}
-
 function parseIntValue(raw: string | undefined, fallback: null): number | null;
 function parseIntValue(raw: string | undefined, fallback: number): number;
 function parseIntValue(raw: string | undefined, fallback?: undefined): number | undefined;
@@ -116,131 +92,11 @@ function parseIntPositive(raw: string | undefined, fallback: number | null = nul
   return n;
 }
 
-async function sha256Hex(value: string) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(value);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  const bytes = new Uint8Array(digest);
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function bytesToHex(bytes: Uint8Array) {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function hexToBytes(hex: string) {
-  if (!hex || hex.length % 2 !== 0) {
-    throw new Error('INVALID_HEX');
-  }
-
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i += 1) {
-    const value = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(value)) {
-      throw new Error('INVALID_HEX');
-    }
-    bytes[i] = value;
-  }
-
-  return bytes;
-}
-
-function constantTimeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-async function derivePasswordHash(value: string, salt: Uint8Array, iterations = PASSWORD_HASH_ITERATIONS) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', encoder.encode(value), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      salt: salt as unknown as BufferSource,
-      iterations,
-      hash: 'SHA-256',
-    },
-    key,
-    PASSWORD_HASH_BITS,
-  );
-
-  return bytesToHex(new Uint8Array(bits));
-}
-
-async function hashPassword(value: string) {
-  const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_SALT_BYTES));
-  const hash = await derivePasswordHash(value, salt);
-  return `${PASSWORD_HASH_SCHEME}$${PASSWORD_HASH_ITERATIONS}$${bytesToHex(salt)}$${hash}`;
-}
-
-async function verifyPassword(value: string, storedHash: string) {
-  if (storedHash.startsWith(`${PASSWORD_HASH_SCHEME}$`)) {
-    const [, rawIterations, saltHex, expectedHash] = storedHash.split('$');
-    const iterations = Number.parseInt(rawIterations, 10);
-    if (!iterations || !saltHex || !expectedHash) {
-      return { valid: false, upgradedHash: null };
-    }
-
-    try {
-      const actualHash = await derivePasswordHash(value, hexToBytes(saltHex), iterations);
-      if (!constantTimeEqual(actualHash, expectedHash)) {
-        return { valid: false, upgradedHash: null };
-      }
-      // 반복횟수가 현재 기준보다 낮으면 업그레이드
-      const upgradedHash = iterations < PASSWORD_HASH_ITERATIONS
-        ? await hashPassword(value)
-        : null;
-      return { valid: true, upgradedHash };
-    } catch {
-      return { valid: false, upgradedHash: null };
-    }
-  }
-
-  const legacyHash = await sha256Hex(value);
-  if (!constantTimeEqual(legacyHash, storedHash)) {
-    return { valid: false, upgradedHash: null };
-  }
-
-  return { valid: true, upgradedHash: await hashPassword(value) };
-}
-
-async function getSessionUser(c: any): Promise<SessionUser | null> {
-  const cookies = parseCookie(c.req.header('Cookie'));
-  const sid = cookies[AUTH_COOKIE];
-  if (!sid) return null;
-
-  const row = await c.env.DB.prepare(
-    `SELECT u.id, u.username, u.name, u.role
-       FROM users u
-       JOIN sessions s ON s.user_id = u.id
-      WHERE s.token = ?
-        AND u.is_active = 1
-        AND u.is_deleted = 0
-        AND unixepoch(s.expires_at) > unixepoch('now')`
-  )
-    .bind(sid)
-    .first();
-
-  if (!row) return null;
-  return row as SessionUser;
-}
-
 function scheduleExpiredSessionCleanup(c: any) {
+  const runtimeIdentity = identity(c.env.DB);
   c.executionCtx.waitUntil(
-    c.env.DB.prepare(
-      `DELETE FROM sessions
-        WHERE unixepoch(expires_at) IS NULL
-           OR unixepoch(expires_at) <= unixepoch('now')`,
-    )
-      .run()
+    runtimeIdentity
+      .cleanupExpiredSessions()
       .catch(() => {
         logApiErrorEvent('expired_session_cleanup_failed');
       }),
@@ -248,56 +104,25 @@ function scheduleExpiredSessionCleanup(c: any) {
 }
 
 function requireAdmin(c: any) {
-  const user = c.get('user') as SessionUser;
-  if (user.role !== 'admin') {
+  const principal = c.get('principal') as IdentityPrincipal;
+  if (principal.role !== 'admin') {
     return c.json(apiErr('FORBIDDEN', '관리자 권한이 필요합니다.'), 403);
   }
   return null;
 }
 
 async function requireAuth(c: any, next: () => Promise<void>) {
-  const user = await getSessionUser(c);
-  if (!user) {
+  const rawToken = parseAuthCookie(c.req.header('Cookie'));
+  if (!rawToken) {
     return c.json(apiErr('UNAUTHORIZED', '로그인이 필요합니다.'), 401);
   }
-  c.set('user', user);
+  const runtimeIdentity = identity(c.env.DB);
+  const principal = await runtimeIdentity.resolveSession(rawToken);
+  if (!principal) {
+    return c.json(apiErr('UNAUTHORIZED', '로그인이 필요합니다.'), 401);
+  }
+  c.set('principal', principal);
   await next();
-}
-
-function authSetCookie(token: string, secure: boolean) {
-  return [
-    `Set-Cookie`,
-    `${AUTH_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; Max-Age=${SESSION_SECONDS}; SameSite=Strict${secure ? '; Secure' : ''}`,
-  ] as const;
-}
-
-function authClearCookie(secure: boolean) {
-  return [
-    `Set-Cookie`,
-    `${AUTH_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict${secure ? '; Secure' : ''}`,
-  ] as const;
-}
-
-function auditStatement(
-  db: D1Database,
-  actorUserId: number | null,
-  action: string,
-  entityType: string,
-  entityId: number | null,
-  before?: unknown,
-  after?: unknown,
-) {
-  return db.prepare(
-    `INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(
-    actorUserId,
-    action,
-    entityType,
-    entityId,
-    before === undefined ? null : JSON.stringify(before),
-    after === undefined ? null : JSON.stringify(after),
-  );
 }
 
 function isUserRole(role: string): role is UserRole {
@@ -307,7 +132,7 @@ function isUserRole(role: string): role is UserRole {
 
 app.use('/api/*', async (c, next) => {
   const path = c.req.path;
-  if (PUBLIC_API_PATHS.has(path)) {
+  if (path === '/api/auth/login') {
     return next();
   }
   return requireAuth(c, next);
@@ -335,99 +160,55 @@ app.post('/api/auth/login', async (c) => {
     return c.json(apiErr('INVALID_INPUT', 'username/password를 입력해주세요.'), 400);
   }
 
-  const user = await c.env.DB.prepare(`
-    SELECT id, username, password_hash, name, role
-      FROM users
-     WHERE username = ?
-       AND is_active = 1
-       AND is_deleted = 0
-  `)
-    .bind(username)
-    .first<{ id: number; username: string; password_hash: string; name: string; role: UserRole }>();
-
-  if (!user) {
-    return c.json(apiErr('INVALID_CREDENTIALS', '계정이 존재하지 않거나 비활성입니다.'), 401);
+  const runtimeIdentity = identity(c.env.DB);
+  const result = await runtimeIdentity.authenticate({ username, password });
+  if (!result.ok) {
+    const message = result.error.kind === 'account_unavailable'
+      ? '계정이 존재하지 않거나 비활성입니다.'
+      : '아이디 또는 비밀번호가 올바르지 않습니다.';
+    return c.json(apiErr('INVALID_CREDENTIALS', message), 401);
   }
 
-  const passwordCheck = await verifyPassword(password, user.password_hash);
-  if (!passwordCheck.valid) {
-    return c.json(apiErr('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 올바르지 않습니다.'), 401);
-  }
-
-  const sid = crypto.randomUUID();
-  const loginStatements: D1PreparedStatement[] = [
-    c.env.DB.prepare(
-      `INSERT INTO sessions (token, user_id, expires_at)
-       SELECT ?, id, datetime('now', '+' || ? || ' seconds')
-         FROM users
-        WHERE id = ?
-          AND password_hash = ?
-          AND is_active = 1
-          AND is_deleted = 0`,
-    ).bind(sid, SESSION_SECONDS, user.id, user.password_hash),
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       SELECT ?, 'login', 'user', ?, NULL, ? WHERE changes() = 1`,
-    ).bind(user.id, user.id, JSON.stringify({ username: user.username })),
-  ];
-  if (passwordCheck.upgradedHash) {
-    loginStatements.push(
-      c.env.DB.prepare(
-        `UPDATE users
-            SET password_hash = ?, updated_at = datetime('now')
-          WHERE id = ?
-            AND password_hash = ?
-            AND is_active = 1
-            AND is_deleted = 0`,
-      ).bind(passwordCheck.upgradedHash, user.id, user.password_hash),
-    );
-  }
-
-  const loginResult = await c.env.DB.batch(loginStatements);
-  if ((loginResult[0] as D1Result).meta.changes !== 1) {
-    return c.json(apiErr('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 올바르지 않습니다.'), 401);
-  }
-
-  const [header, value] = authSetCookie(sid, new URL(c.req.url).protocol === 'https:');
+  const [header, value] = authSetCookie(
+    result.value.token,
+    new URL(c.req.url).protocol === 'https:',
+  );
   c.res.headers.set(header, value);
 
   scheduleExpiredSessionCleanup(c);
 
-  return c.json(apiOk({ user: { id: user.id, username: user.username, name: user.name, role: user.role } }));
+  return c.json(apiOk({ user: result.value.user }));
 });
 
 app.post('/api/auth/logout', async (c) => {
-  const user = c.get('user') as SessionUser;
-  const cookies = parseCookie(c.req.header('Cookie'));
-  const sid = cookies[AUTH_COOKIE];
-
-  await c.env.DB.batch([
-    c.env.DB.prepare('DELETE FROM sessions WHERE token = ? AND user_id = ?')
-      .bind(sid || '', user.id),
-    auditStatement(c.env.DB, user.id, 'logout', 'user', user.id),
-  ]);
+  const principal = c.get('principal') as IdentityPrincipal;
+  const rawToken = parseAuthCookie(c.req.header('Cookie')) || '';
+  const runtimeIdentity = identity(c.env.DB);
+  const result = await runtimeIdentity.logout({ principal, rawToken });
 
   const [header, value] = authClearCookie(new URL(c.req.url).protocol === 'https:');
   c.res.headers.set(header, value);
 
   scheduleExpiredSessionCleanup(c);
 
-  return c.json(apiOk({ loggedOut: true }));
+  return c.json(apiOk(result.value));
 });
 
 app.get('/api/users', async (c) => {
   const forbidden = requireAdmin(c);
   if (forbidden) return forbidden;
 
-  const rows = await c.env.DB.prepare(
-    `SELECT id, username, name, role, is_active, created_at FROM users WHERE is_deleted = 0 ORDER BY id ASC`
-  ).all<{ id: number; username: string; name: string; role: UserRole; is_active: number; created_at: string }>();
-  return c.json(apiOk(rows.results));
+  const principal = c.get('principal') as IdentityPrincipal;
+  const runtimeIdentity = identity(c.env.DB);
+  const result = await runtimeIdentity.listUsers(principal);
+  if (!result.ok) {
+    return c.json(apiErr('FORBIDDEN', '관리자 권한이 필요합니다.'), 403);
+  }
+  return c.json(apiOk(result.value));
 });
 
 app.post('/api/users', async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const forbidden = requireAdmin(c);
   if (forbidden) return forbidden;
 
@@ -447,35 +228,30 @@ app.post('/api/users', async (c) => {
     return c.json(apiErr('INVALID_INPUT', 'role은 admin 또는 staff여야 합니다.'), 400);
   }
 
-  const existing = await c.env.DB.prepare(`SELECT id FROM users WHERE username = ? AND is_deleted = 0`).bind(username).first();
-  if (existing) {
+  const runtimeIdentity = identity(c.env.DB);
+  const result = await runtimeIdentity.createUser(principal, {
+    username,
+    name: name || username,
+    password,
+    role,
+  });
+  if (!result.ok && result.error.kind === 'duplicate_username') {
     return c.json(apiErr('DUPLICATE_USERNAME', '이미 사용 중인 아이디입니다.'), 409);
   }
-
-  const hash = await hashPassword(password);
-  const batchResult = await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT INTO users (username, password_hash, name, role) VALUES (?, ?, ?, ?)`
-    ).bind(username, hash, name || username, role),
-    c.env.DB.prepare(
-      `INSERT INTO audit_logs
-         (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-       VALUES (?, 'create', 'user', last_insert_rowid(), NULL, ?)`
-    ).bind(actor.id, JSON.stringify({ username, role })),
-  ]);
-
-  const userId = Number(batchResult[0].meta.last_row_id);
-  const newUser = await c.env.DB.prepare(`SELECT id, username, name, role, is_active, created_at FROM users WHERE id = ?`).bind(userId).first();
-  return c.json(apiOk(newUser), 201);
+  if (!result.ok) {
+    return c.json(apiErr('FORBIDDEN', '관리자 권한이 필요합니다.'), 403);
+  }
+  return c.json(apiOk(result.value), 201);
 });
 
 app.get('/api/users/me', async (c) => {
-  const user = c.get('user') as SessionUser;
-  return c.json(apiOk({ id: user.id, username: user.username, name: user.name, role: user.role }));
+  const principal = c.get('principal') as IdentityPrincipal;
+  const runtimeIdentity = identity(c.env.DB);
+  return c.json(apiOk(runtimeIdentity.currentUser(principal)));
 });
 
 app.patch('/api/users/me/password', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const currentPassword = String(payload.current_password || '');
   const newPassword = String(payload.new_password || '');
@@ -487,30 +263,24 @@ app.patch('/api/users/me/password', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '새 비밀번호는 6자 이상이어야 합니다.'), 400);
   }
 
-  const row = await c.env.DB.prepare(`SELECT password_hash FROM users WHERE id = ?`).bind(user.id).first<{ password_hash: string }>();
-  if (!row) return c.json(apiErr('NOT_FOUND', '계정을 찾을 수 없습니다.'), 404);
-
-  const check = await verifyPassword(currentPassword, row.password_hash);
-  if (!check.valid) {
+  const currentRawToken = parseAuthCookie(c.req.header('Cookie')) || '';
+  const runtimeIdentity = identity(c.env.DB);
+  const result = await runtimeIdentity.changeOwnPassword(principal, {
+    currentPassword,
+    newPassword,
+    currentRawToken,
+  });
+  if (!result.ok && result.error.kind === 'not_found') {
+    return c.json(apiErr('NOT_FOUND', '계정을 찾을 수 없습니다.'), 404);
+  }
+  if (!result.ok) {
     return c.json(apiErr('INVALID_CREDENTIALS', '현재 비밀번호가 올바르지 않습니다.'), 401);
   }
-
-  const newHash = await hashPassword(newPassword);
-  const currentSession = parseCookie(c.req.header('Cookie'))[AUTH_COOKIE] || '';
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`
-    ).bind(newHash, user.id),
-    c.env.DB.prepare(
-      'DELETE FROM sessions WHERE user_id = ? AND token <> ?'
-    ).bind(user.id, currentSession),
-    auditStatement(c.env.DB, user.id, 'change_password', 'user', user.id),
-  ]);
-  return c.json(apiOk({ ok: true }));
+  return c.json(apiOk(result.value));
 });
 
 app.patch('/api/users/:id/password', async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const forbidden = requireAdmin(c);
   if (forbidden) return forbidden;
 
@@ -524,18 +294,18 @@ app.patch('/api/users/:id/password', async (c) => {
     return c.json(apiErr('INVALID_INPUT', '새 비밀번호는 6자 이상이어야 합니다.'), 400);
   }
 
-  const target = await c.env.DB.prepare(`SELECT id FROM users WHERE id = ? AND is_deleted = 0`).bind(targetId).first();
-  if (!target) return c.json(apiErr('NOT_FOUND', '사용자를 찾을 수 없습니다.'), 404);
-
-  const newHash = await hashPassword(newPassword);
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
-    ).bind(newHash, targetId),
-    c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetId),
-    auditStatement(c.env.DB, actor.id, 'reset_password', 'user', targetId),
-  ]);
-  return c.json(apiOk({ ok: true }));
+  const runtimeIdentity = identity(c.env.DB);
+  const result = await runtimeIdentity.resetPassword(principal, {
+    targetId,
+    newPassword,
+  });
+  if (!result.ok && result.error.kind === 'not_found') {
+    return c.json(apiErr('NOT_FOUND', '사용자를 찾을 수 없습니다.'), 404);
+  }
+  if (!result.ok) {
+    return c.json(apiErr('FORBIDDEN', '관리자 권한이 필요합니다.'), 403);
+  }
+  return c.json(apiOk(result.value));
 });
 
 app.get('/api/categories', async (c) => {
@@ -552,7 +322,7 @@ app.get('/api/categories', async (c) => {
 });
 
 app.post('/api/categories', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const name = String(payload.name || '').trim();
   const description = payload.description != null ? String(payload.description) : null;
@@ -578,7 +348,7 @@ app.post('/api/categories', async (c) => {
         `INSERT INTO audit_logs
            (actor_user_id, action, entity_type, entity_id, before_json, after_json)
          VALUES (?, 'create', 'category', last_insert_rowid(), NULL, ?)`
-      ).bind(user.id, JSON.stringify({ name, description })),
+      ).bind(principal.userId, JSON.stringify({ name, description })),
     ]);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -597,7 +367,7 @@ app.post('/api/categories', async (c) => {
 });
 
 app.patch('/api/categories/:id', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '카테고리 ID가 유효하지 않습니다.'), 400);
 
@@ -638,7 +408,7 @@ app.patch('/api/categories/:id', async (c) => {
                           'is_deleted', c.is_deleted)
          FROM item_categories c
         WHERE c.id = ? AND changes() = 1`
-    ).bind(user.id, JSON.stringify(before), id),
+    ).bind(principal.userId, JSON.stringify(before), id),
   ]);
   if ((batchResult[0] as D1Result).meta.changes === 0) {
     return c.json(apiErr('CONFLICT', '카테고리 상태가 변경되어 수정할 수 없습니다.'), 409);
@@ -652,7 +422,7 @@ app.patch('/api/categories/:id', async (c) => {
 });
 
 app.delete('/api/categories/:id', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '카테고리 ID가 유효하지 않습니다.'), 400);
 
@@ -684,7 +454,7 @@ app.delete('/api/categories/:id', async (c) => {
       `INSERT INTO audit_logs
          (actor_user_id, action, entity_type, entity_id, before_json, after_json)
        SELECT ?, 'soft_delete', 'category', ?, ?, ? WHERE changes() = 1`
-    ).bind(user.id, id, JSON.stringify(before), JSON.stringify(after)),
+    ).bind(principal.userId, id, JSON.stringify(before), JSON.stringify(after)),
   ]);
 
   if ((batchResult[0] as D1Result).meta.changes === 0) {
@@ -749,7 +519,7 @@ app.get('/api/items', async (c) => {
 });
 
 app.post('/api/items', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const categoryId = parseIntValue(payload.category_id == null ? undefined : String(payload.category_id), null);
   const name = String(payload.name || '').trim();
@@ -807,7 +577,7 @@ app.post('/api/items', async (c) => {
              (item_id, movement_type, quantity, reason, created_by, operation_token)
            SELECT id, 'ADJUST', current_stock, '초기 재고', ?, ?
              FROM items WHERE creation_token = ?`
-        ).bind(user.id, operationToken, creationToken),
+        ).bind(principal.userId, operationToken, creationToken),
       );
     }
 
@@ -818,7 +588,7 @@ app.post('/api/items', async (c) => {
          SELECT ?, 'create', 'item', id, NULL, ?
            FROM items WHERE creation_token = ?`
       ).bind(
-        user.id,
+        principal.userId,
         JSON.stringify({ category_id: categoryId, name, spec: spec || null, current_stock: currentStock }),
         creationToken,
       ),
@@ -846,7 +616,7 @@ app.post('/api/items', async (c) => {
 });
 
 app.patch('/api/items/:id', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '품목 ID가 유효하지 않습니다.'), 400);
 
@@ -923,7 +693,7 @@ app.patch('/api/items/:id', async (c) => {
               )
          FROM items i
         WHERE i.id = ? AND changes() = 1`
-    ).bind(user.id, JSON.stringify(before), id),
+    ).bind(principal.userId, JSON.stringify(before), id),
   ]);
 
   if ((batchResult[0] as D1Result).meta.changes === 0) {
@@ -937,7 +707,7 @@ app.patch('/api/items/:id', async (c) => {
 });
 
 app.delete('/api/items/:id', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '품목 ID가 유효하지 않습니다.'), 400);
 
@@ -973,7 +743,7 @@ app.delete('/api/items/:id', async (c) => {
       `INSERT INTO audit_logs
          (actor_user_id, action, entity_type, entity_id, before_json, after_json)
        SELECT ?, 'soft_delete', 'item', ?, ?, ? WHERE changes() = 1`
-    ).bind(user.id, id, JSON.stringify(before), JSON.stringify(after)),
+    ).bind(principal.userId, id, JSON.stringify(before), JSON.stringify(after)),
   ]);
 
   if ((batchResult[0] as D1Result).meta.changes === 0) {
@@ -1001,7 +771,7 @@ app.get('/api/stock/ledger/:item_id', async (c) => {
 });
 
 app.post('/api/stock/adjust', async (c) => {
-  const user = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const itemId = parseIntValue(String(payload.item_id ?? ''), null);
   const movementType = String(payload.movement_type || '').toUpperCase();
@@ -1065,7 +835,7 @@ app.post('/api/stock/adjust', async (c) => {
       quantity,
       requestedDelta,
       reason,
-      user.id,
+      principal.userId,
       operationToken,
       itemId,
       movementType,
@@ -1090,7 +860,7 @@ app.post('/api/stock/adjust', async (c) => {
          FROM items i
          JOIN stock_transactions st ON st.item_id = i.id
         WHERE st.operation_token = ?`
-    ).bind(user.id, operationToken),
+    ).bind(principal.userId, operationToken),
   ]);
 
   if ((batchResult[0] as D1Result).meta.changes === 0) {
@@ -1228,14 +998,14 @@ app.get(purchaseOrderRoutePatterns.collection, async (c) => {
 });
 
 app.post(purchaseOrderRoutePatterns.collection, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const title = String(payload.title || '');
   const note = payload.note == null ? null : String(payload.note);
   const requestedStatus = payload.status == null ? undefined : String(payload.status);
   return purchaseOrderResponse(
     c,
-    await purchaseOrders(c.env.DB, actor.id).createDraft({
+    await purchaseOrders(c.env.DB, principal.userId).createDraft({
       title,
       note,
       ...(requestedStatus === undefined ? {} : { requestedStatus }),
@@ -1246,7 +1016,7 @@ app.post(purchaseOrderRoutePatterns.collection, async (c) => {
 });
 
 app.post(purchaseOrderRoutePatterns.withItems, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
   const title = String(payload.title || '');
   const note = payload.note == null ? null : String(payload.note);
@@ -1280,7 +1050,7 @@ app.post(purchaseOrderRoutePatterns.withItems, async (c) => {
 
   return purchaseOrderResponse(
     c,
-    await purchaseOrders(c.env.DB, actor.id).createDraftWithItems({
+    await purchaseOrders(c.env.DB, principal.userId).createDraftWithItems({
       title,
       note,
       items: parsedItems,
@@ -1291,18 +1061,18 @@ app.post(purchaseOrderRoutePatterns.withItems, async (c) => {
 });
 
 app.get(purchaseOrderRoutePatterns.detail, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const orderId = parseIntValue(c.req.param('id'), null);
   if (!orderId) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
   return purchaseOrderResponse(
     c,
-    await purchaseOrders(c.env.DB, actor.id).getDetail(orderId),
+    await purchaseOrders(c.env.DB, principal.userId).getDetail(orderId),
     purchaseOrderDetailSchema,
   );
 });
 
 app.patch(purchaseOrderRoutePatterns.detail, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
 
@@ -1340,28 +1110,28 @@ app.patch(purchaseOrderRoutePatterns.detail, async (c) => {
 
   return purchaseOrderResponse(
     c,
-    await purchaseOrders(c.env.DB, actor.id).revise(id, change),
+    await purchaseOrders(c.env.DB, principal.userId).revise(id, change),
     purchaseOrderRowResultSchema,
   );
 });
 
 app.delete(purchaseOrderRoutePatterns.detail, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const id = parseIntValue(c.req.param('id'), null);
   if (!id) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
   return purchaseOrderResponse(
     c,
-    await purchaseOrders(c.env.DB, actor.id).deleteDraft(id),
+    await purchaseOrders(c.env.DB, principal.userId).deleteDraft(id),
     deletePurchaseOrderResultSchema,
   );
 });
 
 app.post(purchaseOrderRoutePatterns.items, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const orderId = parseIntValue(c.req.param('id'), null);
   if (!orderId) return c.json(apiErr('INVALID_INPUT', '발주 ID가 유효하지 않습니다.'), 400);
 
-  const stage = await purchaseOrders(c.env.DB, actor.id).stageAddItemsToDraft(orderId);
+  const stage = await purchaseOrders(c.env.DB, principal.userId).stageAddItemsToDraft(orderId);
   if (!stage.ok) return purchaseOrderResponse(c, stage, addPurchaseOrderItemsResultSchema);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
@@ -1415,7 +1185,7 @@ app.post(purchaseOrderRoutePatterns.items, async (c) => {
 });
 
 app.patch(purchaseOrderRoutePatterns.item, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const orderId = parseIntValue(c.req.param('id'), null);
   const orderItemId = parseIntValue(c.req.param('itemId'), null);
 
@@ -1423,7 +1193,7 @@ app.patch(purchaseOrderRoutePatterns.item, async (c) => {
     return c.json(apiErr('INVALID_INPUT', '발주 ID 또는 항목 ID가 유효하지 않습니다.'), 400);
   }
 
-  const stage = await purchaseOrders(c.env.DB, actor.id).stageEditDraftItem(orderId);
+  const stage = await purchaseOrders(c.env.DB, principal.userId).stageEditDraftItem(orderId);
   if (!stage.ok) return purchaseOrderResponse(c, stage, editPurchaseOrderItemResultSchema);
 
   const payload = await c.req.json().catch(() => ({} as Record<string, unknown>));
@@ -1449,7 +1219,7 @@ app.patch(purchaseOrderRoutePatterns.item, async (c) => {
 });
 
 app.post(purchaseOrderRoutePatterns.receive, async (c) => {
-  const actor = c.get('user') as SessionUser;
+  const principal = c.get('principal') as IdentityPrincipal;
   const orderId = parseIntValue(c.req.param('id'), null);
   const orderItemId = parseIntValue(c.req.param('itemId'), null);
 
@@ -1463,7 +1233,7 @@ app.post(purchaseOrderRoutePatterns.receive, async (c) => {
     return c.json(apiErr('INVALID_INPUT', 'qty는 1 이상의 정수여야 합니다.'), 400);
   }
 
-  const stage = await purchaseOrders(c.env.DB, actor.id).stageReceive(
+  const stage = await purchaseOrders(c.env.DB, principal.userId).stageReceive(
     orderId,
     orderItemId,
     qty,

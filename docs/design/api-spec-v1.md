@@ -1,6 +1,6 @@
 # API 설계 v1 (카페 발주 관리)
 
-구현 기준: `src/index.ts`
+구현 기준: Hono HTTP adapter는 `src/index.ts`, Identity/session D1 choreography는 `src/identity/index.ts`, credential runtime/type entry points는 `packages/identity-credential/src/index.mjs`와 `packages/identity-credential/src/index.d.ts`
 
 인증 방식: 브라우저 same-origin `HttpOnly` 세션 쿠키
 
@@ -127,6 +127,18 @@ D1 binding/query/schema를 확인할 수 없으면 내부 상세 없이 HTTP `50
 | production smoke identity가 일반 staff write 권한을 가짐 | additive `read_only` access mode로 모든 business mutation을 server에서 거부 | 2F-b1/2F-b2 |
 
 현재 API 설명은 owning slice가 production에 배포되기 전까지 current behavior를 계속 나타냅니다. Target wire contract의 실행 가능한 정의는 `@here-is-order/http-contract/identity`입니다.
+
+### Wave 2B implementation ownership
+
+- The credential runtime entry point `packages/identity-credential/src/index.mjs` and type entry point `packages/identity-credential/src/index.d.ts` own the credential format.
+- `src/identity/index.ts` owns the Identity/session D1 choreography.
+- `src/index.ts` remains the Hono adapter for current request parsing, HTTP response, and cookie mapping.
+- Wave 2B changes implementation ownership only; it introduces no D1 schema or public runtime behavior change.
+- Sessions continue to store the raw token in `sessions.token` with the existing 30-day lifetime.
+- Self-password change continues to keep the current session and revoke sibling sessions.
+- Logout continues to require an authenticated session and keeps delete plus audit in one D1 batch.
+- Red-matrix assignments to 2C, 2D, 2E/2F-a, and 2F-b1/2F-b2 remain unchanged.
+- 2C starts only after the exact merged SHA production deploy and smoke success.
 
 ## 3. 카테고리와 품목
 

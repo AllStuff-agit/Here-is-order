@@ -5,7 +5,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 
 import { createCloudflareD1RestClient } from './cloudflare-d1-rest.mjs';
-import { createPasswordHash } from './generate-admin-seed.mjs';
+import { createPasswordHash } from './node-credential-crypto.mjs';
 import {
   assertRecoverableAdmin,
   assertRecoveryPostflight,
@@ -191,7 +191,7 @@ export async function runPasswordRecovery({
 
   let passwordHash;
   try {
-    passwordHash = createHash(password);
+    passwordHash = await createHash(password);
   } catch {
     throw new Error('새 비밀번호 hash를 생성할 수 없습니다.');
   }

@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
+import {
+  CURRENT_PASSWORD_HASH_PREFIX,
+  isCurrentPasswordHash,
+} from '@here-is-order/identity-credential';
 import { SMOKE_IDENTITY, SMOKE_IDENTITY_ACTIONS } from './smoke-identity-contract.mjs';
 
-const HASH_PATTERN = /^pbkdf2_sha256\$100000\$[0-9a-f]{32}\$[0-9a-f]{64}$/;
 const OPERATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AUDIT_ACTIONS = Object.freeze({
   provision: 'provision_smoke_identity',
@@ -71,7 +74,7 @@ export function buildSmokeIdentityMutation({ action, target, passwordHash, opera
     throw new Error('Smoke identity mutation was invalid.');
   }
   const needsHash = action !== 'disable';
-  if ((needsHash && !HASH_PATTERN.test(passwordHash))
+  if ((needsHash && !isCurrentPasswordHash(passwordHash))
     || (!needsHash && passwordHash !== undefined)
     || typeof operationId !== 'string'
     || !OPERATION_ID_PATTERN.test(operationId)) {
@@ -207,7 +210,7 @@ export function buildSmokeIdentityPostflightQuery({ action, target, passwordHash
   if (!SMOKE_IDENTITY_ACTIONS.includes(action)
     || !targetIsValid
     || (action === 'disable' && passwordHash !== undefined)
-    || (action !== 'disable' && !HASH_PATTERN.test(passwordHash))) {
+    || (action !== 'disable' && !isCurrentPasswordHash(passwordHash))) {
     throw new Error('Smoke identity postflight was invalid.');
   }
   const where = target?.id
@@ -222,7 +225,7 @@ export function buildSmokeIdentityPostflightQuery({ action, target, passwordHash
          instr(u.password_hash, ?) = 1 AS hash_scheme_ok`;
   const params = action === 'disable'
     ? identityParams
-    : [passwordHash, 'pbkdf2_sha256$100000$', ...identityParams];
+    : [passwordHash, CURRENT_PASSWORD_HASH_PREFIX, ...identityParams];
   return {
     sql: `SELECT u.id, u.username, u.name, u.role, u.is_active, u.is_deleted, u.deleted_at
                  ${hashProjection},

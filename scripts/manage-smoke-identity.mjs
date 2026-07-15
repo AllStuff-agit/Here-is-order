@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createCloudflareD1RestClient } from './cloudflare-d1-rest.mjs';
-import { createPasswordHash } from './generate-admin-seed.mjs';
+import { createPasswordHash } from './node-credential-crypto.mjs';
 import { readProductionD1Binding } from './recover-password.mjs';
 import {
   SMOKE_IDENTITY,
@@ -144,7 +144,7 @@ export async function runManageSmokeIdentity({
     );
     const passwordHash = environment.password === undefined
       ? undefined
-      : createHash(environment.password);
+      : await createHash(environment.password);
     await runLifecycle({
       client,
       databaseId: binding.databaseId,
