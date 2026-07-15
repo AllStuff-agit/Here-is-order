@@ -440,6 +440,146 @@ describe('세션 만료 형식', () => {
   });
 });
 
+describe('Wave 2A Identity compatibility characterization', () => {
+  it('current-user and admin-user projections stay exact and role changes affect a live session', async () => {
+    const token = `projection-${crypto.randomUUID()}`;
+    const username = `projection-${crypto.randomUUID()}`;
+    const inserted = await env.DB.prepare(
+      `INSERT INTO users (username, password_hash, name, role)
+       VALUES (?, 'unused', 'Projection User', 'admin')`,
+    ).bind(username).run();
+    const userId = Number(inserted.meta.last_row_id);
+    await env.DB.prepare(
+      `INSERT INTO sessions (token, user_id, expires_at)
+       VALUES (?, ?, datetime('now', '+1 hour'))`,
+    ).bind(token, userId).run();
+
+    const me = await apiRequest('/api/users/me', token);
+    expect(me.status).toBe(200);
+    await expect(me.json()).resolves.toEqual({
+      ok: true,
+      data: { id: userId, username, name: 'Projection User', role: 'admin' },
+    });
+
+    const list = await apiRequest('/api/users', token);
+    expect(list.status).toBe(200);
+    const listBody = await list.json() as {
+      ok: true;
+      data: Array<Record<string, unknown>>;
+    };
+    expect(Object.keys(listBody.data[0]).sort()).toEqual([
+      'created_at', 'id', 'is_active', 'name', 'role', 'username',
+    ]);
+    expect(listBody.data[0]).toMatchObject({
+      id: userId,
+      username,
+      name: 'Projection User',
+      role: 'admin',
+      is_active: 1,
+    });
+    expect(listBody.data[0].created_at).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/,
+    );
+
+    await env.DB.prepare("UPDATE users SET role = 'staff' WHERE id = ?")
+      .bind(userId).run();
+    await expectApiError(
+      await apiRequest('/api/users', token),
+      403,
+      'FORBIDDEN',
+      '관리자 권한이 필요합니다.',
+    );
+  });
+
+  it('user creation defaults name and role while preserving the exact admin projection', async () => {
+    const adminToken = await createSession('admin');
+    const username = `created-${crypto.randomUUID()}`;
+    const response = await apiRequest('/api/users', adminToken, {
+      method: 'POST',
+      body: JSON.stringify({ username, password: 'current-six-char-policy' }),
+    });
+    expect(response.status).toBe(201);
+    const body = await response.json() as {
+      ok: true;
+      data: Record<string, unknown>;
+    };
+    expect(Object.keys(body.data).sort()).toEqual([
+      'created_at', 'id', 'is_active', 'name', 'role', 'username',
+    ]);
+    expect(body.data).toMatchObject({
+      username,
+      name: username,
+      role: 'staff',
+      is_active: 1,
+    });
+    expect(body.data.created_at).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/,
+    );
+  });
+
+  it('self-change revokes sibling sessions', async () => {
+    const username = `self-change-${crypto.randomUUID()}`;
+    const currentPassword = 'current-password-value';
+    const inserted = await env.DB.prepare(
+      `INSERT INTO users (username, password_hash, name, role)
+       VALUES (?, ?, 'Self Change', 'staff')`,
+    ).bind(username, createPasswordHash(currentPassword)).run();
+    const userId = Number(inserted.meta.last_row_id);
+    const currentToken = `current-${crypto.randomUUID()}`;
+    const siblingToken = `sibling-${crypto.randomUUID()}`;
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+1 hour'))",
+      ).bind(currentToken, userId),
+      env.DB.prepare(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+1 hour'))",
+      ).bind(siblingToken, userId),
+    ]);
+
+    const changed = await apiRequest('/api/users/me/password', currentToken, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: 'replacement-password-value',
+      }),
+    });
+    expect(changed.status).toBe(200);
+    expect((await apiRequest('/api/users/me', siblingToken)).status).toBe(401);
+  });
+
+  it('admin reset revokes every target session', async () => {
+    const adminToken = await createSession('admin');
+    const username = `reset-target-${crypto.randomUUID()}`;
+    const inserted = await env.DB.prepare(
+      `INSERT INTO users (username, password_hash, name, role)
+       VALUES (?, ?, 'Reset Target', 'staff')`,
+    ).bind(username, createPasswordHash('target-current-password')).run();
+    const targetUserId = Number(inserted.meta.last_row_id);
+    const firstToken = `target-first-${crypto.randomUUID()}`;
+    const secondToken = `target-second-${crypto.randomUUID()}`;
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+1 hour'))",
+      ).bind(firstToken, targetUserId),
+      env.DB.prepare(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+1 hour'))",
+      ).bind(secondToken, targetUserId),
+    ]);
+
+    const changed = await apiRequest(
+      `/api/users/${targetUserId}/password`,
+      adminToken,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ new_password: 'replacement-password-value' }),
+      },
+    );
+    expect(changed.status).toBe(200);
+    expect((await apiRequest('/api/users/me', firstToken)).status).toBe(401);
+    expect((await apiRequest('/api/users/me', secondToken)).status).toBe(401);
+  });
+});
+
 describe('사용자 관리 권한', () => {
   it('staff 사용자의 사용자 목록과 감사로그 조회를 거부한다', async () => {
     const sessionToken = 'staff-session-token';
