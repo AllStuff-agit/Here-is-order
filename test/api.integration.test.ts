@@ -5,6 +5,7 @@ import { Buffer } from 'node:buffer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPasswordHash } from '../scripts/node-credential-crypto.mjs';
 import worker from '../src/index';
+import { createAuthenticatedIdentity } from './helpers/identity-fixture';
 import { withTestTrigger } from './helpers/test-trigger';
 
 const TABLES_IN_DELETE_ORDER = [
@@ -25,22 +26,7 @@ beforeEach(async () => {
 });
 
 async function createSession(role: 'admin' | 'staff' = 'admin') {
-  const sessionToken = `${role}-${crypto.randomUUID()}`;
-  const user = await env.DB.prepare(
-    `INSERT INTO users (username, password_hash, name, role)
-     VALUES (?, ?, ?, ?)`
-  )
-    .bind(`${role}-${crypto.randomUUID()}`, 'unused-in-session-test', role, role)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT INTO sessions (token, user_id, expires_at)
-     VALUES (?, ?, datetime('now', '+1 hour'))`
-  )
-    .bind(sessionToken, user.meta.last_row_id)
-    .run();
-
-  return sessionToken;
+  return (await createAuthenticatedIdentity({ role })).rawToken;
 }
 
 async function createSessionWithExpiry(expiresAt: string) {
@@ -1224,25 +1210,30 @@ describe('Wave 2A Identity compatibility characterization', () => {
 
 describe('사용자 관리 권한', () => {
   it('staff 사용자의 사용자 목록과 감사로그 조회를 거부한다', async () => {
-    const sessionToken = 'staff-session-token';
-    const user = await env.DB.prepare(
-      `INSERT INTO users (username, password_hash, name, role)
-       VALUES (?, ?, ?, ?)`
-    )
-      .bind('staff-user', 'unused-in-session-test', '직원', 'staff')
-      .run();
-
-    await env.DB.prepare(
-      `INSERT INTO sessions (token, user_id, expires_at)
-       VALUES (?, ?, datetime('now', '+1 hour'))`
-    )
-      .bind(sessionToken, user.meta.last_row_id)
-      .run();
+    const fixture = await createAuthenticatedIdentity({
+      username: 'staff-user',
+      name: '직원',
+      role: 'staff',
+    });
+    expect(fixture.user).toEqual({
+      id: fixture.principal.userId,
+      username: 'staff-user',
+      name: '직원',
+      role: 'staff',
+    });
+    expect(fixture.principal).toMatchObject({
+      username: fixture.user.username,
+      name: fixture.user.name,
+      role: fixture.user.role,
+    });
+    expect(fixture.cookie).toBe(
+      `isorder_sid=${encodeURIComponent(fixture.rawToken)}`,
+    );
 
     const response = await exports.default.fetch(
       new Request('http://example.com/api/users', {
         headers: {
-          Cookie: `isorder_sid=${sessionToken}`,
+          Cookie: fixture.cookie,
         },
       }),
     );
@@ -1256,7 +1247,7 @@ describe('사용자 관리 권한', () => {
       },
     });
 
-    const auditResponse = await apiRequest('/api/audit-logs', sessionToken);
+    const auditResponse = await apiRequest('/api/audit-logs', fixture.rawToken);
     expect(auditResponse.status).toBe(403);
     await expect(auditResponse.json()).resolves.toEqual({
       ok: false,

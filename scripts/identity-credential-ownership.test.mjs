@@ -133,6 +133,68 @@ function hasTargetBindingConflict(functionNode, identifier, includeParameters = 
   });
   return conflict;
 }
+function hasValueBinding(sourceFile, identifier) {
+  let found = false;
+  visit(sourceFile, (node) => {
+    if (ts.isVariableDeclaration(node) && bindsName(node.name, identifier)) found = true;
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)
+      || ts.isEnumDeclaration(node)) && node.name?.text === identifier) {
+      found = true;
+    }
+    if (ts.isParameter(node) && bindsName(node.name, identifier)) found = true;
+    if (ts.isCatchClause(node) && node.variableDeclaration
+      && bindsName(node.variableDeclaration.name, identifier)) found = true;
+    if (ts.isImportClause(node) && node.name?.text === identifier) found = true;
+    if ((ts.isImportSpecifier(node) || ts.isNamespaceImport(node))
+      && node.name.text === identifier) found = true;
+  });
+  return found;
+}
+function hasValueWrite(sourceFile, identifier) {
+  let found = false;
+  const isTarget = (node) => ts.isIdentifier(node) && node.text === identifier
+    || exactPropertyPath(node, ['globalThis', identifier]);
+  visit(sourceFile, (node) => {
+    if (ts.isBinaryExpression(node)
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      && isTarget(node.left)) {
+      found = true;
+    }
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+      && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken]
+        .includes(node.operator)
+      && isTarget(node.operand)) {
+      found = true;
+    }
+    if (ts.isDeleteExpression(node) && isTarget(node.expression)) found = true;
+    if (ts.isCallExpression(node)) {
+      const callPath = propertyPath(node.expression);
+      const reflectivePropertyWrite = (
+        exactPropertyPath(node.arguments[0], ['globalThis'])
+        && staticValue(node.arguments[1], sourceFile) === identifier
+        && (
+          exactPropertyPath(node.expression, ['Reflect', 'set'])
+          || exactPropertyPath(node.expression, ['Reflect', 'defineProperty'])
+          || exactPropertyPath(node.expression, ['Reflect', 'deleteProperty'])
+          || exactPropertyPath(node.expression, ['Object', 'defineProperty'])
+        )
+      );
+      const objectAssignWrite = callPath?.[0] === 'Object'
+        && callPath[1] === 'assign'
+        && exactPropertyPath(node.arguments[0], ['globalThis'])
+        && node.arguments.slice(1).some((argument) => {
+          const object = unwrapTransparentExpression(argument);
+          return ts.isObjectLiteralExpression(object)
+            && object.properties.some((property) =>
+              property.name
+                && declaredPropertyName(property.name, sourceFile) === identifier);
+        });
+      if (reflectivePropertyWrite || objectAssignWrite) found = true;
+    }
+  });
+  return found;
+}
 function hasDefaultBinding(functionNode, localName, initializerName) {
   return functionNode.parameters.some((parameter) =>
     ts.isObjectBindingPattern(parameter.name)
@@ -861,6 +923,740 @@ function workerStructureViolations(sourceFile) {
   });
   return [...new Set(violations)];
 }
+function unwrapTransparentExpression(node) {
+  let current = node;
+  while (current && (ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isNonNullExpression(current)
+    || ts.isSatisfiesExpression(current))) {
+    current = current.expression;
+  }
+  return current;
+}
+function businessSessionFixtureViolations(sourceFile) {
+  const violations = [];
+  const fixtureBinding = namedImport(
+    sourceFile,
+    './helpers/identity-fixture',
+    'createAuthenticatedIdentity',
+  );
+  if (!fixtureBinding) violations.push('missing createAuthenticatedIdentity named import');
+
+  const wrappers = sourceFile.statements.filter((statement) =>
+    ts.isFunctionDeclaration(statement) && statement.name?.text === 'createSession');
+  if (wrappers.length !== 1 || !wrappers[0].body) {
+    violations.push('createSession must be one top-level function');
+    return [...new Set(violations)];
+  }
+  const wrapper = wrappers[0];
+  if (wrapper.body.statements.length !== 1
+    || !ts.isReturnStatement(wrapper.body.statements[0])) {
+    violations.push('createSession must contain only the direct fixture return');
+  }
+  if (fixtureBinding && hasTargetBindingConflict(wrapper, fixtureBinding)) {
+    violations.push('createAuthenticatedIdentity binding is shadowed');
+  }
+
+  const calls = [];
+  visitOwnScope(wrapper.body, (node) => {
+    if (ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === fixtureBinding) {
+      calls.push(node);
+    }
+    if (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node)
+      || ts.isBinaryExpression(node)
+      || (ts.isIdentifier(node) && ts.isCallExpression(node.parent)
+        && node.parent.arguments.includes(node))) {
+      const value = staticValue(node, sourceFile);
+      if (typeof value === 'string' && /\binsert\s+into\s+sessions\b/i.test(value)) {
+        violations.push('createSession owns session INSERT SQL');
+      }
+    }
+  });
+  if (calls.length !== 1) {
+    violations.push('createSession must call createAuthenticatedIdentity exactly once');
+    return [...new Set(violations)];
+  }
+
+  const call = calls[0];
+  const awaited = ts.isAwaitExpression(call.parent) && call.parent.expression === call
+    ? call.parent
+    : null;
+  let awaitedContainer = awaited;
+  while (awaitedContainer?.parent
+    && (ts.isParenthesizedExpression(awaitedContainer.parent)
+      || ts.isAsExpression(awaitedContainer.parent)
+      || ts.isTypeAssertionExpression(awaitedContainer.parent)
+      || ts.isNonNullExpression(awaitedContainer.parent)
+      || ts.isSatisfiesExpression(awaitedContainer.parent))
+    && awaitedContainer.parent.expression === awaitedContainer) {
+    awaitedContainer = awaitedContainer.parent;
+  }
+  const returnedProperty = awaitedContainer?.parent;
+  const returnStatement = returnedProperty
+    && ts.isPropertyAccessExpression(returnedProperty)
+    && returnedProperty.name.text === 'rawToken'
+    && returnedProperty.expression === awaitedContainer
+    && ts.isReturnStatement(returnedProperty.parent)
+    && returnedProperty.parent.expression === returnedProperty
+    && returnedProperty.parent.parent === wrapper.body
+    ? returnedProperty.parent
+    : null;
+  if (!returnStatement) {
+    violations.push('createSession must return the awaited fixture rawToken directly');
+  }
+  return [...new Set(violations)];
+}
+function propertyPath(node) {
+  const current = unwrapTransparentExpression(node);
+  if (!current) return null;
+  if (ts.isIdentifier(current)) return [current.text];
+  if (ts.isPropertyAccessExpression(current)) {
+    const prefix = propertyPath(current.expression);
+    return prefix ? [...prefix, current.name.text] : null;
+  }
+  if (ts.isElementAccessExpression(current)) {
+    const prefix = propertyPath(current.expression);
+    const property = staticValue(current.argumentExpression, current.getSourceFile());
+    return prefix && typeof property === 'string' ? [...prefix, property] : null;
+  }
+  return null;
+}
+function exactPropertyPath(node, expected) {
+  const actual = propertyPath(node);
+  return actual !== null
+    && actual.length === expected.length
+    && actual.every((part, index) => part === expected[index]);
+}
+function directConstDeclaration(node) {
+  if (!ts.isVariableDeclaration(node)
+    || !ts.isIdentifier(node.name)
+    || !ts.isVariableDeclarationList(node.parent)
+    || !(node.parent.flags & ts.NodeFlags.Const)
+    || !ts.isVariableStatement(node.parent.parent)
+    || !ts.isBlock(node.parent.parent.parent)) {
+    return null;
+  }
+  return {
+    declaration: node,
+    name: node.name.text,
+    statement: node.parent.parent,
+  };
+}
+function enclosingDirectConstDeclaration(node, block) {
+  let current = node;
+  while (current && current !== block) {
+    const direct = directConstDeclaration(current);
+    if (direct && direct.statement.parent === block) return direct;
+    current = current.parent;
+  }
+  return null;
+}
+function logicalOrTerms(expression) {
+  const current = unwrapTransparentExpression(expression);
+  if (ts.isBinaryExpression(current)
+    && current.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+    return [...logicalOrTerms(current.left), ...logicalOrTerms(current.right)];
+  }
+  return [current];
+}
+function exactNegatedPath(expression, path) {
+  const current = unwrapTransparentExpression(expression);
+  return ts.isPrefixUnaryExpression(current)
+    && current.operator === ts.SyntaxKind.ExclamationToken
+    && exactPropertyPath(current.operand, path);
+}
+function exactInequality(expression, leftPath, rightPath) {
+  const current = unwrapTransparentExpression(expression);
+  return ts.isBinaryExpression(current)
+    && current.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
+    && ((exactPropertyPath(current.left, leftPath)
+      && exactPropertyPath(current.right, rightPath))
+      || (exactPropertyPath(current.left, rightPath)
+        && exactPropertyPath(current.right, leftPath)));
+}
+function exactFailureDisjunction(expression, requirements) {
+  const terms = logicalOrTerms(expression);
+  if (terms.length !== requirements.length) return false;
+  const remaining = [...requirements];
+  for (const term of terms) {
+    const index = remaining.findIndex((requirement) => requirement.kind === 'negated'
+      ? exactNegatedPath(term, requirement.path)
+      : exactInequality(term, requirement.leftPath, requirement.rightPath));
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+  }
+  return remaining.length === 0;
+}
+function isDirectSetupSignalThrow(statement) {
+  const candidate = ts.isBlock(statement) && statement.statements.length === 1
+    ? statement.statements[0]
+    : statement;
+  return ts.isThrowStatement(candidate)
+    && candidate.expression
+    && ts.isNewExpression(candidate.expression)
+    && ts.isIdentifier(candidate.expression.expression)
+    && candidate.expression.expression.text === 'Error'
+    && candidate.expression.arguments?.length === 0;
+}
+function objectPropertyValue(object, name, sourceFile) {
+  if (!ts.isObjectLiteralExpression(object)) return null;
+  for (const property of object.properties) {
+    if (ts.isPropertyAssignment(property)
+      && declaredPropertyName(property.name, sourceFile) === name) {
+      return property.initializer;
+    }
+    if (ts.isShorthandPropertyAssignment(property) && property.name.text === name) {
+      return property.name;
+    }
+  }
+  return null;
+}
+function authenticatedIdentityFixtureViolations(sourceFile) {
+  const violations = [];
+  const identityBinding = namedImport(sourceFile, '../../src/identity', 'identity');
+  const credentialBinding = namedImport(
+    sourceFile,
+    '../../scripts/identity-credential-conformance.mjs',
+    'credentialKnownAnswer',
+  );
+  const envBinding = namedImport(sourceFile, 'cloudflare:workers', 'env');
+  if (!identityBinding) violations.push('missing Runtime identity named import');
+  if (!credentialBinding) violations.push('missing credentialKnownAnswer named import');
+  if (!envBinding) violations.push('missing Cloudflare env named import');
+
+  const functions = sourceFile.statements.filter((statement) =>
+    ts.isFunctionDeclaration(statement)
+      && statement.name?.text === 'createAuthenticatedIdentity');
+  if (functions.length !== 1 || !functions[0].body) {
+    violations.push('createAuthenticatedIdentity must be one top-level function');
+    return [...new Set(violations)];
+  }
+  const target = functions[0];
+  const setupErrorDeclarations = [];
+  visit(sourceFile, (node) => {
+    if (ts.isVariableDeclaration(node) && bindsName(node.name, 'FIXTURE_SETUP_ERROR')) {
+      setupErrorDeclarations.push(node);
+    }
+  });
+  const setupError = setupErrorDeclarations.length === 1
+    ? setupErrorDeclarations[0]
+    : null;
+  if (!setupError
+    || !ts.isIdentifier(setupError.name)
+    || !ts.isVariableDeclarationList(setupError.parent)
+    || !(setupError.parent.flags & ts.NodeFlags.Const)
+    || !ts.isVariableStatement(setupError.parent.parent)
+    || setupError.parent.parent.parent !== sourceFile
+    || staticValue(setupError.initializer, sourceFile)
+      !== 'Failed to create authenticated Identity fixture.'
+    || hasTargetBindingConflict(target, 'FIXTURE_SETUP_ERROR')) {
+    violations.push('fixture setup error must be one immutable generic constant');
+  }
+  if (target.body.statements.length !== 1
+    || !ts.isTryStatement(target.body.statements[0])) {
+    violations.push('fixture flow must be enclosed by one top-level try statement');
+    return [...new Set(violations)];
+  }
+  const tryStatement = target.body.statements[0];
+  if (!tryStatement.catchClause || tryStatement.finallyBlock) {
+    violations.push('fixture must replace every failure in one catch block');
+  } else {
+    const catchStatements = tryStatement.catchClause.block.statements;
+    const thrown = catchStatements.length === 1
+      && ts.isThrowStatement(catchStatements[0])
+      ? catchStatements[0].expression
+      : null;
+    if (tryStatement.catchClause.variableDeclaration
+      || !thrown
+      || !ts.isNewExpression(thrown)
+      || !ts.isIdentifier(thrown.expression)
+      || thrown.expression.text !== 'Error'
+      || thrown.arguments?.length !== 1
+      || !ts.isIdentifier(thrown.arguments[0])
+      || thrown.arguments[0].text !== 'FIXTURE_SETUP_ERROR') {
+      violations.push('fixture catch must throw only the fixed generic setup error');
+    }
+  }
+  if ((identityBinding && hasTargetBindingConflict(target, identityBinding))
+    || (credentialBinding && hasTargetBindingConflict(target, credentialBinding))
+    || (envBinding && hasTargetBindingConflict(target, envBinding))) {
+    violations.push('fixture imports must not be shadowed or reassigned');
+  }
+  if (['Error', 'Object', 'Number', 'encodeURIComponent', 'crypto'].some((name) =>
+    hasValueBinding(sourceFile, name) || hasValueWrite(sourceFile, name))) {
+    violations.push('fixture security globals must not be shadowed');
+  }
+  let loggingOwnership = loadedModules(sourceFile).some((specifier) =>
+    /(?:observability|log(?:ger|ging)?)/i.test(specifier));
+  visit(sourceFile, (node) => {
+    if (ts.isIdentifier(node) && node.text === 'console') loggingOwnership = true;
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      && propertyPath(node)?.includes('console')) {
+      loggingOwnership = true;
+    }
+    if (!ts.isCallExpression(node)) return;
+    const path = propertyPath(node.expression);
+    if (path?.[0] === 'console'
+      || (ts.isIdentifier(node.expression)
+        && /^(?:log|logger|debug|info|warn|error|trace)(?:[A-Z_].*)?$/i
+          .test(node.expression.text))) {
+      loggingOwnership = true;
+    }
+  });
+  if (loggingOwnership) violations.push('fixture must not own logging');
+
+  let nestedScopes = 0;
+  visit(target.body, (node) => {
+    if (node !== target.body && isNestedScope(node)) {
+      nestedScopes += 1;
+      return false;
+    }
+  });
+  if (nestedScopes !== 0) violations.push('fixture must not contain nested decoy scopes');
+
+  const envDbReferences = [];
+  visitOwnScope(target.body, (node) => {
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      && exactPropertyPath(node, [envBinding, 'DB'])) {
+      envDbReferences.push(node);
+    }
+  });
+  if (envDbReferences.length !== 2) {
+    violations.push('fixture must use env.DB only for bootstrap and Runtime creation');
+  }
+  const d1Calls = [];
+  const d1Aliases = boundMethodAliases(sourceFile, new Set(['prepare', 'batch']));
+  visitOwnScope(target.body, (node) => {
+    if (!ts.isVariableDeclaration(node) || !node.initializer) return;
+    const initializerPath = ts.isCallExpression(node.initializer)
+      ? propertyPath(node.initializer.expression)
+      : propertyPath(node.initializer);
+    if (ts.isIdentifier(node.name)
+      && initializerPath?.[0] === envBinding
+      && initializerPath[1] === 'DB'
+      && ['prepare', 'batch'].includes(initializerPath[2])) {
+      d1Aliases.add(node.name.text);
+    }
+    if (ts.isObjectBindingPattern(node.name)
+      && exactPropertyPath(node.initializer, [envBinding, 'DB'])) {
+      for (const element of node.name.elements) {
+        const method = element.propertyName
+          ? declaredPropertyName(element.propertyName, sourceFile)
+          : declaredPropertyName(element.name, sourceFile);
+        if (['prepare', 'batch'].includes(method) && ts.isIdentifier(element.name)) {
+          d1Aliases.add(element.name.text);
+        }
+      }
+    }
+  });
+  let aliasedD1Calls = 0;
+  const d1MemberReferences = [];
+  visitOwnScope(target.body, (node) => {
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const memberPath = propertyPath(node);
+      if (memberPath?.length === 3
+        && memberPath[0] === envBinding
+        && memberPath[1] === 'DB'
+        && ['prepare', 'batch'].includes(memberPath[2])) {
+        d1MemberReferences.push(node);
+      }
+    }
+    if (!ts.isCallExpression(node)) return;
+    const method = staticPropertyName(node.expression, sourceFile);
+    const path = propertyPath(node.expression);
+    const wrappedD1Method = path?.[0] === envBinding && path[1] === 'DB'
+      ? path[2]
+      : null;
+    if (['prepare', 'batch'].includes(method)
+      || ['prepare', 'batch'].includes(wrappedD1Method)) {
+      d1Calls.push(node);
+    }
+    if (ts.isIdentifier(node.expression) && d1Aliases.has(node.expression.text)) {
+      aliasedD1Calls += 1;
+    }
+  });
+  if (aliasedD1Calls !== 0 || d1Calls.length !== 1
+    || staticPropertyName(d1Calls[0]?.expression, sourceFile) !== 'prepare'
+    || !exactPropertyPath(d1Calls[0]?.expression.expression, [envBinding, 'DB'])
+    || typeof staticValue(d1Calls[0]?.arguments[0], sourceFile) !== 'string'
+    || !/\binsert\s+into\s+users\b/i.test(
+      staticValue(d1Calls[0]?.arguments[0], sourceFile) ?? '',
+  )) {
+    violations.push('fixture may own only one direct bootstrap user INSERT');
+  }
+  const bootstrapPrepare = d1Calls.length === 1 ? d1Calls[0] : null;
+  if (d1MemberReferences.length !== 1
+    || d1MemberReferences[0] !== bootstrapPrepare?.expression) {
+    violations.push('fixture must not alias or indirectly invoke D1 methods');
+  }
+  const bindProperty = bootstrapPrepare?.parent;
+  const bootstrapBind = bindProperty
+    && ts.isPropertyAccessExpression(bindProperty)
+    && bindProperty.expression === bootstrapPrepare
+    && bindProperty.name.text === 'bind'
+    && ts.isCallExpression(bindProperty.parent)
+    && bindProperty.parent.expression === bindProperty
+    ? bindProperty.parent
+    : null;
+  const inserted = bootstrapPrepare
+    ? enclosingDirectConstDeclaration(bootstrapPrepare, tryStatement.tryBlock)
+    : null;
+  const bootstrapUsername = bootstrapBind?.arguments[0];
+  const bootstrapName = bootstrapBind?.arguments[2];
+  const bootstrapRole = bootstrapBind?.arguments[3];
+  const bootstrapUsernameName = bootstrapUsername && ts.isIdentifier(bootstrapUsername)
+    ? bootstrapUsername.text
+    : null;
+  const bootstrapNameName = bootstrapName && ts.isIdentifier(bootstrapName)
+    ? bootstrapName.text
+    : null;
+  const bootstrapRoleName = bootstrapRole && ts.isIdentifier(bootstrapRole)
+    ? bootstrapRole.text
+    : null;
+  const bootstrapSql = bootstrapPrepare
+    ? staticValue(bootstrapPrepare.arguments[0], sourceFile)
+    : null;
+  if (!bootstrapBind
+    || bootstrapBind.arguments.length !== 4
+    || !inserted
+    || !bootstrapUsernameName
+    || !exactPropertyPath(
+      bootstrapBind.arguments[1],
+      [credentialBinding, 'currentHash'],
+    )
+    || !bootstrapNameName
+    || !bootstrapRoleName
+    || typeof bootstrapSql !== 'string'
+    || !/\bis_active\s*,\s*is_deleted\b/i.test(bootstrapSql)
+    || !/\bvalues\s*\(\s*\?\s*,\s*\?\s*,\s*\?\s*,\s*\?\s*,\s*1\s*,\s*0\s*\)/i
+      .test(bootstrapSql)) {
+    violations.push('fixture bootstrap must bind the canonical active user row');
+  }
+
+  let forbiddenSql = false;
+  visit(sourceFile, (node) => {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node)
+      || ts.isBinaryExpression(node)
+      || ts.isCallExpression(node)
+      || (ts.isIdentifier(node) && ts.isCallExpression(node.parent)
+        && node.parent.arguments.includes(node))) {
+      const value = staticValue(node, sourceFile);
+      if (typeof value === 'string'
+        && (/\b(?:select[\s\S]+?from|insert\s+into|update|delete\s+from)\s+sessions\b/i
+          .test(value)
+          || /\bdelete\s+from\s+audit_logs\b/i.test(value))) {
+        forbiddenSql = true;
+      }
+    }
+  });
+  if (forbiddenSql) violations.push('fixture owns forbidden session or audit SQL');
+
+  const identityCalls = [];
+  visitOwnScope(target.body, (node) => {
+    if (ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === identityBinding) {
+      identityCalls.push(node);
+    }
+  });
+  if (identityCalls.length !== 1) {
+    violations.push('fixture must invoke the imported identity factory exactly once');
+  }
+  const runtimeDeclarations = [];
+  visitOwnScope(tryStatement.tryBlock, (node) => {
+    const direct = directConstDeclaration(node);
+    if (!direct || !node.initializer || !ts.isCallExpression(node.initializer)
+      || !ts.isIdentifier(node.initializer.expression)
+      || node.initializer.expression.text !== identityBinding
+      || node.initializer.arguments.length !== 1
+      || !exactPropertyPath(node.initializer.arguments[0], [envBinding, 'DB'])
+      || direct.statement.parent !== tryStatement.tryBlock
+      || isStaticallyDead(node, target, sourceFile)) return;
+    runtimeDeclarations.push(direct);
+  });
+  if (runtimeDeclarations.length !== 1) {
+    violations.push('fixture must create one direct Runtime identity binding');
+    return [...new Set(violations)];
+  }
+  const runtime = runtimeDeclarations[0];
+  let runtimeDeclarationsByName = 0;
+  let runtimeReassigned = false;
+  visitOwnScope(target.body, (node) => {
+    if (ts.isVariableDeclaration(node) && bindsName(node.name, runtime.name)) {
+      runtimeDeclarationsByName += 1;
+    }
+    if (ts.isBinaryExpression(node)
+      && ts.isIdentifier(node.left)
+      && node.left.text === runtime.name
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      runtimeReassigned = true;
+    }
+  });
+  if (runtimeDeclarationsByName !== 1 || runtimeReassigned) {
+    violations.push('fixture Runtime binding must be unique and immutable');
+  }
+  const unexpectedRuntimeMembers = [];
+  const runtimeAliases = new Map();
+  const runtimeMemberReferences = new Map([
+    ['authenticate', []],
+    ['resolveSession', []],
+  ]);
+  visitOwnScope(target.body, (node) => {
+    if (ts.isVariableDeclaration(node) && node.initializer) {
+      const initializerPath = ts.isCallExpression(node.initializer)
+        ? propertyPath(node.initializer.expression)
+        : propertyPath(node.initializer);
+      if (ts.isIdentifier(node.name)
+        && initializerPath?.[0] === runtime.name
+        && typeof initializerPath[1] === 'string') {
+        runtimeAliases.set(node.name.text, initializerPath[1]);
+      }
+      if (ts.isIdentifier(node.name)
+        && exactPropertyPath(node.initializer, [runtime.name])) {
+        runtimeAliases.set(node.name.text, 'runtime-alias');
+        unexpectedRuntimeMembers.push('runtime-alias');
+      }
+      if (ts.isObjectBindingPattern(node.name)
+        && exactPropertyPath(node.initializer, [runtime.name])) {
+        for (const element of node.name.elements) {
+          const member = element.propertyName
+            ? declaredPropertyName(element.propertyName, sourceFile)
+            : declaredPropertyName(element.name, sourceFile);
+          if (member && ts.isIdentifier(element.name)) {
+            runtimeAliases.set(element.name.text, member);
+          }
+        }
+      }
+    }
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
+      const memberPath = propertyPath(node);
+      if (memberPath?.[0] === runtime.name
+        && typeof memberPath[1] === 'string'
+        && !['authenticate', 'resolveSession'].includes(memberPath[1])) {
+        unexpectedRuntimeMembers.push(memberPath[1]);
+      }
+      if (memberPath?.length === 2
+        && memberPath[0] === runtime.name
+        && runtimeMemberReferences.has(memberPath[1])) {
+        runtimeMemberReferences.get(memberPath[1]).push(node);
+      }
+    }
+    if (!ts.isCallExpression(node)) return;
+    const path = propertyPath(node.expression);
+    if (path?.[0] === runtime.name && typeof path[1] === 'string') {
+      if (!['authenticate', 'resolveSession'].includes(path[1]) || path.length !== 2) {
+        unexpectedRuntimeMembers.push(path[1]);
+      }
+    }
+    if (ts.isIdentifier(node.expression) && runtimeAliases.has(node.expression.text)) {
+      unexpectedRuntimeMembers.push(runtimeAliases.get(node.expression.text));
+    }
+  });
+  if (unexpectedRuntimeMembers.length !== 0) {
+    violations.push('fixture may call only authenticate and resolveSession Runtime intents');
+  }
+  if ([...runtimeMemberReferences.values()].some((references) =>
+    references.length !== 1
+      || !ts.isCallExpression(references[0].parent)
+      || references[0].parent.expression !== references[0])) {
+    violations.push('fixture Runtime intents must each have one direct call site');
+  }
+
+  function directAwaitedRuntimeCall(method) {
+    const calls = [];
+    visitOwnScope(target.body, (node) => {
+      if (ts.isCallExpression(node)
+        && exactPropertyPath(node.expression, [runtime.name, method])) {
+        calls.push(node);
+      }
+    });
+    if (calls.length !== 1) return null;
+    const call = calls[0];
+    if (!ts.isAwaitExpression(call.parent) || call.parent.expression !== call
+      || !ts.isVariableDeclaration(call.parent.parent)
+      || call.parent.parent.initializer !== call.parent
+      || isStaticallyDead(call, target, sourceFile)) return null;
+    const direct = directConstDeclaration(call.parent.parent);
+    return direct && direct.statement.parent === tryStatement.tryBlock
+      ? { ...direct, call }
+      : null;
+  }
+
+  const authentication = directAwaitedRuntimeCall('authenticate');
+  if (!authentication) {
+    violations.push('fixture must directly await one Runtime authenticate call');
+    return [...new Set(violations)];
+  }
+  const authenticationInput = unwrapTransparentExpression(authentication.call.arguments[0]);
+  if (authentication.call.arguments.length !== 1
+    || !bootstrapUsernameName
+    || !exactPropertyPath(
+      objectPropertyValue(authenticationInput, 'username', sourceFile),
+      [bootstrapUsernameName ?? '__missing__'],
+    )
+    || !exactPropertyPath(
+      objectPropertyValue(authenticationInput, 'password', sourceFile),
+      [credentialBinding, 'password'],
+    )) {
+    violations.push('fixture authenticate must use the canonical known password');
+  }
+
+  const directDeclarations = [];
+  visitOwnScope(tryStatement.tryBlock, (node) => {
+    const direct = directConstDeclaration(node);
+    if (direct?.statement.parent === tryStatement.tryBlock) {
+      directDeclarations.push(direct);
+    }
+  });
+  const matchingDeclaration = (path) => directDeclarations.filter(({ declaration }) =>
+    exactPropertyPath(declaration.initializer, path));
+  const users = matchingDeclaration([authentication.name, 'value', 'user']);
+  const rawTokens = matchingDeclaration([authentication.name, 'value', 'token']);
+  const userIds = directDeclarations.filter(({ declaration }) =>
+    ts.isCallExpression(declaration.initializer)
+      && ts.isIdentifier(declaration.initializer.expression)
+      && declaration.initializer.expression.text === 'Number'
+      && declaration.initializer.arguments.length === 1
+      && inserted
+      && exactPropertyPath(
+        declaration.initializer.arguments[0],
+        [inserted.name, 'meta', 'last_row_id'],
+      ));
+  if (users.length !== 1) violations.push('fixture user must come from authenticate');
+  if (rawTokens.length !== 1) violations.push('fixture rawToken must come from authenticate');
+  if (userIds.length !== 1) violations.push('fixture must bind the inserted user ID');
+
+  const authenticationRequirements = userIds.length === 1
+    && bootstrapUsernameName && bootstrapNameName && bootstrapRoleName
+    ? [
+        { kind: 'negated', path: [authentication.name, 'ok'] },
+        {
+          kind: 'inequality',
+          leftPath: [authentication.name, 'value', 'user', 'id'],
+          rightPath: [userIds[0].name],
+        },
+        {
+          kind: 'inequality',
+          leftPath: [authentication.name, 'value', 'user', 'username'],
+          rightPath: [bootstrapUsernameName],
+        },
+        {
+          kind: 'inequality',
+          leftPath: [authentication.name, 'value', 'user', 'name'],
+          rightPath: [bootstrapNameName],
+        },
+        {
+          kind: 'inequality',
+          leftPath: [authentication.name, 'value', 'user', 'role'],
+          rightPath: [bootstrapRoleName],
+        },
+      ]
+    : [];
+  const authenticationValidation = authenticationRequirements.length === 5
+    && users.length === 1
+    && tryStatement.tryBlock.statements.some((statement) =>
+      ts.isIfStatement(statement)
+        && statement.pos > authentication.statement.pos
+        && statement.pos < users[0].statement.pos
+        && !isStaticallyDead(statement, target, sourceFile)
+        && isDirectSetupSignalThrow(statement.thenStatement)
+        && exactFailureDisjunction(statement.expression, authenticationRequirements));
+  if (!authenticationValidation) {
+    violations.push('fixture must verify the authenticated user matches bootstrap input');
+  }
+
+  const resolution = directAwaitedRuntimeCall('resolveSession');
+  if (!resolution
+    || rawTokens.length !== 1
+    || resolution.call.arguments.length !== 1
+    || !ts.isIdentifier(resolution.call.arguments[0])
+    || resolution.call.arguments[0].text !== rawTokens[0].name) {
+    violations.push('fixture must resolve the authenticated raw token');
+  }
+  const principalRequirements = resolution && users.length === 1
+    ? [
+        { kind: 'negated', path: [resolution.name] },
+        {
+          kind: 'inequality',
+          leftPath: [resolution.name, 'userId'],
+          rightPath: [users[0].name, 'id'],
+        },
+        {
+          kind: 'inequality',
+          leftPath: [resolution.name, 'username'],
+          rightPath: [users[0].name, 'username'],
+        },
+        {
+          kind: 'inequality',
+          leftPath: [resolution.name, 'name'],
+          rightPath: [users[0].name, 'name'],
+        },
+        {
+          kind: 'inequality',
+          leftPath: [resolution.name, 'role'],
+          rightPath: [users[0].name, 'role'],
+        },
+      ]
+    : [];
+  const principalValidation = resolution && principalRequirements.length === 5
+    && tryStatement.tryBlock.statements.some((statement) =>
+      ts.isIfStatement(statement)
+        && statement.pos > resolution.statement.pos
+        && !isStaticallyDead(statement, target, sourceFile)
+        && isDirectSetupSignalThrow(statement.thenStatement)
+        && exactFailureDisjunction(statement.expression, principalRequirements));
+  if (!principalValidation) {
+    violations.push('fixture must verify principal and user agreement');
+  }
+
+  const returns = [];
+  visitOwnScope(tryStatement.tryBlock, (node) => {
+    if (ts.isReturnStatement(node) && node.parent === tryStatement.tryBlock) {
+      returns.push(node);
+    }
+  });
+  const returned = returns.length === 1 ? returns[0].expression : null;
+  const freezeCall = returned && ts.isCallExpression(returned)
+    && exactPropertyPath(returned.expression, ['Object', 'freeze'])
+    && returned.arguments.length === 1
+    ? returned
+    : null;
+  const aggregate = freezeCall
+    ? unwrapTransparentExpression(freezeCall.arguments[0])
+    : null;
+  const aggregateKeys = ts.isObjectLiteralExpression(aggregate)
+    ? aggregate.properties.map((property) => declaredPropertyName(property.name, sourceFile))
+    : [];
+  if (!ts.isObjectLiteralExpression(aggregate)
+    || aggregateKeys.join(',') !== 'user,principal,rawToken,cookie'
+    || users.length !== 1
+    || !exactPropertyPath(objectPropertyValue(aggregate, 'user', sourceFile), [users[0].name])
+    || !resolution
+    || !exactPropertyPath(
+      objectPropertyValue(aggregate, 'principal', sourceFile),
+      [resolution.name],
+    )
+    || rawTokens.length !== 1
+    || !exactPropertyPath(
+      objectPropertyValue(aggregate, 'rawToken', sourceFile),
+      [rawTokens[0].name],
+    )) {
+    violations.push('fixture must return the exact frozen authenticated aggregate');
+  }
+  const cookie = ts.isObjectLiteralExpression(aggregate)
+    ? objectPropertyValue(aggregate, 'cookie', sourceFile)
+    : null;
+  if (!cookie
+    || !cookie.getText(sourceFile).includes('isorder_sid=')
+    || !cookie.getText(sourceFile).includes(rawTokens[0]?.name ?? '__missing__')) {
+    violations.push('fixture cookie must encode the authenticated raw token');
+  }
+  return [...new Set(violations)];
+}
 test('production files keep credential ownership at the shared modules', () => {
   const seed = readScript('generate-admin-seed.mjs');
   assert.equal(loadedModules(parseSource(seed)).includes('node:crypto'), false);
@@ -1016,6 +1812,245 @@ test('the Worker keeps Identity SQL and credential ownership behind Runtime Iden
       directHelperCalls(route.callback, 'scheduleExpiredSessionCleanup').length,
       1,
       `${method.toUpperCase()} ${path} must schedule cleanup exactly once`,
+    );
+  }
+});
+test('general business sessions authenticate through the shared Identity fixture', () => {
+  const source = readFileSync(new URL('../test/api.integration.test.ts', import.meta.url), 'utf8');
+  const sourceFile = parseTypeScriptSource(source, 'test/api.integration.test.ts');
+  assert.deepEqual(sourceFile.parseDiagnostics, []);
+  assert.deepEqual(businessSessionFixtureViolations(sourceFile), []);
+});
+test('the shared Identity fixture owns only bootstrap user setup', () => {
+  const source = readFileSync(new URL('../test/helpers/identity-fixture.ts', import.meta.url), 'utf8');
+  const sourceFile = parseTypeScriptSource(source, 'test/helpers/identity-fixture.ts');
+  assert.deepEqual(sourceFile.parseDiagnostics, []);
+  assert.deepEqual(authenticatedIdentityFixtureViolations(sourceFile), []);
+});
+test('business fixture ownership rejects direct SQL, shadowing, and detached returns', () => {
+  const source = readFileSync(new URL('../test/api.integration.test.ts', import.meta.url), 'utf8');
+  const mutations = [
+    source.replace(
+      "from './helpers/identity-fixture';",
+      "from './helpers/not-identity-fixture';",
+    ),
+    source.replace(
+      '  return (await createAuthenticatedIdentity({ role })).rawToken;',
+      "  await env.DB.prepare('INSERT INTO ' + 'sessions (token) VALUES (?)');\n"
+        + '  return (await createAuthenticatedIdentity({ role })).rawToken;',
+    ),
+    source.replace(
+      '  return (await createAuthenticatedIdentity({ role })).rawToken;',
+      "  await createAuthenticatedIdentity({ role });\n  return 'manual-token';",
+    ),
+    source.replace(
+      '  return (await createAuthenticatedIdentity({ role })).rawToken;',
+      "  return 'manual-token';\n"
+        + '  return (await createAuthenticatedIdentity({ role })).rawToken;',
+    ),
+    source.replace(
+      'async function createSession(role:',
+      'async function createSession(createAuthenticatedIdentity: unknown, role:',
+    ),
+  ];
+  for (const [index, mutation] of mutations.entries()) {
+    assert.notEqual(mutation, source);
+    const sourceFile = parseTypeScriptSource(mutation, 'mutated-api.integration.test.ts');
+    assert.notDeepEqual(
+      businessSessionFixtureViolations(sourceFile),
+      [],
+      `business fixture mutation ${index + 1}`,
+    );
+  }
+});
+test('Identity fixture ownership rejects SQL, decoys, detached tokens, and extra intents', () => {
+  const source = readFileSync(new URL('../test/helpers/identity-fixture.ts', import.meta.url), 'utf8');
+  const mutations = [
+    source.replace("from '../../src/identity';", "from '../../src/not-identity';"),
+    source.replace(
+      'const authenticated = await runtime.authenticate',
+      'const authenticated = runtime.authenticate',
+    ),
+    source.replace(
+      'const principal = await runtime.resolveSession(rawToken);',
+      "const principal = await runtime.resolveSession('manual-token');",
+    ),
+    source.replace(
+      '    const runtime = identity(env.DB);',
+      "    await env.DB.prepare('INSERT INTO ' + 'sessions (token) VALUES (?)').run();\n"
+        + '    const runtime = identity(env.DB);',
+    ),
+    source.replace('      rawToken,\n      cookie:', "      rawToken: 'manual-token',\n      cookie:"),
+    source.replace(
+      '    const runtime = identity(env.DB);',
+      '    async function decoy() { return await identity(env.DB); }\n'
+        + '    const runtime = identity(env.DB);',
+    ),
+    source.replace(
+      '    const principal = await runtime.resolveSession(rawToken);',
+      '    await runtime.cleanupExpiredSessions();\n'
+        + '    const principal = await runtime.resolveSession(rawToken);',
+    ),
+    source.replace(
+      '    const principal = await runtime.resolveSession(rawToken);',
+      '    const cleanup = runtime.cleanupExpiredSessions.bind(runtime);\n'
+        + '    await cleanup();\n'
+        + '    const principal = await runtime.resolveSession(rawToken);',
+    ),
+    source.replace(
+      '    const principal = await runtime.resolveSession(rawToken);',
+      '    const { cleanupExpiredSessions } = runtime;\n'
+        + '    await cleanupExpiredSessions();\n'
+        + '    const principal = await runtime.resolveSession(rawToken);',
+    ),
+    source.replace(
+      '    const principal = await runtime.resolveSession(rawToken);',
+      '    const runtimeAlias = runtime;\n'
+        + '    await runtimeAlias.cleanupExpiredSessions();\n'
+        + '    const principal = await runtime.resolveSession(rawToken);',
+    ),
+    source.replace(
+      '    const principal = await runtime.resolveSession(rawToken);',
+      '    await Reflect.apply(runtime.authenticate, runtime, [{\n'
+        + '      username,\n'
+        + '      password: credentialKnownAnswer.password,\n'
+        + '    }]);\n'
+        + '    const principal = await runtime.resolveSession(rawToken);',
+    ),
+    source.replace(
+      '    const runtime = identity(env.DB);',
+      "    env.DB.prepare.call(env.DB, 'DELETE FROM sessions');\n"
+        + '    const runtime = identity(env.DB);',
+    ),
+    source.replace(
+      '    const runtime = identity(env.DB);',
+      '    const prepareSession = env.DB.prepare.bind(env.DB);\n'
+        + "    await prepareSession('DELETE FROM ' + 'sessions');\n"
+        + '    const runtime = identity(env.DB);',
+    ),
+    source.replace(
+      '    const runtime = identity(env.DB);',
+      '    Reflect.apply(env.DB.prepare, env.DB, [username]);\n'
+        + '    const runtime = identity(env.DB);',
+    ),
+    source.replace(
+      '    const runtime = identity(env.DB);',
+      '    const database = env.DB;\n'
+        + '    Reflect.apply(database.prepare, database, [\n'
+        + "      ['DELETE FROM ', 'sessions'].join(''),\n"
+        + '    ]);\n'
+        + '    const runtime = identity(env.DB);',
+    ),
+    source.replace(
+      '    const principal = await runtime.resolveSession(rawToken);',
+      '    console.error(credentialKnownAnswer.password);\n'
+        + '    const principal = await runtime.resolveSession(rawToken);',
+    ),
+    source.replace(
+      'const FIXTURE_SETUP_ERROR =',
+      'const Error = class extends globalThis.Error {\n'
+        + '  constructor(message: string) {\n'
+        + '    super(message + credentialKnownAnswer.password);\n'
+        + '  }\n'
+        + '};\n\nconst FIXTURE_SETUP_ERROR =',
+    ),
+    source.replace(
+      'const FIXTURE_SETUP_ERROR =',
+      'Error = new Proxy(globalThis.Error, {\n'
+        + '  construct(target, args) {\n'
+        + '    return Reflect.construct(target, [\n'
+        + '      String(args[0]) + credentialKnownAnswer.password,\n'
+        + '    ]);\n'
+        + '  },\n'
+        + '});\n\nconst FIXTURE_SETUP_ERROR =',
+    ),
+    source.replace(
+      'const FIXTURE_SETUP_ERROR =',
+      'Reflect.set(globalThis, \'Error\', new Proxy(globalThis.Error, {\n'
+        + '  construct(target, args) {\n'
+        + '    return Reflect.construct(target, [\n'
+        + '      String(args[0]) + credentialKnownAnswer.password,\n'
+        + '    ]);\n'
+        + '  },\n'
+        + '}));\n\nconst FIXTURE_SETUP_ERROR =',
+    ),
+    source.replace(
+      `    if (!authenticated.ok
+      || authenticated.value.user.id !== userId
+      || authenticated.value.user.username !== username
+      || authenticated.value.user.name !== name
+      || authenticated.value.user.role !== role) {
+      throw new Error();
+    }
+`,
+      '',
+    ).replace(
+      '    if (!principal || !matchesUser(principal, user)) throw new Error();',
+      '    if (!principal) throw new Error();',
+    ),
+    source.replace(
+      `    if (!authenticated.ok
+      || authenticated.value.user.id !== userId
+      || authenticated.value.user.username !== username
+      || authenticated.value.user.name !== name
+      || authenticated.value.user.role !== role) {
+      throw new Error();
+    }
+`,
+      `    if (false && (
+      !authenticated.ok
+      || authenticated.value.user.id !== userId
+      || authenticated.value.user.username !== username
+      || authenticated.value.user.name !== name
+      || authenticated.value.user.role !== role
+    )) {
+      throw new Error();
+    }
+`,
+    ),
+    source.replace(
+      `    if (!principal
+      || principal.userId !== user.id
+      || principal.username !== user.username
+      || principal.name !== user.name
+      || principal.role !== user.role) {
+      throw new Error();
+    }
+`,
+      '    if (!principal) throw new Error();\n',
+    ),
+    source.replace(
+      `    if (!principal
+      || principal.userId !== user.id
+      || principal.username !== user.username
+      || principal.name !== user.name
+      || principal.role !== user.role) {
+      throw new Error();
+    }
+`,
+      `    if (false && (
+      !principal
+      || principal.userId !== user.id
+      || principal.username !== user.username
+      || principal.name !== user.name
+      || principal.role !== user.role
+    )) {
+      throw new Error();
+    }
+`,
+    ),
+    source.replace(
+      '    throw new Error(FIXTURE_SETUP_ERROR);',
+      '    throw new Error(credentialKnownAnswer.password);',
+    ),
+  ];
+  for (const [index, mutation] of mutations.entries()) {
+    assert.notEqual(mutation, source);
+    const sourceFile = parseTypeScriptSource(mutation, 'mutated-identity-fixture.ts');
+    assert.notDeepEqual(
+      authenticatedIdentityFixtureViolations(sourceFile),
+      [],
+      `Identity fixture mutation ${index + 1}`,
     );
   }
 });
